@@ -152,9 +152,19 @@ def _fit(site_dir: str, image_path: str) -> dict:
     return d if isinstance(d, dict) and d.get("imageKey") == _resolved(image_path) else {}
 
 
-def _write_fit(site_dir: str, image_path: str, edges, corners: list[dict]) -> None:
+def _write_fit(site_dir: str, image_path: str, edges, corners: list[dict], camera: str) -> None:
     _write_json(_work(site_dir) / "fit.json", {"imagePath": image_path, "imageKey": _resolved(image_path),
-                                               "edgesM": list(edges), "corners": corners})
+                                               "edgesM": list(edges), "corners": corners, "camera": camera})
+
+
+def _camera_name(value, fit: dict | None = None) -> str:
+    """The site camera's name: ``value`` when given, else the one ``ps_fit_floor`` stored, else ``camera``."""
+    if value is None:
+        stored = (fit or {}).get("camera")
+        value = stored if isinstance(stored, str) and stored else CAMERA
+    if not isinstance(value, str) or not value.strip() or len(value) > 64 or not value.isprintable():
+        raise ValueError(f"camera must be a short name, got {value!r}")
+    return value.strip()
 
 
 def _screen_object(o: dict) -> dict:
@@ -222,13 +232,16 @@ apps = Apps()
     "Open a screen inside the chat to fix the floor on a photo: the photo with four orange corners the person "
     "can drag, and the floor solved from them drawn as a 1 m grid. imagePath is a photo file; edgesM the floor's "
     "two edge lengths in metres (1->2, 2->3); corners optional pixels {u, v}, four, going round; siteDir the "
-    "folder where the site file will be written. Objects already proposed for this photo are drawn too."))
-def ps_fit_floor(imagePath: str, edgesM: list[float], siteDir: str, corners: list[dict] | None = None) -> str:
+    "folder where the site file will be written; camera the camera's name in the site (default 'camera'; "
+    "ps_compare's camera). Objects already proposed for this photo are drawn too."))
+def ps_fit_floor(imagePath: str, edgesM: list[float], siteDir: str, corners: list[dict] | None = None,
+                 camera: str | None = None) -> str:
     edges = _edges(edgesM)
+    camera = _camera_name(camera)
     img = photo(imagePath)
     w, h = img["width"], img["height"]
     corners = [{"u": u, "v": v} for u, v in _corners(corners)] if corners else _default_corners(w, h)
-    _write_fit(siteDir, imagePath, edges, corners)
+    _write_fit(siteDir, imagePath, edges, corners, camera)
     objects = [_screen_object(o) for o in _proposal(siteDir, imagePath, w, h)["objects"]]
     return _json(_state(imagePath, img, edges, corners, siteDir, objects))
 
@@ -270,11 +283,13 @@ def ps_floor_solve(width: float, height: float, corners: list[dict], edgesM: lis
     "Cut out fixed objects the agent chose, from rough boxes, and show their outlines and names in the same "
     "screen. boxes: [{name, kind ('fixed' or 'target'), x0, y0, x1, y1}] in the photo's pixels. The cut-outs "
     "are kept under siteDir/.work; a second call adds to them (the same name is replaced). The floor corners "
-    "and lengths come from the earlier ps_fit_floor on this siteDir, or from edgesM and corners given here. "
+    "and lengths come from the earlier ps_fit_floor on this siteDir, or from edgesM and corners given here; so "
+    "does camera (the camera's name in the site, default 'camera'). "
     "The result lists the names SAM found no mask for in 'missing'."))
 def ps_objects_propose(imagePath: str, boxes: list[dict], siteDir: str, edgesM: list[float] | None = None,
-                       corners: list[dict] | None = None) -> str:
+                       corners: list[dict] | None = None, camera: str | None = None) -> str:
     fit = _fit(siteDir, imagePath)
+    camera = _camera_name(camera, fit)
     edges_value = edgesM if edgesM is not None else fit.get("edgesM")
     if edges_value is None:
         raise ValueError("the floor's edge lengths are not known: call ps_fit_floor first, or pass edgesM")
@@ -319,20 +334,23 @@ def ps_objects_propose(imagePath: str, boxes: list[dict], siteDir: str, edgesM: 
 
     pts = _corners(corners if corners is not None else fit.get("corners") or _default_corners(w, h))
     shown = [{"u": u, "v": v} for u, v in pts]
-    _write_fit(siteDir, imagePath, edges, shown)  # so the screen's decide finds the floor, whoever opened it
+    _write_fit(siteDir, imagePath, edges, shown, camera)  # so the screen's decide finds the floor, whoever opened it
     state = _state(imagePath, img, edges, shown, siteDir, [_screen_object(o) for o in proposal["objects"]])
     state["missing"] = missing
     return _json(state)
 
 
 @apps.tool(resource_uri=URI, visibility=["app"], description=(
-    "Keep the decided site: write siteDir/site.json from the floor and the objects the person kept (screen only)."))
+    "Keep the decided site: write siteDir/site.json from the floor and the objects the person kept (screen only). "
+    "camera is the camera's name in the site (default: the one ps_fit_floor was given, else 'camera')."))
 def ps_site_decide(siteDir: str, imagePath: str, corners: list[dict], edgesM: list[float], objects: list[dict],
-                   measured: bool = False) -> str:
+                   measured: bool = False, camera: str | None = None) -> str:
     try:
         px, edges = _corners(corners), _edges(edgesM)
-        if not _fit(siteDir, imagePath):
+        fit = _fit(siteDir, imagePath)
+        if not fit:
             return _json({"ok": False, "reason": "this picture was not opened for this site: use ps_fit_floor first"})
+        cam_name = _camera_name(camera, fit)
         if not isinstance(objects, list) or not all(isinstance(o, dict) for o in objects):
             return _json({"ok": False, "reason": "objects must be a list of {name, kind}"})
         names = [str(o.get("name", "")) for o in objects]
@@ -354,23 +372,23 @@ def ps_site_decide(siteDir: str, imagePath: str, corners: list[dict], edgesM: li
                 return _json({"ok": False, "reason": f"bad kind {kind!r} for {name!r}"})
             view = ObjectView(tuple(int(x) for x in s["box"]), s["mask_rle"],
                               [(float(u), float(v)) for u, v in s["ground_px"]])
-            site_objects.append(SiteObject(name, kind, {CAMERA: view}))
-        floor = Floor(CAMERA, px, edges, sol.corners_m)
+            site_objects.append(SiteObject(name, kind, {cam_name: view}))
+        floor = Floor(cam_name, px, edges, sol.corners_m)
         site = Site(
             id=Path(siteDir).expanduser().resolve().name or "site",
-            cameras={CAMERA: sol.camera}, floor=floor, objects=site_objects,
-            residual_px={CAMERA: float(sol.residual_px)}, confirmed_by_person=True,
+            cameras={cam_name: sol.camera}, floor=floor, objects=site_objects,
+            residual_px={cam_name: float(sol.residual_px)}, confirmed_by_person=True,
             dimensions="measured" if measured else "estimated",
             history=[{"at": datetime.now(timezone.utc).isoformat(), "what": "floor fixed and confirmed by a person",
                       "image": Path(imagePath).name, "mirrored": bool(sol.mirrored), "objects": names}])
-        site = locate_objects(site, CAMERA)
+        site = locate_objects(site, cam_name)
         path = Path(siteDir).expanduser() / "site.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         save_site(site, path)
     except (ValueError, OSError, KeyError, TypeError, AttributeError) as e:
         return _json({"ok": False, "reason": f"{type(e).__name__}: {e}"})
     return _json({"ok": True, "sitePath": str(path), "residualPx": round(float(sol.residual_px), 2),
-                  "mirrored": bool(sol.mirrored)})
+                  "mirrored": bool(sol.mirrored), "camera": cam_name})
 
 
 def ps_site_status(siteDir: str) -> str:
@@ -384,7 +402,8 @@ def ps_site_status(siteDir: str) -> str:
         site = load_site(path)
     except (ValueError, KeyError, OSError) as e:
         return _json({**empty, "error": str(e)})
-    return _json({"decided": site.confirmed_by_person, "residualPx": site.residual_px.get(CAMERA),
+    cam_name = site.floor.camera if site.floor is not None else next(iter(site.residual_px), CAMERA)
+    return _json({"decided": site.confirmed_by_person, "residualPx": site.residual_px.get(cam_name),
                   "objects": [o.name for o in site.objects], "dimensions": site.dimensions,
                   "confirmedByPerson": site.confirmed_by_person})
 
@@ -444,13 +463,15 @@ def _write_still(frame: np.ndarray, spec, start_s: float, cam: Camera) -> Path:
     "camera the site camera's name; a and b the two motions: a recording file[#label] or "
     "lerobot:<dataset_dir>#<episode>. labelA and labelB name them on the screen. video is the picture to draw on "
     "(a still or a recording); without it, A's own recording when A is a LeRobot episode, else the picture the "
-    "scene file names, else it asks for one. What the numbers cannot tell yet is listed with its reason."))
+    "scene file names, else it asks for one. videoCamera is the camera of A's LeRobot dataset to take that "
+    "recording from (default: the same name as camera; a site fixed in the chat screen calls its camera "
+    "'camera', so give the dataset's camera name here, such as 'side'). What the numbers cannot tell yet is "
+    "listed with its reason."))
 def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA: str | None = None,
-               labelB: str | None = None, video: str | None = None) -> str:
-    from ..cli import _check_motions, _load_motion, _reading
+               labelB: str | None = None, video: str | None = None, videoCamera: str | None = None) -> str:
+    from ..cli import _check_motions, _lerobot_picture, _load_motion, _own_episode_span, _reading
     from ..compare import compare
     from ..errors import InputError
-    from ..lerobot import lerobot_video
     from ..report import _header
     from ..scene import load_scene
 
@@ -469,8 +490,10 @@ def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA
     start_s = 0.0
     if video:
         spec = video
+        if a_lerobot is not None:  # A's own episode file given by name: the still is at A's episode's start
+            start_s = (_own_episode_span(a_lerobot, video, videoCamera) or (0.0, None))[0]
     elif a_lerobot is not None:
-        spec, start_s, _ = lerobot_video(*a_lerobot, camera)
+        spec, start_s, _ = _lerobot_picture(a_lerobot, videoCamera or camera, "videoCamera", bool(videoCamera))
     else:
         spec = _scene_picture(scenePath)
         if spec is None:

@@ -343,6 +343,24 @@ def test_a_lerobot_episode_gives_its_own_recording_frame_at_the_episodes_start(w
     assert abs(int(saved[2, 2, 0]) - 120) < 16  # file time 1.0 s = frame 30 = grey 120; frame 0 would be grey 0
 
 
+def test_video_camera_names_the_datasets_camera_apart_from_the_site_camera(world, monkeypatch):
+    """A site fixed in the chat screen calls its camera 'camera'; the dataset's camera is 'side'."""
+    import physical_sandbox.lerobot as lerobot
+    from mini_lerobot import make_dataset
+    tmp_path = world["dir"]
+    monkeypatch.setitem(lerobot.JOINT_MAP, "turn", (-100.0, 100.0, 1))
+    ds = make_dataset(tmp_path / "ds", ["turn"], [np.linspace(0, 50, 9).reshape(-1, 1),
+                                                  np.linspace(0, -50, 12).reshape(-1, 1)], size=(W, H))
+    with pytest.raises(ValueError, match="videoCamera"):  # the dataset has no camera 'camera'
+        compare(world, a=f"lerobot:{ds}#1", b=f"lerobot:{ds}#0", video=None)
+    out = compare(world, a=f"lerobot:{ds}#1", b=f"lerobot:{ds}#0", video=None, videoCamera="side")
+    assert abs(int(cv2.imread(out["imagePath"])[2, 2, 0]) - 36) < 12  # episode 1 starts at frame 9 (grey 36)
+    # the episode's own file named as the video: the still is still at the episode's start
+    own = ds / "videos" / "observation.images.side" / "chunk-000" / "file-000.mp4"
+    out = compare(world, a=f"lerobot:{ds}#1", b=f"lerobot:{ds}#0", video=str(own))
+    assert abs(int(cv2.imread(out["imagePath"])[2, 2, 0]) - 36) < 12
+
+
 # ---- two separate starts of the server ----
 
 def test_a_separate_start_answers_model_and_picture_parts_from_the_disk(world):

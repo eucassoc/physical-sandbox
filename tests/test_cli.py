@@ -421,3 +421,84 @@ def test_lerobot_start_and_cap_are_passed_to_the_renderer(fake_lerobot, monkeypa
     # an explicit --video is the person's own picture: from its start, no cap
     assert main(base + ["--a", f"lerobot:{data}#4", "--b", f"lerobot:{data}#5", "--video", str(still)]) == 0
     assert calls[-1]["start_s"] == 0.0 and calls[-1]["duration"] is None
+
+
+# ---- a site fixed in the chat screen, with a LeRobot motion (a small dataset written here) ----
+
+from mini_lerobot import make_dataset  # noqa: E402
+
+
+@pytest.fixture
+def screen_site_and_dataset(files, monkeypatch):
+    """A site decided through the MCP screen's tools (its camera is called 'camera'), a scene on it, and a small
+    LeRobot dataset whose only camera is 'side' (episode 0: 9 frames, episode 1: 12 frames, at 30 fps)."""
+    server = pytest.importorskip("physical_sandbox.mcp.server")
+    import physical_sandbox.lerobot as lerobot
+    tmp_path, _, _ = files
+    monkeypatch.setitem(lerobot.JOINT_MAP, "turn", (-100.0, 100.0, 1))
+    cam = look_at((-3.0, 1.0, 2.0), target=(1.0, 0.0, 0.0), size=(W, H), f=250.0)
+    corners = [{"u": float(u), "v": float(v)} for u, v in
+               cam.project(np.array([[0, 0, 0], [4, 0, 0], [4, 3, 0], [0, 3, 0]], float))]
+    photo = tmp_path / "floor.png"
+    cv2.imwrite(str(photo), np.full((H, W, 3), 100, np.uint8))
+    site_dir = tmp_path / "screen-site"
+    server.ps_fit_floor(str(photo), [4.0, 3.0], str(site_dir), corners)
+    decided = json.loads(server.ps_site_decide(str(site_dir), str(photo), corners, [4.0, 3.0], [], False))
+    assert decided["ok"] and decided["camera"] == "camera"
+    site = load_site(site_dir / "site.json")
+    placed = PlacedMachine(machine=load_machine(tmp_path / "blocks.urdf"), urdf=str(tmp_path / "blocks.urdf"),
+                           x=1.0, y=1.0, yaw=0.0)
+    save_scene(Scene(site=site, machines={"blocks": placed}), tmp_path / "screen-scene.json")
+    ds = make_dataset(tmp_path / "ds", ["turn"], [np.linspace(0, 50, 9).reshape(-1, 1),
+                                                  np.linspace(0, -50, 12).reshape(-1, 1)], size=(W, H))
+    return tmp_path, site_dir, ds
+
+
+def frames_of(path):
+    cap = cv2.VideoCapture(str(path))
+    out = []
+    while True:
+        ok, f = cap.read()
+        if not ok:
+            return out
+        out.append(f)
+
+
+def screen_compare(tmp_path, site_dir, ds, a, b, extra=()):
+    return main(["compare", "--site", str(site_dir / "site.json"), "--scene", str(tmp_path / "screen-scene.json"),
+                 "--camera", "camera", "--a", f"lerobot:{ds}#{a}", "--b", f"lerobot:{ds}#{b}",
+                 "--out", str(tmp_path / "out"), *extra])
+
+
+def test_a_screen_decided_site_runs_with_a_lerobot_motion_through_lerobot_camera(screen_site_and_dataset, capsys):
+    tmp_path, site_dir, ds = screen_site_and_dataset
+    code = screen_compare(tmp_path, site_dir, ds, 1, 0, ["--lerobot-camera", "side"])
+    assert code == 0, capsys.readouterr().err
+    frames = frames_of(tmp_path / "out" / "replay.mp4")
+    # episode 1 is frames 9..20 of the side recording; its 12 samples span 11 / 30 s: 11 frames from grey 4 * 9
+    assert len(frames) == 11
+    assert abs(int(frames[0][2, 2, 0]) - 36) < 12
+
+
+def test_without_lerobot_camera_the_site_cameras_name_is_tried_and_the_message_says_what_to_give(
+        screen_site_and_dataset, capsys):
+    tmp_path, site_dir, ds = screen_site_and_dataset
+    code = screen_compare(tmp_path, site_dir, ds, 1, 0)
+    err = capsys.readouterr().err
+    assert code == 2 and "--lerobot-camera" in err and "side" in err
+    assert err.strip().count("\n") == 0
+
+
+def test_an_explicit_video_that_is_the_episodes_own_file_still_starts_and_stops_at_the_episode(
+        screen_site_and_dataset, capsys):
+    tmp_path, site_dir, ds = screen_site_and_dataset
+    own = ds / "videos" / "observation.images.side" / "chunk-000" / "file-000.mp4"
+    for extra in (["--video", str(own)], ["--video", str(own), "--lerobot-camera", "side"]):
+        code = screen_compare(tmp_path, site_dir, ds, 1, 0, extra)
+        assert code == 0, capsys.readouterr().err
+        frames = frames_of(tmp_path / "out" / "replay.mp4")
+        assert len(frames) == 11 and abs(int(frames[0][2, 2, 0]) - 36) < 12
+    # A is episode 0 (9 frames) and B runs 12: cut at A's episode, as without --video
+    assert screen_compare(tmp_path, site_dir, ds, 0, 1, ["--video", str(own)]) == 0
+    assert len(frames_of(tmp_path / "out" / "replay.mp4")) == 9
+    assert "replay cut at 0.30 s" in capsys.readouterr().out

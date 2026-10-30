@@ -83,9 +83,41 @@ def _check_motions(scene, a, b) -> None:
         raise InputError(f"the motions have different joints: {list(a.joint_names)} and {list(b.joint_names)}")
 
 
+def _lerobot_picture(a_lerobot, camera: str, flag: str, given: bool) -> tuple:
+    """(mp4, start_s, cap_s) of A's own recording through the dataset camera ``camera``. ``flag`` names the option
+    that picks the dataset camera, for the message when the dataset has no camera of that name (``given`` says
+    whether the caller named it, or it fell back to the site camera's name)."""
+    from .errors import InputKeyError
+    from .lerobot import lerobot_video
+
+    try:
+        video, start_s, to_s = lerobot_video(*a_lerobot, camera)
+    except InputKeyError as e:
+        hint = "" if given else f" (the site camera's name was used: name the dataset's camera with {flag})"
+        raise InputKeyError(f"{e}{hint}") from e
+    return video, start_s, to_s - start_s  # the file goes on into the next episode: stop where A's episode ends
+
+
+def _own_episode_span(a_lerobot, video, camera: str | None):
+    """When an explicit picture is A's own episode file: (start_s, cap_s) of that episode in it, else None.
+    ``camera`` names the dataset camera when given; otherwise each of the dataset's cameras is tried."""
+    from .lerobot import lerobot_cameras, lerobot_video
+
+    given = Path(str(video)).expanduser()
+    if not given.is_file():
+        return None
+    try:
+        for name in [camera] if camera else lerobot_cameras(a_lerobot[0]):
+            path, start_s, to_s = lerobot_video(*a_lerobot, name)
+            if Path(path).resolve() == given.resolve():
+                return start_s, to_s - start_s
+    except (InputError, KeyError, OSError, ValueError):  # not a dataset this can read: just the picture
+        return None
+    return None
+
+
 def _cmd_compare(args) -> int:
     from .compare import compare
-    from .lerobot import lerobot_video
     from .render import render_overlay
     from .report import write_report
     from .scene import load_scene
@@ -102,9 +134,11 @@ def _cmd_compare(args) -> int:
     start_s, cap_s = 0.0, None
     if args.video:
         video = args.video
+        if a_lerobot is not None:  # A's own episode file given by name: still only A's episode of it
+            start_s, cap_s = _own_episode_span(a_lerobot, video, args.lerobot_camera) or (0.0, None)
     elif a_lerobot is not None:
-        video, start_s, to_s = lerobot_video(*a_lerobot, args.camera)
-        cap_s = to_s - start_s  # the file goes on into the next episode: stop where A's episode ends
+        video, start_s, cap_s = _lerobot_picture(a_lerobot, args.lerobot_camera or args.camera,
+                                                 "--lerobot-camera", bool(args.lerobot_camera))
     else:
         raise InputError("give --video: the site file keeps no picture, and A is not a LeRobot episode "
                          "whose recording could be used")
@@ -205,7 +239,9 @@ def _parser() -> argparse.ArgumentParser:
     c = sub.add_parser("compare", help="gap numbers, a graph and a replay video for two motions")
     c.add_argument("--site", required=True, help="the site file")
     c.add_argument("--scene", required=True, help="the scene file (where each machine stands)")
-    c.add_argument("--camera", required=True, help="the site camera's name (also the LeRobot camera name)")
+    c.add_argument("--camera", required=True, help="the site camera's name")
+    c.add_argument("--lerobot-camera", help="the camera of A's LeRobot dataset whose recording is drawn on "
+                                            "(default: the same name as --camera)")
     c.add_argument("--a", required=True, help="motion A: a recording file[#label] or lerobot:<dir>#<episode>")
     c.add_argument("--b", required=True, help="motion B: a recording file[#label] or lerobot:<dir>#<episode>")
     c.add_argument("--out", required=True, help="the output folder")

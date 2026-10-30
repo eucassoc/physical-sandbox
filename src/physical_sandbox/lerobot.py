@@ -150,6 +150,19 @@ def read_episode(dataset_dir, episode: int, *, machine, key: str, label, machine
         source="lerobot", label=label if label is not None else f"{dataset_dir.name} episode {episode}")
 
 
+_IMAGES = "observation.images."
+
+
+def _cameras(info: dict) -> list:
+    return sorted(k[len(_IMAGES):] for k, f in info["features"].items()
+                  if k.startswith(_IMAGES) and isinstance(f, dict) and f.get("dtype") == "video")
+
+
+def lerobot_cameras(dataset_dir) -> list:
+    """The short names of the dataset's cameras (``side`` for ``observation.images.side``), sorted."""
+    return _cameras(_info(Path(dataset_dir).expanduser()))
+
+
 def lerobot_video(dataset_dir, episode: int, camera: str) -> tuple:
     """(mp4 path, from_timestamp, to_timestamp) of ``camera`` for ``episode``.
 
@@ -157,13 +170,11 @@ def lerobot_video(dataset_dir, episode: int, camera: str) -> tuple:
     """
     dataset_dir = Path(dataset_dir).expanduser()
     info = _info(dataset_dir)
-    prefix = "observation.images."
-    cameras = sorted(k[len(prefix):] for k, f in info["features"].items()
-                     if k.startswith(prefix) and f.get("dtype") == "video")
-    short = camera[len(prefix):] if camera.startswith(prefix) else camera
+    cameras = _cameras(info)
+    short = camera[len(_IMAGES):] if camera.startswith(_IMAGES) else camera
     if short not in cameras:
         raise InputKeyError(f"the dataset has no camera {camera!r}; its cameras are {', '.join(cameras)}")
-    vkey = prefix + short
+    vkey = _IMAGES + short
     row = _episode_row(dataset_dir, episode)
     path = _dataset_file(dataset_dir, info, "video_path", {
         "video_key": vkey, "chunk_index": _index(row, f"videos/{vkey}/chunk_index"),

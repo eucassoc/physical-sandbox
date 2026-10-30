@@ -255,6 +255,25 @@ def test_decide_writes_a_site_a_person_confirmed(env, monkeypatch):
     assert site.history and "at" in site.history[0] and "what" in site.history[0]
 
 
+def test_the_camera_name_given_to_fit_floor_is_the_one_the_site_gets(env, monkeypatch):
+    fake_segmenter(monkeypatch, {"pole"})
+    server.ps_fit_floor(env["image"], EDGES, env["site"], CORNERS, camera="side")
+    server.ps_objects_propose(env["image"], boxes("pole"), env["site"])  # keeps the name it found
+    out = json.loads(server.ps_site_decide(env["site"], env["image"], CORNERS, EDGES, [{"name": "pole"}], False))
+    assert out["ok"] and out["camera"] == "side"
+    site = load_site(out["sitePath"])
+    assert set(site.cameras) == {"side"} and site.floor.camera == "side" and set(site.residual_px) == {"side"}
+    assert set(site.objects[0].views) == {"side"}
+    assert json.loads(server.ps_site_status(env["site"]))["residualPx"] < 0.5
+    # the decide call may name it too, and a bad name is refused with a reason
+    out = json.loads(server.ps_site_decide(env["site"], env["image"], CORNERS, EDGES, [], False, camera="front"))
+    assert set(load_site(out["sitePath"]).cameras) == {"front"}
+    bad = json.loads(server.ps_site_decide(env["site"], env["image"], CORNERS, EDGES, [], False, camera=" "))
+    assert bad["ok"] is False and "camera" in bad["reason"]
+    with pytest.raises(ValueError, match="camera"):
+        server.ps_fit_floor(env["image"], EDGES, env["site"], CORNERS, camera="")
+
+
 def test_decide_marks_measured_lengths(env, monkeypatch):
     propose(env, monkeypatch, "pole")
     out = json.loads(server.ps_site_decide(env["site"], env["image"], CORNERS, EDGES, [], True))

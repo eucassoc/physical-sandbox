@@ -45,7 +45,7 @@ def test_hand_placed_corners_leave_a_residual_like_the_old_solve():
     sol = solve_floor(2020, 1108, corners, (3.5, 6.8))
     # the old JS solve left 26.8 px; the spike's OpenCV fit left 37 px as the largest per-axis error,
     # which is 40.8 px as the largest Euclidean distance (what residual_px reports)
-    assert sol.reason is None and sol.residual_px < 45
+    assert sol.reason is None and sol.residual_px == pytest.approx(40.8, abs=1.0)
 
 
 def test_corners_going_round_the_other_way_are_mirrored():
@@ -62,3 +62,29 @@ def test_corners_going_round_the_other_way_are_mirrored():
 def test_a_floor_seen_square_on_is_refused():
     sol = solve_floor(2020, 1108, [(500, 800), (1500, 800), (1500, 300), (500, 300)], (3.5, 6.8))
     assert sol.reason == 'flat' and sol.camera is None and sol.residual_px is None
+
+
+def test_a_floor_that_would_lie_behind_the_camera_is_refused():
+    # A convex quad found by a seeded random search: the fit is exact-looking but puts floor corners
+    # behind the camera, where the pixels are undefined (this used to come back accepted with a NaN residual).
+    corners = [(5.1, 76.0), (1683.4, 309.8), (1546.7, 534.8), (1233.7, 569.6)]
+    sol = solve_floor(2020, 1108, corners, (3.5, 6.8))
+    assert sol.reason == 'flat' and sol.camera is None and sol.residual_px is None
+
+
+@pytest.mark.parametrize("f, tvec", [(9000, (-1.5, 0.8, 60.0)), (380, (-1.5, 0.8, 3.0))])
+def test_a_field_of_view_outside_15_to_120_degrees_is_refused(f, tvec):
+    # f=9000 is about 13 degrees wide, f=380 about 139 degrees
+    sol = solve_floor(2020, 1108, project_rect(f=f, rvec=(1.9, 0.15, -0.1), tvec=tvec), (3.5, 6.8))
+    assert sol.reason == 'flat' and sol.camera is None
+
+
+def test_no_accepted_solution_has_a_nan_residual():
+    rng = np.random.default_rng(0)
+    for _ in range(300):
+        q = rng.uniform([0, 0], [2020, 1108], (4, 2))
+        sol = solve_floor(2020, 1108, [tuple(p) for p in q], (3.5, 6.8))
+        if sol.camera is not None:
+            assert np.isfinite(sol.residual_px)
+            depth = (sol.corners_m @ sol.camera.R.T + sol.camera.t)[:, 2]
+            assert (depth > 0).all()

@@ -55,6 +55,7 @@ def _solve(width, height, px, world):
     flags = (cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_PRINCIPAL_POINT | cv2.CALIB_FIX_ASPECT_RATIO
              | cv2.CALIB_ZERO_TANGENT_DIST | cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3)
     K0 = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1]])
+    # (calibrateCamera's own error value is unused: the residual is recomputed below as a Euclidean maximum.)
     _, K, _, rvecs, tvecs = cv2.calibrateCamera(
         [world.astype(np.float32)], [px.astype(np.float32)], (int(width), int(height)), K0, np.zeros(5), flags=flags)
     fov = np.degrees(2 * np.arctan(width / (2 * K[0, 0])))
@@ -62,8 +63,13 @@ def _solve(width, height, px, world):
         return None, None
     R, _ = cv2.Rodrigues(rvecs[0])
     t = tvecs[0].reshape(3)
+    # Every floor corner must be in front of the camera; a fit that puts one behind it is no solution.
+    if not ((world @ R.T + t)[:, 2] > 0).all():
+        return None, None
     camera = Camera(width, height, K, np.zeros(5), R, t)
     residual = float(np.linalg.norm(camera.project(world) - px, axis=1).max())
+    if not np.isfinite(residual):
+        return None, None
     return camera, residual
 
 

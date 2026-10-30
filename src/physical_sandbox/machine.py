@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import shutil
+import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,46 +74,74 @@ def _ascii_stl_to_binary(data: bytes) -> bytes:
 
 
 def _prepare(urdf_path: Path) -> Path:
-    """Write the rewritten URDF (mesh copies, MuJoCo compiler settings) into the cache; return it."""
-    st = urdf_path.stat()
-    key = hashlib.sha1(f"{urdf_path}|{st.st_mtime_ns}".encode()).hexdigest()
-    out = _cache_root() / "meshes" / key
-    out.mkdir(parents=True, exist_ok=True)
+    """Return the rewritten URDF (mesh copies, MuJoCo compiler settings) in the cache.
 
+    The folder is named by a hash of the URDF and of every mesh file it uses (path, mtime, size),
+    so an edit to any of them gives a new folder. A complete folder is reused as it is; a new one
+    is built beside it under a temporary name and renamed into place in one step, so another
+    process (the MCP server, the CLI) never sees a half-written folder.
+    """
     tree = ET.parse(urdf_path)
     root = tree.getroot()
-    copies: dict[Path, str] = {}
-    used: set[str] = set()
+    st = urdf_path.stat()
+    key = hashlib.sha1()
+    key.update(f"{urdf_path}|{st.st_mtime_ns}|{st.st_size}".encode())
+    srcs: dict[str, Path] = {}  # mesh reference as written -> resolved file
     for mesh in root.iter("mesh"):
         name = mesh.get("filename")
-        if not name:
-            continue
-        src = _find_mesh(urdf_path.parent, name).resolve()
-        if src not in copies:
-            stem, suffix = src.stem, src.suffix.lower()
-            fname, n = f"{stem}{suffix}", 1
-            while fname in used or fname.lower() in used:  # MuJoCo names meshes by file stem
-                n += 1
-                fname = f"{stem}_{n}{suffix}"
-            used.add(fname)
-            data = src.read_bytes()
-            if suffix == ".obj":
-                data = _strip_mtl(data)
-            elif suffix == ".stl":
-                data = _ascii_stl_to_binary(data)
-            (out / fname).write_bytes(data)
-            copies[src] = fname
-        mesh.set("filename", copies[src])
+        if name and name not in srcs:
+            srcs[name] = _find_mesh(urdf_path.parent, name).resolve()
+    for src in dict.fromkeys(srcs.values()):
+        s = src.stat()
+        key.update(f"|{src}|{s.st_mtime_ns}|{s.st_size}".encode())
 
-    for old in root.findall("mujoco"):
-        root.remove(old)
-    mj = ET.Element("mujoco")
-    ET.SubElement(mj, "compiler", meshdir=".", balanceinertia="true",
-                  discardvisual="false", fusestatic="false")
-    root.insert(0, mj)
-    dst = out / urdf_path.name
-    tree.write(dst, encoding="utf-8", xml_declaration=True)
-    return dst
+    base = _cache_root() / "meshes"
+    final = base / key.hexdigest()
+    if (final / urdf_path.name).is_file():
+        return final / urdf_path.name
+
+    base.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=base))
+    try:
+        copies: dict[Path, str] = {}
+        used: set[str] = set()  # MuJoCo names a mesh by its file stem, compared without case
+        for mesh in root.iter("mesh"):
+            name = mesh.get("filename")
+            if not name:
+                continue
+            src = srcs[name]
+            if src not in copies:
+                stem, suffix = src.stem, src.suffix.lower()
+                fname, n = f"{stem}{suffix}", 1
+                while Path(fname).stem.lower() in used:
+                    n += 1
+                    fname = f"{stem}_{n}{suffix}"
+                used.add(Path(fname).stem.lower())
+                data = src.read_bytes()
+                if suffix == ".obj":
+                    data = _strip_mtl(data)
+                elif suffix == ".stl":
+                    data = _ascii_stl_to_binary(data)
+                (tmp / fname).write_bytes(data)
+                copies[src] = fname
+            mesh.set("filename", copies[src])
+
+        for old in root.findall("mujoco"):
+            root.remove(old)
+        mj = ET.Element("mujoco")
+        ET.SubElement(mj, "compiler", meshdir=".", balanceinertia="true",
+                      discardvisual="false", fusestatic="false")
+        root.insert(0, mj)
+        tree.write(tmp / urdf_path.name, encoding="utf-8", xml_declaration=True)
+        try:
+            os.replace(tmp, final)
+        except OSError:
+            # another process renamed its folder into place first: use theirs, drop ours
+            if not (final / urdf_path.name).is_file():
+                raise
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return final / urdf_path.name
 
 
 def _urdf_limits(urdf_path: Path) -> dict[str, tuple[float, float]]:

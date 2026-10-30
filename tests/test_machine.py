@@ -233,3 +233,83 @@ def test_so101_joints_limits_and_zero_pose_tip(cache):
     # no material line survives in any cached copy
     for p in (cache / "meshes").rglob("*.obj"):
         assert "usemtl" not in p.read_text()
+
+
+def cached_obj_texts(cache):
+    return sorted(p.read_text() for p in (cache / "meshes").rglob("*.obj"))
+
+
+def test_editing_only_a_mesh_file_uses_the_new_mesh(tmp_path, cache):
+    urdf = write_tiny(tmp_path)
+    first = load_machine(urdf)
+    old_verts = first.model.mesh_vert.copy()
+    # a bigger tetrahedron, the URDF itself untouched
+    (tmp_path / "part.obj").write_text(OBJ_WITH_MTL.replace("0.05", "0.5"))
+    second = load_machine(urdf)
+    assert second.model.mesh_vert.shape == old_verts.shape
+    assert np.abs(second.model.mesh_vert).max() > 5 * np.abs(old_verts).max()
+    assert "0.5" in " ".join(cached_obj_texts(cache)) and len(cached_obj_texts(cache)) == 2
+
+
+def test_repeated_load_reuses_the_cache_folder_without_rewriting(tmp_path, cache):
+    urdf = write_tiny(tmp_path)
+    load_machine(urdf)
+    files = sorted(p for p in (cache / "meshes").rglob("*") if p.is_file())
+    stamps = [p.stat().st_mtime_ns for p in files]
+    assert len(files) == 2  # the URDF and one mesh
+    load_machine(urdf)
+    assert sorted(p for p in (cache / "meshes").rglob("*") if p.is_file()) == files
+    assert [p.stat().st_mtime_ns for p in files] == stamps
+    # no temporary folders are left behind
+    assert not [p for p in (cache / "meshes").iterdir() if p.name.startswith(".tmp-")]
+
+
+def test_same_stem_in_different_folders_gives_distinct_meshes(tmp_path, cache):
+    for d in ("a", "b"):
+        (tmp_path / d).mkdir()
+    (tmp_path / "a" / "part.stl").write_text(STL)
+    (tmp_path / "b" / "part.obj").write_text(OBJ_WITH_MTL.replace("0.05", "0.2"))
+    urdf = tmp_path / "two.urdf"
+    urdf.write_text(URDF.format(mesh="a/part.stl").replace(
+        "</robot>",
+        '<link name="b"><inertial><mass value="0.1"/>'
+        '<inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/></inertial>'
+        '<visual><geometry><mesh filename="b/part.obj"/></geometry></visual></link>'
+        '<joint name="jb" type="fixed"><parent link="base"/><child link="b"/></joint></robot>'))
+    m = load_machine(urdf)
+    assert m.model.nmesh == 2
+    sizes = [np.abs(m.model.mesh_vert[m.model.mesh_vertadr[i]:][:m.model.mesh_vertnum[i]]).max()
+             for i in range(2)]
+    # MuJoCo recentres meshes, so compare the sizes: the two shapes are 0.05 and 0.2 tetrahedra
+    assert max(sizes) / min(sizes) == pytest.approx(4.0, rel=1e-3)
+
+
+def test_case_variants_of_a_stem_do_not_collide(tmp_path, cache):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "Part.obj").write_text(OBJ_WITH_MTL)
+    (tmp_path / "b" / "part.obj").write_text(OBJ_WITH_MTL.replace("0.05", "0.2"))
+    urdf = tmp_path / "two.urdf"
+    urdf.write_text(URDF.format(mesh="a/Part.obj").replace(
+        "</robot>",
+        '<link name="b"><inertial><mass value="0.1"/>'
+        '<inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/></inertial>'
+        '<visual><geometry><mesh filename="b/part.obj"/></geometry></visual></link>'
+        '<joint name="jb" type="fixed"><parent link="base"/><child link="b"/></joint></robot>'))
+    assert load_machine(urdf).model.nmesh == 2
+
+
+def test_two_processes_loading_at_once_both_get_a_whole_folder(tmp_path, cache):
+    import multiprocessing as mp
+    urdf = write_tiny(tmp_path)
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(3) as pool:
+        out = pool.starmap(_load_in_child, [(str(urdf), str(cache))] * 6)
+    assert all(abs(x - 0.3) < 1e-9 for x in out)
+    assert not [p for p in (cache / "meshes").iterdir() if p.name.startswith(".tmp-")]
+    assert len([p for p in (cache / "meshes").iterdir()]) == 1
+
+
+def _load_in_child(urdf, cache_dir):
+    os.environ["PS_CACHE_DIR"] = cache_dir
+    return float(load_machine(urdf).fk(np.array([0.0]))[0])

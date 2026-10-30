@@ -147,3 +147,72 @@ def test_an_episode_survives_a_recording(machine, tmp_path):
     (back,) = load_record(tmp_path / "r.json")
     assert np.array_equal(back.q, m.q) and np.array_equal(back.t, m.t)
     assert back.source == "lerobot" and back.label == m.label
+
+
+# ---- a crafted dataset: the paths its metadata names stay inside it ----
+
+from types import SimpleNamespace  # noqa: E402
+
+from physical_sandbox.errors import InputError  # noqa: E402
+from mini_lerobot import make_dataset  # noqa: E402
+
+ONE_JOINT = SimpleNamespace(joint_names=["shoulder_pan"], limits=np.array([[-1.0, 1.0]]))
+
+
+def mini(tmp_path, **kw):
+    return make_dataset(tmp_path / "ds", ["shoulder_pan"], [np.linspace(-100, 100, 5).reshape(-1, 1)], **kw)
+
+
+def test_a_small_dataset_reads_and_its_video_is_inside_it(tmp_path):
+    ds = mini(tmp_path)
+    m = motion_from_lerobot(ds, 0, machine=ONE_JOINT, machine_name="arm")
+    assert m.q[:, 0] == pytest.approx(np.linspace(-1, 1, 5))
+    path, start, end = lerobot_video(ds, 0, "side")
+    assert path.is_file() and path.is_relative_to(ds) and (start, end) == (0.0, pytest.approx(5 / 30))
+
+
+@pytest.mark.parametrize("template, why", [
+    ("/etc/{chunk_index}-{file_index}.parquet", "inside the dataset folder"),
+    ("../outside/{chunk_index}-{file_index}.parquet", "inside the dataset folder"),
+    ("data/../../{chunk_index}-{file_index}.parquet", "inside the dataset folder"),
+    ("data/{chunk_index.__class__}.parquet", "is not one of"),
+    ("data/{file_index[0]}.parquet", "is not one of"),
+    ("data/{other}.parquet", "is not one of"),
+    ("data/{}.parquet", "is not one of"),
+    ("data/{chunk_index!r}.parquet", "plain format"),
+])
+def test_a_data_path_template_that_could_leave_the_dataset_is_refused(tmp_path, template, why):
+    ds = mini(tmp_path, data_path=template)
+    with pytest.raises(InputError, match=why) as e:
+        motion_from_lerobot(ds, 0, machine=ONE_JOINT, machine_name="arm")
+    assert "data_path" in str(e.value)
+
+
+def test_a_video_path_template_with_dotdot_is_refused(tmp_path):
+    ds = mini(tmp_path, video_path="videos/{video_key}/../../../x-{chunk_index}-{file_index}.mp4")
+    with pytest.raises(InputError, match="video_path"):
+        lerobot_video(ds, 0, "side")
+
+
+def test_a_camera_name_that_climbs_out_is_refused(tmp_path):
+    ds = mini(tmp_path, cameras=("side", "../../../../tmp"))
+    with pytest.raises(InputError, match="outside the dataset folder"):
+        lerobot_video(ds, 0, "../../../../tmp")
+
+
+@pytest.mark.parametrize("value", ["../x", "1", 1.5, -1, True])
+def test_an_index_that_is_not_a_whole_number_is_refused(tmp_path, value):
+    ds = mini(tmp_path, row_overrides={"data/chunk_index": value})
+    with pytest.raises(InputError, match="data/chunk_index"):
+        motion_from_lerobot(ds, 0, machine=ONE_JOINT, machine_name="arm")
+
+
+def test_the_check_does_not_follow_links_out_of_the_snapshot(tmp_path):
+    """The Hugging Face cache links each file of a snapshot to a blob outside it: that must still read."""
+    ds = mini(tmp_path)
+    data_file = ds / "data" / "chunk-000" / "file-000.parquet"
+    blob = tmp_path / "blobs" / "abc"
+    blob.parent.mkdir()
+    data_file.rename(blob)
+    data_file.symlink_to(blob)
+    assert motion_from_lerobot(ds, 0, machine=ONE_JOINT, machine_name="arm").q.shape == (5, 1)

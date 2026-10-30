@@ -63,17 +63,13 @@ def mask_to_rle(mask: np.ndarray) -> dict:
     if m.ndim != 2:
         raise ValueError(f"mask must be 2-D, got shape {m.shape}")
     flat = m.ravel(order="F")
-    counts: list[int] = []
-    current = False
-    run = 0
-    for v in flat:
-        if bool(v) == current:
-            run += 1
-        else:
-            counts.append(run)
-            current = bool(v)
-            run = 1
-    counts.append(run)
+    edges = np.flatnonzero(flat[1:] != flat[:-1]) + 1  # where a run ends
+    bounds = np.concatenate(([0], edges, [flat.size]))
+    counts = np.diff(bounds).tolist()
+    if flat.size and flat[0]:
+        counts.insert(0, 0)  # the first run is always of False
+    if not flat.size:
+        counts = [0]
     return {"size": [int(m.shape[0]), int(m.shape[1])], "counts": counts}
 
 

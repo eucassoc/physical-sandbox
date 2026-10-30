@@ -8,7 +8,7 @@ gap numbers, a graph, and a replay video with both machines drawn as see-through
 recording.
 
 Nothing from the dataset is in this folder (its licence was not checked): no frames, no pictures. Only the
-steps. Every file the script writes goes to `$OUT`.
+steps and scripts. Every file the script writes goes to `$OUT`.
 
 ## What you need
 
@@ -27,7 +27,9 @@ OUT=out/so101 sh examples/so101-pickplace/run.sh
 ```
 
 `A` and `B` pick other episodes (`A=3 B=7 sh examples/so101-pickplace/run.sh`); `PSBX` and `PYTHON` point at
-other commands. The script does four things:
+other commands. The site and the base placement always come from episode 0 (its frame 0 and the fit below),
+whatever `A` is: that assumes the camera and the arm's base did not move between episodes. Episode `A`'s
+recording is only the background of the replay. The script does four things:
 
 1. **A still.** Frame 0 of episode 0's `side` recording goes to `$OUT/side-frame0.png`. The arm is at rest.
 2. **The site.** `psbx site fit` on that still with the orange tape under the tray as the floor:
@@ -82,19 +84,23 @@ on the wrong side, which no placement can hide. Only the comment that called the
 - Scaling the site so that the base and the reach matched the picture (0.085 m x 0.195 m) put the arm on the
   brick at the grasp, but at rest the shell sat 20-40 px below the real arm.
 - Four corners of a small rectangle seen this far off are close to a parallelogram, so the focal length
-  that `psbx site fit` derives from them swings from 500 to 3000 px when corner 4 moves by one pixel. Corner
-  4 cannot be read off the picture to that precision (it is under the tray), so it was chosen from the arm
-  instead: a small least-squares fit took the three visible tape corners together with the gripper tip read
-  off nine frames of episode 0 (rest, reaching, grasp, lifting, over the tray, returning), with the focal
-  length held near 500 px, and solved for the camera, the two lengths and the base placement. It keeps the
-  three tape corners within 1 px. Corner 4 is that camera's view of the rectangle's fourth corner, and the
-  lengths and base are its answer: 0.061 m x 0.129 m (a believable size next to the 32 mm brick) and the base
-  at (-0.025, 0.251), turned -14 degrees. `psbx site fit` on those corners gives a focal length of 529 px and a
-  corner residual of 0.33 px.
+  that `psbx site fit` derives from them swings from 500 to 3000 px when corner 4 moves by one pixel.
+  Corner 4 cannot be read off the picture to that precision (it is under the tray), so it was chosen from
+  the arm instead. A small least-squares fit (`fit_site.py` in this folder) took the three visible tape
+  corners together with the gripper tip read off nine frames of episode 0 (rest, reaching, grasp, lifting,
+  over the tray, returning), held the focal length near 500 px, and solved for the camera, the two lengths
+  and the base placement. It keeps the three tape corners within 1 px; the tips stay 1-24 px off (they were
+  read off the fixed jaw's teal tip while the URDF's tool frame lies between the jaws, and some of those
+  frames are in fast motion). Corner 4 is that camera's view of the rectangle's fourth corner, and the
+  lengths and base are its answer: 0.061 m x 0.129 m (a believable size next to the 32 mm brick) and the
+  base at (-0.025, 0.251), turned -14 degrees. `psbx site fit` on those corners gives a focal length of
+  529 px and a corner residual of 0.33 px.
 
 This uses the arm's own drawing to fix the scale, which is what "estimated from the arm" means here. It
-also means an error of a few degrees in a joint's zero would have been absorbed into the camera and the
-placement rather than shown; the fit could not hide a wrong sign or a wrong range.
+also means that errors in the joint mapping other than a sign could be partly absorbed into the camera, the
+scale and the placement rather than shown: an offset of a few degrees in a joint's zero, or a range (gain)
+somewhat off. What was checked is the direction of each joint (above); the ends of each range were not
+checked separately. `python examples/so101-pickplace/fit_site.py` prints the numbers again.
 
 ## What still does not fit
 

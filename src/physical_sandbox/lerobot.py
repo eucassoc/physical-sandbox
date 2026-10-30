@@ -19,8 +19,9 @@ from .motion import Motion
 # [lower, upper] (sign -1 flips the direction).
 # Checked by eye on lerobot/svla_so101_pickplace (examples/so101-pickplace): with physical-sandbox-proto's
 # SO-101 URDF, the shell drawn from these angles lies on the real arm at rest, at the grasp and over the
-# tray, so no direction or end needed correcting. Not measured: an offset of a few degrees per joint would
-# not show at that camera's scale, and another calibration of the same arm may differ.
+# tray, and each joint turns the right way (sign +1 for all). The ends of each range are not constrained by
+# that check: the site's scale was fitted to the same drawing, so an offset of a few degrees or a range
+# somewhat off would be partly absorbed. Another calibration of the same arm may differ.
 JOINT_MAP: dict = {
     "shoulder_pan": (-100.0, 100.0, 1),
     "shoulder_lift": (-100.0, 100.0, 1),

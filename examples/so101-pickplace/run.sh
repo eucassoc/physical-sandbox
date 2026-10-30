@@ -11,10 +11,13 @@ URDF="${PS_SO101_URDF:-$HOME/work/physical-sandbox-proto/robots/so101/so101.urdf
 OUT="${OUT:-out/so101}"
 PSBX="${PSBX:-psbx}"
 PYTHON="${PYTHON:-python}"
-A="${A:-0}"  # episode drawn in blue (its side recording is the background)
+A="${A:-0}"  # episode drawn in blue (its side recording is the background of the replay)
 B="${B:-1}"  # episode drawn in orange
 
 mkdir -p "$OUT"
+
+# The site and the base placement below come from episode 0 whatever A and B are: this assumes the camera
+# and the arm's base stayed put across episodes. fit_site.py shows how the numbers were found.
 
 # 1. A still of the side camera: frame 0 of episode 0 (the arm at rest).
 "$PYTHON" - "$DATASET" "$OUT/side-frame0.png" <<'PY'

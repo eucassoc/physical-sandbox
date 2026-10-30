@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,7 +24,7 @@ FORMAT = "physical-sandbox.scene/1"
 @dataclass
 class PlacedMachine:
     machine: Machine
-    urdf: str  # the file the machine was loaded from (kept so the scene can be saved)
+    urdf: str  # the file the machine was loaded from (absolute after load_scene; resolved relative to the cwd on save)
     x: float
     y: float
     yaw: float  # radians, counter-clockwise about +z
@@ -68,43 +69,104 @@ class Scene:
         return {name: T @ P for name, P in placed.machine.link_poses(motion.q[i]).items()}
 
 
+def _urdf_for_file(urdf: str, folder: Path) -> str:
+    """The urdf path as stored: relative to the scene folder, absolute only if that is impossible."""
+    try:
+        return os.path.relpath(Path(urdf).expanduser().resolve(), folder.resolve())
+    except ValueError:  # e.g. another drive
+        return str(Path(urdf).expanduser().resolve())
+
+
+def _lists_record(scene_path: Path, name: str) -> bool:
+    try:
+        return name in (json.loads(scene_path.read_text()).get("records") or [])
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def save_scene(scene: Scene, path) -> None:
-    """Write the scene as JSON; its motions go to a recording ``<name>.record.json`` beside it."""
+    """Write the scene as JSON; its motions go to a recording ``<name>.record.json`` beside it.
+
+    The machines' urdf paths are stored relative to the scene folder, so the folder can be moved or shared.
+    An existing ``<name>.record.json`` is overwritten only when the scene file already at ``path`` lists it;
+    otherwise ``FileExistsError``. Both files are written to temporary names first, then renamed (the
+    record, then the scene), so a failure does not leave a half-written pair.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    records = []
-    if scene.motions:
-        rec = path.with_name(f"{path.stem}.record.json")
-        save_record(scene.motions, scene.site.id, rec)
-        records.append(rec.name)
+    rec = path.with_name(f"{path.stem}.record.json")
+    if scene.motions and rec.exists() and not _lists_record(path, rec.name):
+        raise FileExistsError(f"{rec} already exists and is not this scene's record; "
+                              f"choose another scene name or remove it")
     data = {
         "format": FORMAT,
         "site": scene.site.id,
-        "machines": {mid: {"urdf": p.urdf, "x": p.x, "y": p.y, "yaw": p.yaw,
+        "machines": {mid: {"urdf": _urdf_for_file(p.urdf, path.parent), "x": p.x, "y": p.y, "yaw": p.yaw,
                            "confirmedByPerson": p.confirmed_by_person}
                      for mid, p in scene.machines.items()},
-        "records": records,
+        "records": [rec.name] if scene.motions else [],
     }
-    path.write_text(json.dumps(data, indent=1) + "\n")
+    tmp_scene = path.with_name(f".{path.name}.tmp")
+    tmp_rec = path.with_name(f".{rec.name}.tmp")
+    try:
+        if scene.motions:
+            save_record(scene.motions, scene.site.id, tmp_rec)
+        tmp_scene.write_text(json.dumps(data, indent=1) + "\n")
+        if scene.motions:
+            os.replace(tmp_rec, rec)
+        os.replace(tmp_scene, path)
+    finally:
+        tmp_rec.unlink(missing_ok=True)
+        tmp_scene.unlink(missing_ok=True)
+
+
+def _need(d, key: str, where: str):
+    if not isinstance(d, dict) or key not in d:
+        raise ValueError(f"{where}: missing {key!r}")
+    return d[key]
+
+
+def _resolve_urdf(mid: str, urdf: str, folder: Path) -> Path:
+    given = Path(urdf).expanduser()
+    candidates = [folder / given, given] if not given.is_absolute() else [given]
+    for c in candidates:
+        if c.is_file():
+            return c
+    raise ValueError(f"machine {mid!r}: urdf {urdf!r} not found (tried {[str(c) for c in candidates]})")
 
 
 def load_scene(path, site: Site) -> Scene:
-    """Read a scene file for ``site``; refuses a scene made for another site."""
+    """Read a scene file for ``site``; refuses a scene made for another site.
+
+    A scene file is treated as untrusted: its records must be plain relative paths that stay inside the
+    scene folder. A machine's urdf is looked up in the scene folder first, then as written (it may point
+    outside the folder on purpose, e.g. ``../robots/arm.urdf``); it is only read as a machine description.
+    """
     path = Path(path)
     data = json.loads(path.read_text())
-    if data.get("format") != FORMAT:
-        raise ValueError(f"{path.name}: format is {data.get('format')!r}, expected {FORMAT!r}")
+    if not isinstance(data, dict) or data.get("format") != FORMAT:
+        raise ValueError(f"{path.name}: format is {data.get('format') if isinstance(data, dict) else None!r}, "
+                         f"expected {FORMAT!r}")
     if data.get("site") != site.id:
         raise ValueError(f"{path.name} is a scene of site {data.get('site')!r}, not {site.id!r}")
+    folder = path.parent
     machines = {}
     for mid, m in (data.get("machines") or {}).items():
-        urdf = Path(m["urdf"])
-        if not urdf.is_absolute() and not urdf.exists() and (path.parent / urdf).exists():
-            urdf = path.parent / urdf
+        where = f"{path.name}: machine {mid!r}"
+        given, x, y, yaw = (_need(m, k, where) for k in ("urdf", "x", "y", "yaw"))
+        urdf = _resolve_urdf(mid, str(given), folder).resolve()
         machines[mid] = PlacedMachine(
-            machine=load_machine(urdf), urdf=m["urdf"], x=float(m["x"]), y=float(m["y"]),
-            yaw=float(m["yaw"]), confirmed_by_person=bool(m.get("confirmedByPerson", False)))
+            machine=load_machine(urdf), urdf=str(urdf), x=float(x), y=float(y), yaw=float(yaw),
+            confirmed_by_person=bool(m.get("confirmedByPerson", False)))
     motions = []
+    root = folder.resolve()
     for rel in data.get("records") or []:
-        motions.extend(load_record(path.parent / rel))
+        if not isinstance(rel, str) or Path(rel).is_absolute():
+            raise ValueError(f"{path.name}: record {rel!r} must be a relative path")
+        target = (folder / rel).resolve()
+        if root != target and root not in target.parents:
+            raise ValueError(f"{path.name}: record {rel!r} is outside the scene folder")
+        if not target.is_file():
+            raise ValueError(f"{path.name}: record {rel!r} not found at {target}")
+        motions.extend(load_record(target))
     return Scene(site=site, machines=machines, motions=motions)

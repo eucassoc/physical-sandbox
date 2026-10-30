@@ -1,5 +1,6 @@
 import json
 import math
+import shutil
 
 import numpy as np
 import pytest
@@ -96,14 +97,15 @@ def test_round_trip(urdf, tmp_path):
     data = json.loads(path.read_text())
     assert data["format"] == "physical-sandbox.scene/1"
     assert data["site"] == "s-1"
-    assert data["machines"]["arm"] == {"urdf": str(urdf), "x": 0.2, "y": 0.1, "yaw": math.pi / 2,
+    assert data["machines"]["arm"] == {"urdf": "../arm.urdf", "x": 0.2, "y": 0.1, "yaw": math.pi / 2,
                                        "confirmedByPerson": True}
     assert len(data["records"]) == 1 and not data["records"][0].startswith("/")
     assert (path.parent / data["records"][0]).is_file()
 
     back = load_scene(path, scene.site)
     p = back.machines["arm"]
-    assert (p.x, p.y, p.yaw, p.confirmed_by_person, p.urdf) == (0.2, 0.1, math.pi / 2, True, str(urdf))
+    assert (p.x, p.y, p.yaw, p.confirmed_by_person) == (0.2, 0.1, math.pi / 2, True)
+    assert p.urdf == str(urdf.resolve())
     assert p.machine.joint_names == ["turn"]
     assert len(back.motions) == 1
     assert np.allclose(back.motions[0].q, scene.motions[0].q)
@@ -129,4 +131,89 @@ def test_load_refuses_other_format(urdf, tmp_path):
     path = tmp_path / "scene.json"
     path.write_text(json.dumps({"format": "nope/9", "site": "s-1", "machines": {}, "records": []}))
     with pytest.raises(ValueError, match="format"):
+        load_scene(path, Site(id="s-1", cameras={}))
+
+
+def test_scene_folder_is_portable(urdf, tmp_path):
+    src = tmp_path / "a"
+    save_scene(_scene(urdf), src / "scene.json")
+    shutil.copytree(urdf.parent, tmp_path / "moved", ignore=shutil.ignore_patterns("a", "cache"))
+    shutil.copytree(src, tmp_path / "moved" / "a")
+    urdf.unlink()  # the original absolute location is gone
+    back = load_scene(tmp_path / "moved" / "a" / "scene.json", Site(id="s-1", cameras={}))
+    assert back.machines["arm"].machine.joint_names == ["turn"]
+    assert len(back.motions) == 1
+
+
+def test_scene_folder_wins_over_cwd(urdf, tmp_path, monkeypatch):
+    folder = tmp_path / "scenes"
+    folder.mkdir()
+    (folder / "arm.urdf").write_text(URDF)
+    other = tmp_path / "cwd"
+    other.mkdir()
+    (other / "arm.urdf").write_text(URDF.replace('name="turn"', 'name="cwd_turn"'))
+    path = folder / "scene.json"
+    path.write_text(json.dumps({"format": "physical-sandbox.scene/1", "site": "s-1", "records": [],
+                                "machines": {"arm": {"urdf": "arm.urdf", "x": 0, "y": 0, "yaw": 0}}}))
+    monkeypatch.chdir(other)
+    back = load_scene(path, Site(id="s-1", cameras={}))
+    assert back.machines["arm"].machine.joint_names == ["turn"]
+    # not in the scene folder: falls back to the path as written (relative to the cwd)
+    (folder / "arm.urdf").unlink()
+    back = load_scene(path, Site(id="s-1", cameras={}))
+    assert back.machines["arm"].machine.joint_names == ["cwd_turn"]
+
+
+def test_missing_urdf_names_machine_and_candidates(tmp_path):
+    path = tmp_path / "scene.json"
+    path.write_text(json.dumps({"format": "physical-sandbox.scene/1", "site": "s-1", "records": [],
+                                "machines": {"arm": {"urdf": "gone.urdf", "x": 0, "y": 0, "yaw": 0}}}))
+    with pytest.raises(ValueError, match=r"'arm'.*gone\.urdf.*scene\.json|'arm'.*gone\.urdf") as e:
+        load_scene(path, Site(id="s-1", cameras={}))
+    assert str(tmp_path / "gone.urdf") in str(e.value)
+
+
+def test_save_refuses_to_overwrite_unrelated_record(urdf, tmp_path):
+    other = tmp_path / "scene.record.json"
+    other.write_text("precious")
+    with pytest.raises(FileExistsError, match="scene.record.json"):
+        save_scene(_scene(urdf), tmp_path / "scene.json")
+    assert other.read_text() == "precious"
+    assert not (tmp_path / "scene.json").exists()
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(".")) == []
+
+
+def test_save_again_overwrites_own_record(urdf, tmp_path):
+    path = tmp_path / "scene.json"
+    save_scene(_scene(urdf), path)
+    save_scene(_scene(urdf), path)  # its own record: fine
+    assert len(load_scene(path, Site(id="s-1", cameras={})).motions) == 1
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+
+def test_failed_save_leaves_no_half_written_pair(urdf, tmp_path):
+    scene = _scene(urdf)
+    scene.motions.append(motion_from_numpy([[0.0]], fps=1.0, joint_names=["turn"], machine="Bad Name"))
+    with pytest.raises(ValueError):
+        save_scene(scene, tmp_path / "scene.json")
+    assert list(tmp_path.glob("*scene*")) == [] and list(tmp_path.glob(".*")) == []
+
+
+@pytest.mark.parametrize("rec", ["../outside.json", "/etc/passwd"])
+def test_load_refuses_records_outside_folder(tmp_path, rec):
+    (tmp_path / "outside.json").write_text("{}")
+    folder = tmp_path / "f"
+    folder.mkdir()
+    path = folder / "scene.json"
+    path.write_text(json.dumps({"format": "physical-sandbox.scene/1", "site": "s-1",
+                                "machines": {}, "records": [rec]}))
+    with pytest.raises(ValueError, match="record"):
+        load_scene(path, Site(id="s-1", cameras={}))
+
+
+def test_load_names_missing_keys(tmp_path):
+    path = tmp_path / "scene.json"
+    path.write_text(json.dumps({"format": "physical-sandbox.scene/1", "site": "s-1", "records": [],
+                                "machines": {"arm": {"urdf": "x.urdf", "x": 0}}}))
+    with pytest.raises(ValueError, match="'arm'.*'y'|'arm'.*'urdf'"):
         load_scene(path, Site(id="s-1", cameras={}))

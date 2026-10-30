@@ -81,7 +81,7 @@ class StillSource(Source):
     def frame(self, i: int = 0) -> np.ndarray:
         if i < 0:
             raise ValueError(f"frame index must be >= 0, got {i}")
-        return self._image
+        return self._image.copy()  # a fresh array each time, as for recordings: callers may draw on it
 
 
 class VideoSource(Source):

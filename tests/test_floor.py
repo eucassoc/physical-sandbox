@@ -1,0 +1,64 @@
+import cv2
+import numpy as np
+import pytest
+
+from physical_sandbox.floor import solve_floor
+
+
+def project_rect(f, rvec, tvec, a=3.5, b=6.8, cx=1010, cy=554):
+    """Project an a x b m floor rectangle (corner 1 at the origin) through a known pinhole pose."""
+    world = np.array([[0, 0, 0], [a, 0, 0], [a, b, 0], [0, b, 0]], float)
+    K = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1]], float)
+    px, _ = cv2.projectPoints(world, np.array(rvec, float), np.array(tvec, float), K, None)
+    return [(float(u), float(v)) for u, v in px.reshape(-1, 2)]
+
+
+def fov_deg(camera):
+    """Horizontal field of view in degrees."""
+    return float(np.degrees(2 * np.arctan(camera.width / (2 * camera.K[0, 0]))))
+
+
+TRUE_CORNERS = project_rect(f=900, rvec=(1.9, 0.15, -0.1), tvec=(-1.5, 0.8, 9.0))
+
+
+def test_a_true_rectangle_comes_back_exactly():
+    # f=900 on 2020x1108, a 3.5 x 6.8 m floor projected by a known pose (spike c)
+    sol = solve_floor(2020, 1108, TRUE_CORNERS, (3.5, 6.8))
+    assert sol.reason is None and sol.residual_px < 0.5
+    assert fov_deg(sol.camera) == pytest.approx(97, abs=0.5)
+    assert not sol.mirrored
+    assert sol.camera.position[2] > 0
+    assert sol.corners_m.shape == (4, 3)
+    assert np.allclose(sol.corners_m, [[0, 0, 0], [3.5, 0, 0], [3.5, 6.8, 0], [0, 6.8, 0]])
+
+
+def test_the_solved_camera_projects_the_corners_back():
+    sol = solve_floor(2020, 1108, TRUE_CORNERS, (3.5, 6.8))
+    back = sol.camera.project(sol.corners_m)
+    assert np.abs(back - np.array(TRUE_CORNERS)).max() < 0.5
+    assert sol.camera.width == 2020 and sol.camera.height == 1108
+
+
+def test_hand_placed_corners_leave_a_residual_like_the_old_solve():
+    # the corners a person decided in the spike (decided.json), with estimated lengths
+    corners = [(205.3, 1018), (1951.6, 1005.1), (1463.2, 633), (1091.5, 633)]
+    sol = solve_floor(2020, 1108, corners, (3.5, 6.8))
+    # the old JS solve left 26.8 px; the spike's OpenCV fit left 37 px as the largest per-axis error,
+    # which is 40.8 px as the largest Euclidean distance (what residual_px reports)
+    assert sol.reason is None and sol.residual_px < 45
+
+
+def test_corners_going_round_the_other_way_are_mirrored():
+    reversed_corners = list(reversed(TRUE_CORNERS))
+    sol = solve_floor(2020, 1108, reversed_corners, (3.5, 6.8))
+    assert sol.mirrored and sol.camera.position[2] > 0
+    assert sol.residual_px < 0.5
+    # the floor lies on the -y side of corner 1 -> 2
+    assert np.allclose(sol.corners_m, [[0, 0, 0], [3.5, 0, 0], [3.5, -6.8, 0], [0, -6.8, 0]])
+    refused = solve_floor(2020, 1108, reversed_corners, (3.5, 6.8), allow_mirror=False)
+    assert refused.reason == 'mirrored' and refused.camera is None and refused.mirrored
+
+
+def test_a_floor_seen_square_on_is_refused():
+    sol = solve_floor(2020, 1108, [(500, 800), (1500, 800), (1500, 300), (500, 300)], (3.5, 6.8))
+    assert sol.reason == 'flat' and sol.camera is None and sol.residual_px is None

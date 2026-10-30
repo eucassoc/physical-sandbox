@@ -187,7 +187,8 @@ def _polyline(img, pts: np.ndarray, color, dashed: bool, thickness: int = 2):
 
 
 def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list[Motion], out: Path, *,
-                   colors=COLORS, show=None, fps: float | None = None, start_s: float = 0.0) -> Path:
+                   colors=COLORS, show=None, fps: float | None = None, start_s: float = 0.0,
+                   duration: float | None = None) -> Path:
     """Draw ``motions`` (one or two) over ``source`` through the site camera ``camera_name``; write an mp4.
 
     Time runs from ``start_s`` for the longest motion's duration at ``fps`` (default: the source's, else 30);
@@ -195,6 +196,8 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
     since the start. The number of frames is ``round(duration * fps)``, at least 1: frame k is time k / fps.
     ``show`` toggles ``machine`` (the shells), ``trail`` (tool tip path so far, record B dashed) and ``link``
     (a white line between the two tool tips, when two motions drive the same machine); missing keys stay on.
+    ``duration`` (seconds) cuts the video short of the longest motion; a motion that is longer is just not shown
+    to its end.
     """
     if not motions:
         raise ValueError("no motions to draw")
@@ -212,7 +215,10 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
     fps = float(fps or source.fps or 30.0)
     if not fps > 0:
         raise ValueError(f"fps must be positive, got {fps}")
-    duration = max(float(m.t[-1]) for m in motions)
+    longest = max(float(m.t[-1]) for m in motions)
+    if duration is not None and not (duration > 0):
+        raise ValueError(f"duration must be positive, got {duration}")
+    duration = longest if duration is None else min(float(duration), longest)
     n_frames = max(1, int(round(duration * fps)))
     link = show["link"] and len(motions) == 2 and motions[0].machine == motions[1].machine
 

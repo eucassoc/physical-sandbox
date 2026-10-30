@@ -11,6 +11,7 @@ import numpy as np
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from .errors import InputError, InputIndexError, InputKeyError
 from .motion import Motion
 
 # Dataset units -> URDF joint range. Per joint: (in_lo, in_hi, sign). The dataset normalises the five
@@ -59,7 +60,7 @@ def _episode_row(dataset_dir: Path, episode: int) -> dict:
         total += len(idx)
         if episode in idx:
             return t.slice(idx.index(episode), 1).to_pylist()[0]
-    raise IndexError(f"episode {episode} is not in the dataset (it has {total} episodes)")
+    raise InputIndexError(f"episode {episode} is not in the dataset (it has {total} episodes)")
 
 
 def read_episode(dataset_dir, episode: int, *, machine, key: str, label, machine_name: str) -> Motion:
@@ -67,10 +68,10 @@ def read_episode(dataset_dir, episode: int, *, machine, key: str, label, machine
     info = _info(dataset_dir)
     feat = info["features"].get(key)
     if feat is None:
-        raise KeyError(f"feature {key!r} is not in the dataset; it has {sorted(info['features'])}")
+        raise InputKeyError(f"feature {key!r} is not in the dataset; it has {sorted(info['features'])}")
     ds_names = [n[:-4] if n.endswith(".pos") else n for n in (feat.get("names") or [])]
     if ds_names != list(machine.joint_names):
-        raise ValueError(f"the dataset's joints {ds_names} are not the machine's joints {list(machine.joint_names)}")
+        raise InputError(f"the dataset's joints {ds_names} are not the machine's joints {list(machine.joint_names)}")
     row = _episode_row(dataset_dir, episode)
     data_file = dataset_dir / info["data_path"].format(
         chunk_index=row["data/chunk_index"], file_index=row["data/file_index"])
@@ -99,7 +100,7 @@ def lerobot_video(dataset_dir, episode: int, camera: str) -> tuple:
                      if k.startswith(prefix) and f.get("dtype") == "video")
     short = camera[len(prefix):] if camera.startswith(prefix) else camera
     if short not in cameras:
-        raise KeyError(f"the dataset has no camera {camera!r}; its cameras are {', '.join(cameras)}")
+        raise InputKeyError(f"the dataset has no camera {camera!r}; its cameras are {', '.join(cameras)}")
     vkey = prefix + short
     row = _episode_row(dataset_dir, episode)
     path = dataset_dir / info["video_path"].format(

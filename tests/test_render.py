@@ -380,3 +380,15 @@ def test_an_error_leaves_no_half_written_video(world):
         render_overlay(scene, "camera", src, [motion(1.0)], out)
     assert out.read_bytes() == b"old"                         # an earlier video is not overwritten by a failure
     assert not [p for p in tmp.iterdir() if "partial" in p.name]
+
+
+def test_duration_cuts_the_video_short_of_the_longest_motion(world):
+    make, still, tmp = world
+    scene, _ = make()
+    n = lambda **kw: len(read(render_overlay(scene, "camera", open_source(str(still)), [motion(1.0)],
+                                              tmp / "d.mp4", fps=10.0, **kw)))
+    assert n() == 10  # the motion is 1.0 s
+    assert n(duration=0.5) == 5
+    assert n(duration=5.0) == 10  # never longer than the motion
+    with pytest.raises(ValueError, match="duration"):
+        n(duration=0)

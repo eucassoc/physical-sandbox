@@ -100,8 +100,16 @@ def test_csv_has_one_row_per_scalar_item_without_the_series(files):
     tmp_path, _, still = files
     _, out = run_compare(tmp_path, still)
     rows = list(csv.DictReader((out / "gaps.csv").open()))
-    assert list(rows[0]) == ["item", "value", "unit", "at_s"]
+    assert list(rows[0]) == ["item", "value", "unit", "at_s", "note"]
     by = {r["item"]: r for r in rows}
+    # the site's quality heads the table, and what is not told yet is named with its reason
+    assert [r["item"] for r in rows[:4]] == ["site", "residual.camera", "dimensions", "confirmed_by_person"]
+    assert by["site"]["value"] == "yard" and by["residual.camera"]["value"] == "0.7"
+    assert by["dimensions"]["value"] == "measured" and by["dimensions"]["note"] == ""
+    assert by["confirmed_by_person"]["value"] == "true"
+    for name in ("clearance", "reach", "world"):
+        assert by[f"unknown.{name}"]["value"] == "" and by[f"unknown.{name}"]["note"]
+    assert by["unknown.grasps"]["note"]  # the test machine has no gripper
     assert by["tool_deviation.max"]["unit"] == "m" and by["tool_deviation.max"]["at_s"] != ""
     assert by["tool_deviation.mean"]["at_s"] == ""
     assert by["shape_deviation"]["unit"] == "m"
@@ -127,6 +135,10 @@ def test_header_says_when_dimensions_are_estimated(files, tmp_path):
     assert header["dimensions"] == "estimated"
     assert header["dimensionsNote"] == "寸法は推定（未確認）"
     assert header["confirmedByPerson"] is False
+    rows = {r["item"]: r for r in csv.DictReader(paths["gaps.csv"].open(encoding="utf-8"))}
+    assert rows["dimensions"]["value"] == "estimated" and rows["dimensions"]["note"] == "寸法は推定（未確認）"
+    assert rows["confirmed_by_person"]["value"] == "false"
+    assert cv2.imread(str(paths["gaps.png"])) is not None
 
 
 def test_label_selects_a_motion_in_a_record(files):
@@ -140,15 +152,66 @@ def test_label_selects_a_motion_in_a_record(files):
     assert json.loads((out / "gaps.json").read_text())["labels"]["a"] == "second"
 
 
+def args_for(tmp_path, still, a, b, out="o", scene="scene.json"):
+    return ["compare", "--site", str(tmp_path / "site.json"), "--scene", str(tmp_path / scene),
+            "--camera", "camera", "--a", a, "--b", b, "--out", str(tmp_path / out), "--video", str(still)]
+
+
 def test_unknown_label_is_a_bad_input(files, capsys):
     tmp_path, _, still = files
-    code, out = run_compare(tmp_path, still)  # warm the scene
-    code = main(["compare", "--site", str(tmp_path / "site.json"), "--scene", str(tmp_path / "scene.json"),
-                 "--camera", "camera", "--a", str(tmp_path / "a.record.json") + "#nope",
-                 "--b", str(tmp_path / "b.record.json"), "--out", str(tmp_path / "o2"), "--video", str(still)])
+    code = main(args_for(tmp_path, still, str(tmp_path / "a.record.json") + "#nope", str(tmp_path / "b.record.json")))
     err = capsys.readouterr().err
     assert code == 2
     assert "nope" in err and "slow" in err and err.strip().count("\n") == 0
+
+
+@pytest.mark.parametrize("spec", ["lerobot:nowhere", "lerobot:nowhere#x", "lerobot:nowhere#3", "gone.record.json"])
+def test_unknown_motion_format_is_a_bad_input(files, capsys, spec):
+    tmp_path, _, still = files
+    code = main(args_for(tmp_path, still, spec, str(tmp_path / "b.record.json")))
+    err = capsys.readouterr().err
+    assert code == 2 and err.startswith("psbx: ") and err.strip().count("\n") == 0
+    assert "nowhere" in err or "gone.record.json" in err
+
+
+def test_a_file_that_is_no_recording_is_a_bad_input(files, capsys):
+    tmp_path, _, still = files
+    code = main(args_for(tmp_path, still, str(tmp_path / "site.json"), str(tmp_path / "b.record.json")))
+    assert code == 2 and "site.json" in capsys.readouterr().err
+
+
+def test_a_motion_of_a_machine_that_is_not_placed_is_a_bad_input(files, capsys):
+    tmp_path, _, still = files
+    other = motion_from_numpy(np.zeros((3, 1)), fps=10.0, joint_names=["turn"], machine="other", label="x")
+    save_record([other], "yard", tmp_path / "x.record.json")
+    code = main(args_for(tmp_path, still, str(tmp_path / "x.record.json"), str(tmp_path / "b.record.json")))
+    err = capsys.readouterr().err
+    assert code == 2 and "other" in err and "blocks" in err
+
+
+def test_a_wrong_video_leaves_no_partial_report(files, capsys):
+    tmp_path, _, _ = files
+    wide = tmp_path / "wide.png"
+    cv2.imwrite(str(wide), np.full((100, 300, 3), 128, np.uint8))  # not the site camera's aspect ratio
+    for bad in (wide, tmp_path / "missing.mp4"):
+        code = main(args_for(tmp_path, bad, str(tmp_path / "a.record.json"), str(tmp_path / "b.record.json")))
+        assert code == 2 and "--video" in capsys.readouterr().err
+        assert not (tmp_path / "o").exists()
+
+
+def test_a_runtime_fault_is_exit_1_with_its_type(files, capsys, monkeypatch):
+    tmp_path, _, still = files
+    import physical_sandbox.compare as cmp
+
+    def boom(*a, **k):
+        raise ZeroDivisionError("kaboom")
+    monkeypatch.setattr(cmp, "compare", boom)
+    code = main(args_for(tmp_path, still, str(tmp_path / "a.record.json"), str(tmp_path / "b.record.json")))
+    err = capsys.readouterr().err
+    assert code == 1 and "ZeroDivisionError: kaboom" in err and "Traceback" not in err
+    monkeypatch.setenv("PSBX_DEBUG", "1")
+    code = main(args_for(tmp_path, still, str(tmp_path / "a.record.json"), str(tmp_path / "b.record.json")))
+    assert code == 1 and "Traceback" in capsys.readouterr().err
 
 
 def test_no_video_and_not_lerobot_says_so(files, capsys):
@@ -223,8 +286,8 @@ def test_site_fit_refuses_a_failed_solve(tmp_path, capsys):
     code = main(["site", "fit", str(image), "--edges", "4", "3", "--corners",
                  "100,100", "100,100", "100,100", "100,100", "--out", str(out)])
     err = capsys.readouterr().err
-    assert code != 0 and not out.exists()
-    assert err.strip().count("\n") == 0 and err.strip()
+    assert code == 2 and not out.exists()
+    assert err.strip().count("\n") == 0 and "no camera fits these corners (flat)" in err
 
 
 def test_site_fit_bad_corner_text(tmp_path, capsys):
@@ -232,6 +295,14 @@ def test_site_fit_bad_corner_text(tmp_path, capsys):
     code = main(["site", "fit", str(image), "--edges", "4", "3", "--corners", "1,2", "3,4", "5,6", "x",
                  "--out", str(tmp_path / "o.json")])
     assert code == 2 and "x" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("edges", [["nan", "3"], ["inf", "3"], ["-1", "3"], ["0", "3"]])
+def test_site_fit_edges_must_be_finite_and_positive(tmp_path, capsys, edges):
+    image, px = floor_image(tmp_path)
+    code = main(["site", "fit", str(image), "--edges", *edges, "--corners",
+                 *[f"{u},{v}" for u, v in px], "--out", str(tmp_path / "o.json")])
+    assert code == 2 and not (tmp_path / "o.json").exists()
 
 
 def test_fetch_sam_prints_the_path(tmp_path, monkeypatch, capsys):
@@ -275,3 +346,78 @@ def test_lerobot_episodes_use_the_episodes_own_recording(tmp_path, monkeypatch):
                  "--camera", "side", "--a", f"lerobot:{DATASET}#0", "--b", f"lerobot:{DATASET}#1", "--out", str(out)])
     assert code == 0
     assert (out / "replay.mp4").stat().st_size > 0 and (out / "gaps.json").is_file()
+
+
+@pytest.fixture
+def fake_lerobot(files, monkeypatch):
+    """A dataset folder that only has meta/info.json, with the episode reader and the video lookup replaced."""
+    tmp_path, site, still = files
+    data = tmp_path / "ds"
+    (data / "meta").mkdir(parents=True)
+    (data / "meta" / "info.json").write_text("{}")
+    lengths = {4: 0.6, 5: 1.0}  # episode -> seconds of motion
+    import physical_sandbox.lerobot as lerobot
+    import physical_sandbox.motion as motion_mod
+    monkeypatch.setattr(motion_mod, "motion_from_lerobot",
+                        lambda d, ep, *, machine, machine_name, **k: motion(1.0, f"episode {ep}", fps=10.0,
+                                                                          n=int(lengths[ep] * 10) + 1))
+    spans = {}
+    monkeypatch.setattr(lerobot, "lerobot_video", lambda d, ep, cam: (spans["video"], *spans["span"]))
+    return tmp_path, data, spans
+
+
+def test_lerobot_replay_starts_where_the_episode_starts_and_stops_where_it_ends(fake_lerobot, monkeypatch, capsys):
+    tmp_path, data, spans = fake_lerobot
+    # a recording where frame k is grey 4k: a frame shown at the wrong time is a visibly different grey
+    video = tmp_path / "ds.mp4"
+    w = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (W, H))
+    for k in range(60):
+        w.write(np.full((H, W, 3), 4 * k, np.uint8))
+    w.release()
+    spans["video"], spans["span"] = video, (1.0, 1.5)  # episode 4 is the second second of the file, 0.5 s long
+    out = tmp_path / "out"
+    code = main(["compare", "--site", str(tmp_path / "site.json"), "--scene", str(tmp_path / "scene.json"),
+                 "--camera", "camera", "--a", f"lerobot:{data}#4", "--b", f"lerobot:{data}#5", "--out", str(out)])
+    assert code == 0
+    cap = cv2.VideoCapture(str(out / "replay.mp4"))
+    frames = []
+    while True:
+        ok, f = cap.read()
+        if not ok:
+            break
+        frames.append(f)
+    assert len(frames) == 15  # 0.5 s at 30 fps, not B's 1.0 s
+    assert abs(int(frames[0][2, 2, 0]) - 120) < 16  # file time 1.0 s = frame 30 (grey 120); start 0 would be grey 0
+    assert abs(int(frames[-1][2, 2, 0]) - 4 * 43) < 16  # file time 1.0 + 14/30 s = frame 44
+    assert "replay cut at 0.50 s" in capsys.readouterr().out
+
+
+def test_lerobot_start_and_cap_are_passed_to_the_renderer(fake_lerobot, monkeypatch, capsys):
+    tmp_path, data, spans = fake_lerobot
+    import physical_sandbox.render as render
+    calls = []
+
+    def fake_render(scene, camera, source, motions, out, **kw):
+        calls.append(kw)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"x")
+        return out
+    monkeypatch.setattr(render, "render_overlay", fake_render)
+    still = tmp_path / "grey.png"
+    spans["video"], spans["span"] = still, (12.0, 12.6)
+    base = ["compare", "--site", str(tmp_path / "site.json"), "--scene", str(tmp_path / "scene.json"),
+            "--camera", "camera", "--out", str(tmp_path / "out")]
+    # A (episode 4, 0.6 s) is as long as its span and B (episode 5) is longer: cut, and say so
+    assert main(base + ["--a", f"lerobot:{data}#4", "--b", f"lerobot:{data}#5"]) == 0
+    assert calls[-1]["start_s"] == 12.0 and calls[-1]["duration"] == pytest.approx(0.6)
+    assert "replay cut at 0.60 s" in capsys.readouterr().out
+    # the longer motion is A itself (its picture is shorter than A): cut too, and it names A
+    assert main(base + ["--a", f"lerobot:{data}#5", "--b", f"lerobot:{data}#4"]) == 0
+    assert "(A runs 1.00 s)" in capsys.readouterr().out
+    # nothing runs past the episode's span: no cut message
+    spans["span"] = (12.0, 13.0)
+    assert main(base + ["--a", f"lerobot:{data}#4", "--b", f"lerobot:{data}#5"]) == 0
+    assert "cut" not in capsys.readouterr().out
+    # an explicit --video is the person's own picture: from its start, no cap
+    assert main(base + ["--a", f"lerobot:{data}#4", "--b", f"lerobot:{data}#5", "--video", str(still)]) == 0
+    assert calls[-1]["start_s"] == 0.0 and calls[-1]["duration"] is None

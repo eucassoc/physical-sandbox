@@ -31,3 +31,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["sam: needs the [sam] extra, the SAM weights and the LeRobot dataset (skipped when absent)"]

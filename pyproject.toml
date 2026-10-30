@@ -29,6 +29,9 @@ psbx = "physical_sandbox.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"physical_sandbox.mcp" = ["widgets/*.html", "widgets/vendor/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["sam: needs the [sam] extra, the SAM weights and the LeRobot dataset (skipped when absent)"]

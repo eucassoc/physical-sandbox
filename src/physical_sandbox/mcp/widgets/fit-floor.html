@@ -1,0 +1,271 @@
+<!doctype html>
+<meta charset="utf-8" />
+<style>
+  :root { --fg: #1d1f24; --muted: #5d6470; --bg: #ffffff; --accent: #2a7ab0; --err: #b3261e; color-scheme: light dark; }
+  :root.dark { --fg: #e8eaee; --muted: #a0a6b0; --bg: #1c1d21; --accent: #6db3e3; --err: #ff8a80; }
+  body { margin: 0; font: 13px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  .wrap { padding: 8px; }
+  canvas { display: block; width: 100%; height: auto; touch-action: none; border-radius: 6px; background: #222; }
+  .objects { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .objects:empty { display: none; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 12px; border: 1px solid var(--muted); background: transparent; color: var(--fg); font: inherit; cursor: pointer; }
+  .chip .sw { width: 10px; height: 10px; border-radius: 2px; }
+  .chip.off { opacity: .45; text-decoration: line-through; }
+  .bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .say { flex: 1 1 260px; color: var(--muted); }
+  .say.err { color: var(--err); }
+  label.measured { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+  button.decide { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  button.decide:disabled { opacity: .5; cursor: default; }
+</style>
+<div class="wrap">
+  <canvas id="view" width="1280" height="720"></canvas>
+  <div class="objects" id="objects"></div>
+  <div class="bar">
+    <span class="say" id="say">写真を読み込んでいます…</span>
+    <label class="measured"><input type="checkbox" id="measured" /> 長さは実測した値</label>
+    <button class="decide" id="decide" disabled>決定</button>
+  </div>
+</div>
+<script type="module">
+/*__EXT_APPS_BUNDLE__*/
+const { App } = globalThis.ExtApps;
+const canvas = document.getElementById('view');
+const ctx = canvas.getContext('2d');
+const sayEl = document.getElementById('say');
+const say = (s, isError = false) => { sayEl.textContent = s; sayEl.classList.toggle('err', isError); };
+// Failures inside the screen are otherwise invisible: every one ends up in the bottom line.
+const fail = (what, err) => say(`${what}: ${err?.message ?? err}`, true);
+window.addEventListener('error', (e) => fail('画面でエラーが起きました', e.error ?? e.message));
+window.addEventListener('unhandledrejection', (e) => fail('画面でエラーが起きました', e.reason));
+
+const decideButton = document.getElementById('decide');
+const measuredBox = document.getElementById('measured');
+const objectsEl = document.getElementById('objects');
+
+const COLORS = ['#3ddc97', '#4cc9f0', '#f72585', '#ffd166', '#b388ff', '#ff7b54', '#80ed99', '#64dfdf'];
+
+let state = null;      // { imagePath, width, height, edgesM, corners, siteDir, objects }
+let photo = null;      // the decoded image
+let grid = null;       // lines in photo pixels, or null
+let keep = new Set();  // names of the objects the person keeps
+let dragging = -1;
+let solving = false;
+let again = false;
+let solvedOk = false;
+
+const app = new App({ name: 'PsFitFloor', version: '0.1.0' }, {}, { autoResize: true });
+
+// One call to the server: the JSON it answers, or an Error saying what went wrong
+async function call(name, args) {
+  const res = await app.callServerTool({ name, arguments: args });
+  const text = res?.content?.[0]?.text;
+  if (res?.isError) throw new Error(`${name}: ${text ?? 'エラー'}`);
+  try { return JSON.parse(text); }
+  catch { throw new Error(`${name}: 答えを読めませんでした（${String(text).slice(0, 200)}）`); }
+}
+
+function toPhoto(e) {
+  const r = canvas.getBoundingClientRect();
+  return { u: (e.clientX - r.left) / r.width * state.width, v: (e.clientY - r.top) / r.height * state.height };
+}
+
+const colorOf = (i) => COLORS[i % COLORS.length];
+
+function drawObject(o, i, k) {
+  const color = colorOf(i);
+  const pts = o.outline ?? [];
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color + '33';
+  if (pts.length > 1) {
+    ctx.beginPath();
+    pts.forEach(([u, v], j) => (j ? ctx.lineTo(u * k, v * k) : ctx.moveTo(u * k, v * k)));
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+  // Where it touches the ground
+  ctx.fillStyle = color;
+  for (const [u, v] of o.ground_px ?? []) { ctx.beginPath(); ctx.arc(u * k, v * k, 4, 0, 2 * Math.PI); ctx.fill(); }
+  // Its name (never a number alone), on a dark plate above the outline's top-left
+  const top = pts.length ? pts.reduce((a, p) => (p[1] < a[1] ? p : a)) : [o.box[0], o.box[1]];
+  const left = pts.length ? Math.min(...pts.map((p) => p[0])) : o.box[0];
+  ctx.font = 'bold 15px system-ui';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  const w = ctx.measureText(o.name).width + 12;
+  const x = Math.min(Math.max(left * k, 0), canvas.width - w);
+  const y = Math.max(top[1] * k - 14, 11);
+  ctx.fillStyle = 'rgba(20, 22, 26, 0.8)';
+  ctx.fillRect(x, y - 11, w, 22);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(x, y - 11, w, 22);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(o.name, x + 6, y + 1);
+}
+
+function draw() {
+  if (!state) return;
+  const k = canvas.width / state.width;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (photo) ctx.drawImage(photo, 0, 0, canvas.width, canvas.height);
+  // The faint floor and its 1 m grid
+  if (grid) {
+    ctx.strokeStyle = 'rgba(155, 231, 242, 0.75)';
+    ctx.lineWidth = 1.5;
+    for (const line of grid) {
+      const pts = line.filter(Boolean);
+      if (pts.length < 2) continue;
+      ctx.beginPath();
+      pts.forEach(([u, v], i) => (i ? ctx.lineTo(u * k, v * k) : ctx.moveTo(u * k, v * k)));
+      ctx.stroke();
+    }
+  }
+  // The objects the person keeps, each in its own colour
+  (state.objects ?? []).forEach((o, i) => { if (keep.has(o.name)) drawObject(o, i, k); });
+  ctx.fillStyle = 'rgba(255, 180, 84, 0.18)';
+  ctx.beginPath();
+  state.corners.forEach((c, i) => (i ? ctx.lineTo(c.u * k, c.v * k) : ctx.moveTo(c.u * k, c.v * k)));
+  ctx.closePath();
+  ctx.fill();
+  // The corners: orange squares, numbered 1-4
+  state.corners.forEach((c, i) => {
+    const x = c.u * k, y = c.v * k, s = 13;
+    ctx.fillStyle = 'rgba(214, 118, 20, 0.85)';
+    ctx.strokeStyle = '#ffb454';
+    ctx.lineWidth = 2;
+    ctx.fillRect(x - s, y - s, 2 * s, 2 * s);
+    ctx.strokeRect(x - s, y - s, 2 * s, 2 * s);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 15px system-ui';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(i + 1), x, y + 1);
+  });
+}
+
+// The chips under the picture: press one to keep or drop that object
+function showChips() {
+  objectsEl.replaceChildren();
+  (state.objects ?? []).forEach((o, i) => {
+    const b = document.createElement('button');
+    b.className = 'chip' + (keep.has(o.name) ? '' : ' off');
+    b.title = keep.has(o.name) ? '押すと、この物体を使わない' : '押すと、この物体を使う';
+    const sw = document.createElement('span');
+    sw.className = 'sw';
+    sw.style.background = colorOf(i);
+    b.append(sw, document.createTextNode(o.name));
+    b.addEventListener('click', () => {
+      if (keep.has(o.name)) keep.delete(o.name); else keep.add(o.name);
+      showChips();
+      draw();
+    });
+    objectsEl.append(b);
+  });
+}
+
+const FLOOR_OK = '床（薄い格子、1 m ごと）が地面に合っていれば「決定」を、ずれていれば橙の角をつかんで指定し直してください';
+
+// Solve on the server, at most one call in flight
+async function solve() {
+  if (solving) { again = true; return; }
+  solving = true;
+  try {
+    const out = await call('ps_floor_solve', { width: state.width, height: state.height, corners: state.corners, edgesM: state.edgesM });
+    grid = out.ok ? out.lines : null;
+    solvedOk = !!out.ok;
+    if (out.ok) {
+      const note = out.mirrored ? '。角が逆回りなので、床を鏡に映して解きました' : '';
+      const names = (state.objects ?? []).length ? `。物体 ${(state.objects ?? []).length} 個` : '';
+      say(`${FLOOR_OK}（画角 ${out.fovDeg}°、ずれ ${out.residualPx} 画素${names}）${note}`);
+    } else {
+      say(`この角の位置では床が決まりません（${out.reason}）。角を動かしてください`, true);
+    }
+    decideButton.disabled = !out.ok;
+  } catch (err) {
+    solvedOk = false;
+    decideButton.disabled = true;
+    fail('サーバに届きませんでした', err);
+  } finally {
+    solving = false;
+    draw();
+    if (again) { again = false; solve(); }
+  }
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (!state) return;
+  const p = toPhoto(e);
+  const reach = 22 / (canvas.getBoundingClientRect().width / state.width);
+  dragging = state.corners.findIndex((c) => Math.hypot(c.u - p.u, c.v - p.v) < reach);
+  if (dragging >= 0) canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (dragging < 0) return;
+  state.corners[dragging] = toPhoto(e);
+  draw();
+  solve();
+});
+canvas.addEventListener('pointerup', () => { dragging = -1; });
+
+decideButton.addEventListener('click', async () => {
+  decideButton.disabled = true;
+  try {
+    const corners = state.corners.map((c) => ({ u: Math.round(c.u * 10) / 10, v: Math.round(c.v * 10) / 10 }));
+    const objects = (state.objects ?? []).filter((o) => keep.has(o.name)).map((o) => ({ name: o.name, kind: o.kind }));
+    const out = await call('ps_site_decide', {
+      siteDir: state.siteDir, imagePath: state.imagePath, corners, edgesM: state.edgesM, objects,
+      measured: measuredBox.checked,
+    });
+    if (!out.ok) {
+      say(`場所を決定できませんでした: ${out.reason}`, true);
+      decideButton.disabled = !solvedOk;
+      return;
+    }
+    say('決定しました。チャットに結果を返しました');
+    const names = objects.length ? objects.map((o) => o.name).join('、') : 'なし';
+    await app.sendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: `場所を決定しました。場所のファイル: ${out.sitePath}、ずれ ${out.residualPx} 画素、物体: ${names}、長さ: ${measuredBox.checked ? '実測' : '推定'}` }],
+    });
+  } catch (err) {
+    fail('決定できませんでした', err);
+    decideButton.disabled = !solvedOk;
+  }
+});
+
+app.ontoolresult = async ({ content, isError }) => {
+  try {
+    const text = content?.[0]?.text;
+    if (isError) throw new Error(text ?? 'エラー');
+    state = JSON.parse(text);
+    keep = new Set((state.objects ?? []).map((o) => o.name));
+    canvas.width = 1280;
+    canvas.height = Math.round(1280 * state.height / state.width);
+    showChips();
+    draw();
+    // The photo in parts: one result per part keeps each under the host's size cap
+    let b64 = '';
+    for (let part = 0; part < state.parts; part += 1) {
+      say(`写真を読み込んでいます…（${part + 1}/${state.parts}）`);
+      b64 += (await call('ps_spike_image', { imagePath: state.imagePath, part })).data;
+    }
+    photo = new Image();
+    photo.onload = () => { draw(); solve(); };
+    photo.onerror = () => say('写真を表示できませんでした', true);
+    photo.src = `data:image/jpeg;base64,${b64}`;
+  } catch (err) {
+    fail('写真を読み込めませんでした', err);
+  }
+};
+
+app.onhostcontextchanged = (c) => document.documentElement.classList.toggle('dark', c?.theme === 'dark');
+try {
+  await app.connect();
+  document.documentElement.classList.toggle('dark', app.getHostContext()?.theme === 'dark');
+} catch (err) {
+  fail('チャットとつながりませんでした', err);
+}
+</script>

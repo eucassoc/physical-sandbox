@@ -16,6 +16,29 @@ python3.12 -m venv .venv
 
 Python 3.10 or newer, macOS or Linux.
 
+## Fix a site from Claude Desktop
+
+An AI agent looks at a photo, proposes the floor's four corners and the fixed objects, and a screen inside the
+chat shows them over the photo. Drag a corner if it is off, press 決定 (Decide), and the site file is written.
+
+Add this to `claude_desktop_config.json` (Settings > Developer > Edit Config), with your own paths, and quit
+and reopen Claude Desktop with Cmd+Q:
+
+```json
+{
+  "mcpServers": {
+    "physical-sandbox": {
+      "command": "/path/to/physical-sandbox/.venv/bin/python",
+      "args": ["-m", "physical_sandbox.mcp.server"]
+    }
+  }
+}
+```
+
+Needs the `[mcp]` extra, and `[sam]` to cut out objects. Photos stay on your machine; the display copy of a
+photo is kept in `~/.cache/physical-sandbox/` (set `PS_CACHE_DIR` to move it). The site file goes to the
+`siteDir` the agent was given, as `site.json`.
+
 ## License
 
 Apache-2.0. Copyright Atsushi Kojo.

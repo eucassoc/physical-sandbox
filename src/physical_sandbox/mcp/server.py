@@ -42,7 +42,7 @@ from ..floor import solve_floor
 from ..objects import ground_px, sam_segmenter
 from ..site import Floor, ObjectView, Site, SiteObject, load_site, locate_objects, mask_to_rle, save_site
 from ..sources import camera_for, open_source
-from .pack import model_part, pack_model
+from .pack import is_key, model_part, pack_model
 
 URI = "ui://physical-sandbox/fit-floor.html"
 COMPARE_URI = "ui://physical-sandbox/compare.html"
@@ -506,7 +506,9 @@ def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA
         poses.append(rows)
         tips.append(np.array(tip))
     stride = max(1, -(-len(json.dumps(poses, separators=(",", ":"))) // POSES_BUDGET))
-    keep = range(0, len(times), stride)
+    keep = list(range(0, len(times), stride))
+    if keep[-1] != len(times) - 1:
+        keep.append(len(times) - 1)  # the end of the motion is always shown (the last step may be shorter)
     poses = [[rows[k] for k in keep] for rows in poses]
 
     records = []
@@ -514,22 +516,63 @@ def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA
         path = scene.tool_path(m)
         path = path[::max(1, -(-len(path) // MAX_TRAIL_POINTS))]
         records.append({"label": label, "devices": [{
-            "id": m.machine, "centers": _pixels(cam, tip[list(keep)]), "tool_trail": _pixels(cam, path)}]})
+            "id": m.machine, "centers": _pixels(cam, tip[keep]), "tool_trail": _pixels(cam, path)}]})
     floor = None
     if site.floor is not None:
         box = _pixels(cam, site.floor.corners_m)
         floor = box if all(box) else None
+    figures = result.to_dict()
+    series = figures.pop("series")
+    # What the screen draws from goes to disk and comes back through ps_compare_part; what the model reads stays short
+    data_key, data_parts = _store_data({
+        "poses": poses, "t": [times[k] for k in keep], "series": series,
+        "records": [{"devices": r["devices"]} for r in records]})
     out = {
         "imagePath": str(still), "width": img["width"], "height": img["height"],
         "parts": -(-len(img["b64"]) // CHUNK),
         "stepS": float(result.step_s) * stride, "stride": stride, "frames": len(keep),
-        "records": records, "figures": result.to_dict(), "site": _header(site),
+        "records": [{"label": r["label"], "devices": [{"id": d["id"]} for d in r["devices"]]} for r in records],
+        "figures": figures, "site": _header(site),
         "camera": {"intr": {"width": cam.width, "height": cam.height, "fx": float(cam.K[0, 0]),
                             "fy": float(cam.K[1, 1]), "cx": float(cam.K[0, 2]), "cy": float(cam.K[1, 2])},
                    "extr": {"R": [float(x) for x in cam.R.reshape(-1)], "t": [float(x) for x in cam.t]}},
-        "floor": floor, "model": model, "poses": poses,
+        "floor": floor, "model": model, "dataKey": data_key, "dataParts": data_parts,
     }
     return json.dumps(out, separators=(",", ":"))
+
+
+def _compare_dir() -> Path:
+    d = _cache_dir().parent / "compare"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _store_data(data: dict) -> tuple[str, int]:
+    """The screen's data (poses, times, pixel paths, the series) as JSON text under the cache directory, named by
+    the hash of its text. Returns (key, number of CHUNK-character parts). Written atomically; the same data is
+    found, not written again."""
+    text = json.dumps(data, separators=(",", ":"))  # ASCII only: a part is a slice of bytes
+    key = hashlib.sha1(text.encode()).hexdigest()
+    path = _compare_dir() / f"{key}.json"
+    if not path.exists():
+        _write_atomic(path, text.encode())
+    return key, -(-len(text) // CHUNK)
+
+
+@apps.tool(resource_uri=COMPARE_URI, visibility=["app"], description=(
+    "One part of the comparison's data (poses, times, pixel paths) as JSON text (screen only). key is ps_compare's "
+    "dataKey."))
+def ps_compare_part(key: str, part: int) -> str:
+    if not is_key(key):
+        raise ValueError("bad data key")
+    if part < 0:
+        raise ValueError("part must be >= 0")
+    path = _compare_dir() / f"{key}.json"
+    if not path.is_file():
+        raise ValueError(f"no data {key!r}: run ps_compare first")
+    with path.open("rb") as f:
+        f.seek(part * CHUNK)
+        return _json({"part": part, "data": f.read(CHUNK).decode("ascii")})
 
 
 @apps.tool(resource_uri=COMPARE_URI, visibility=["app"], description=(

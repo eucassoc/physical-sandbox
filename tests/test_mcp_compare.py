@@ -100,8 +100,28 @@ def args(w, **over):
     return d
 
 
+def data_of(out):
+    """What the screen fetches with ps_compare_part, as one dict."""
+    text = "".join(json.loads(server.ps_compare_part(out["dataKey"], i))["data"] for i in range(out["dataParts"]))
+    return json.loads(text)
+
+
+def merged(out):
+    """The answer with the screen's data put back in (as the screen does): poses, times, pixel paths, the series."""
+    part = data_of(out)
+    out = dict(out, poses=part["poses"], t=part["t"])
+    out["figures"] = dict(out["figures"], series=part["series"])
+    out["records"] = [{**r, "devices": [{**d, **pd} for d, pd in zip(r["devices"], p["devices"])]}
+                      for r, p in zip(out["records"], part["records"])]
+    return out
+
+
 def compare(w, **over):
-    return json.loads(server.ps_compare(**args(w, **over)))
+    return merged(json.loads(server.ps_compare(**args(w, **over))))
+
+
+def raw_compare(w, **over):
+    return server.ps_compare(**args(w, **over))
 
 
 def text(result):
@@ -132,7 +152,9 @@ def test_the_compare_tool_opens_the_screen_and_the_model_part_tool_is_the_screen
     assert "model" in (tools["ps_compare"]["_meta"]["ui"].get("visibility") or ["model"])
     assert tools["ps_model_part"]["_meta"]["ui"]["resourceUri"] == "ui://physical-sandbox/compare.html"
     assert tools["ps_model_part"]["_meta"]["ui"]["visibility"] == ["app"]
-    for name in ("ps_compare", "ps_model_part"):
+    assert tools["ps_compare_part"]["_meta"]["ui"]["resourceUri"] == "ui://physical-sandbox/compare.html"
+    assert tools["ps_compare_part"]["_meta"]["ui"]["visibility"] == ["app"]
+    for name in ("ps_compare", "ps_model_part", "ps_compare_part"):
         schema = json.dumps(tools[name]["inputSchema"])
         assert "$ref" not in schema and "prefixItems" not in schema, name
     required = set(tools["ps_compare"]["inputSchema"]["required"])
@@ -148,7 +170,7 @@ def test_the_compare_screen_is_served_with_the_bridge_and_three_inlined(world):
     assert "globalThis.ExtApps=" in content.text
     assert "WebGLRenderer" in content.text and "globalThis.THREE" in content.text
     assert server.BUNDLE_MARKER not in content.text and server.THREE_MARKER not in content.text
-    assert "ps_model_part" in content.text and "ps_spike_image" in content.text
+    assert all(n in content.text for n in ("ps_model_part", "ps_compare_part", "ps_spike_image"))
 
 
 def test_three_ships_as_package_data():
@@ -337,15 +359,22 @@ def test_a_separate_start_answers_model_and_picture_parts_from_the_disk(world):
                 model += part["data"]
             past = json.loads(text(await client.call_tool(
                 "ps_model_part", {"key": out["model"]["key"], "part": out["model"]["binParts"]})))
+            data = ""
+            for i in range(out["dataParts"]):
+                data += json.loads(text(await client.call_tool(
+                    "ps_compare_part", {"key": out["dataKey"], "part": i})))["data"]
             image = ""
             for i in range(out["parts"]):
                 image += json.loads(text(await client.call_tool(
                     "ps_spike_image", {"imagePath": out["imagePath"], "part": i})))["data"]
-            return model, past, image
+            return model, past, image, data
 
     out = run(first())
-    model, past, image = run(second(out))
+    model, past, image, data = run(second(out))
     assert past["data"] == ""
+    part = json.loads(data)  # the second start served the same text the first one wrote
+    assert len(part["poses"]) == 2 and len(part["poses"][0]) == out["frames"] and len(part["t"]) == out["frames"]
+    assert all(len(r["devices"][0]["centers"]) == out["frames"] for r in part["records"])
     blob = base64.b64decode(model)
     links = out["model"]["links"]
     end = links[-1]["offset"] + 12 * links[-1]["vCount"] + 4 * links[-1]["iCount"]
@@ -361,35 +390,62 @@ def test_model_part_refuses_a_key_that_is_not_a_pack(world):
     for key in ("../../etc/passwd", "x" * 40, "0" * 40, ""):
         with pytest.raises(ValueError):
             server.ps_model_part(key, 0)
-    compare(world)
+    out = json.loads(raw_compare(world))
     with pytest.raises(ValueError, match="part"):
-        server.ps_model_part(compare(world)["model"]["key"], -1)
+        server.ps_model_part(out["model"]["key"], -1)
+    for key in ("../../etc/passwd", "x" * 40, "0" * 40, "", out["model"]["key"][:39]):
+        with pytest.raises(ValueError):
+            server.ps_compare_part(key, 0)
+    with pytest.raises(ValueError, match="part"):
+        server.ps_compare_part(out["dataKey"], -1)
+    assert json.loads(server.ps_compare_part(out["dataKey"], out["dataParts"]))["data"] == ""
+    # a pack's key is not a comparison's: no file of that name there
+    with pytest.raises(ValueError, match="no data"):
+        server.ps_compare_part(out["model"]["key"], 0)
 
 
 # ---- the size of the answer ----
 
-def test_a_twenty_second_motion_stays_under_two_megabytes(world):
+def long_record(world, name="long.record.json"):
     d = world["dir"]
     long = motion_from_numpy(np.linspace(0, 2.0, 601).reshape(-1, 1), fps=30.0, joint_names=["turn"],
                              machine="blocks", label="long")
-    save_record([long], "yard", d / "long.record.json")
-    raw = server.ps_compare(**args(world, a=str(d / "long.record.json"), b=str(d / "long.record.json")))
-    assert len(raw) < 2_000_000
+    save_record([long], "yard", d / name)
+    return str(d / name)
+
+
+def frames_for(n, stride):
+    """The frames sent: every stride-th and, always, the last."""
+    keep = list(range(0, n, stride))
+    return len(keep) + (0 if keep[-1] == n - 1 else 1)
+
+
+def test_the_text_the_model_reads_is_short_and_the_data_goes_through_parts(world):
+    path = long_record(world)
+    raw = raw_compare(world, a=path, b=path)
+    assert len(raw) < 20_000  # a 20 s motion at 30 fps: no poses, no pixel paths, no series in it
     out = json.loads(raw)
-    assert out["frames"] == len(out["poses"][0]) == len(out["poses"][1])
-    assert out["frames"] == len(range(0, len(out["figures"]["series"]["t"]), out["stride"]))
-    assert out["stepS"] == pytest.approx(out["figures"]["step_s"] * out["stride"])
+    assert not {"poses", "t", "series"} & set(out) and "series" not in out["figures"]
+    assert all("centers" not in d and "tool_trail" not in d for r in out["records"] for d in r["devices"])
+    assert out["figures"]["unknown_reasons"] and out["site"]["dimensionsNote"] and out["dataParts"] > 1
+    full = data_of(out)
+    assert len(json.dumps(full)) < 2_000_000 and len(full["series"]["t"]) == 601  # the numbers' series is in the data
+    assert out["stride"] == 1 and out["frames"] == len(full["poses"][0]) == len(full["t"]) == 601
+    assert full["t"][-1] == pytest.approx(20.0) and full["t"][1] == pytest.approx(out["stepS"])
+    # the same inputs are the same key, and the file is not written twice
+    assert json.loads(raw_compare(world, a=path, b=path))["dataKey"] == out["dataKey"]
 
 
-def test_a_big_answer_is_sampled_every_nth_frame(world, monkeypatch):
+def test_a_big_answer_is_sampled_every_nth_frame_and_ends_on_the_last(world, monkeypatch):
     monkeypatch.setattr(server, "POSES_BUDGET", 20_000)
-    d = world["dir"]
-    long = motion_from_numpy(np.linspace(0, 2.0, 601).reshape(-1, 1), fps=30.0, joint_names=["turn"],
-                             machine="blocks", label="long")
-    save_record([long], "yard", d / "long.record.json")
-    out = json.loads(server.ps_compare(**args(world, a=str(d / "long.record.json"), b=str(d / "long.record.json"))))
-    assert out["stride"] > 1
-    assert out["frames"] == len(out["poses"][0]) == len(out["records"][0]["devices"][0]["centers"])
+    path = long_record(world)
+    out = merged(json.loads(raw_compare(world, a=path, b=path)))
+    n = len(out["figures"]["series"]["t"])
+    assert out["stride"] > 1 and n % out["stride"] != 0  # so the last frame is not on the stride
+    assert out["frames"] == frames_for(n, out["stride"]) == len(out["poses"][0]) == len(out["t"])
+    assert len(out["records"][0]["devices"][0]["centers"]) == out["frames"]
+    assert out["t"][-1] == pytest.approx(out["figures"]["series"]["t"][-1])  # the end of the motion is there
+    assert out["t"][1] == pytest.approx(out["stepS"])
     assert len(json.dumps(out["poses"])) < 40_000
 
 
@@ -458,15 +514,39 @@ def test_a_dense_mesh_is_welded_and_thinned_and_the_pack_is_kept_on_disk(tmp_pat
 
 
 @pytest.mark.skipif(not SO101.exists(), reason="the SO-101 URDF is not on this machine (set PS_SO101_URDF)")
-def test_so101_packs_into_a_screen_sized_model_and_a_twenty_second_answer_fits(tmp_path, monkeypatch):
+def test_so101_packs_into_a_screen_sized_model_and_a_twenty_second_pair_stays_short(tmp_path, monkeypatch):
     monkeypatch.setenv("PS_CACHE_DIR", str(tmp_path / "cache"))
     machine = load_machine(SO101)
     made = pack.pack_model(machine, 20_000)
-    names = [l["name"] for l in made["links"]]
-    assert len(names) >= 6
+    assert len(made["links"]) >= 6
     total_faces = sum(l["iCount"] for l in made["links"]) // 3
     src = machine.model
     visual = [g for g in range(src.ngeom) if src.geom_group[g] == 1 and src.geom_type[g] == int(mujoco.mjtGeom.mjGEOM_MESH)]
     original = sum(int(src.mesh_facenum[src.geom_dataid[g]]) for g in visual)
-    assert total_faces < original / 3
+    # Measured: 0.147 of MuJoCo's faces (about 1/7; 1/5 of the welded ones). The simplifier stalls there on the
+    # motors' non-manifold meshes whatever its aggressiveness (7 to 12, up to 30 rounds, asking for less)
+    print(f"SO-101 pack: {total_faces} of {original} faces = {total_faces / original:.3f}, {made['binParts']} parts")
+    assert total_faces < 0.2 * original
     assert made["binParts"] < 120
+    # a 20 s pair on a desk: the text the model reads stays short, whatever the robot
+    urdf = SO101
+    cam = look_at((-0.6, 0.5, 0.5), target=(0.1, 0, 0.15), size=(640, 480), f=500)
+    site = Site(id="desk", cameras={"camera": cam}, residual_px={"camera": 0.5}, confirmed_by_person=False,
+                dimensions="estimated")
+    save_site(site, tmp_path / "site.json")
+    placed = PlacedMachine(machine=machine, urdf=str(urdf), x=0.0, y=0.0, yaw=0.0)
+    save_scene(Scene(site=site, machines={"so101": placed}), tmp_path / "scene.json")
+    lo, hi = machine.limits[:, 0], machine.limits[:, 1]
+    t = np.linspace(0, 2 * np.pi, 601)[:, None]
+    for name, ph in (("a", 0.0), ("b", 0.25)):
+        u = 0.5 + 0.35 * np.sin(t * np.arange(1, 7)[None] * 0.5 + ph)
+        save_record([motion_from_numpy(lo + u * (hi - lo), fps=30.0, joint_names=machine.joint_names,
+                                       machine="so101", label=name)], "desk", tmp_path / f"{name}.record.json")
+    still = tmp_path / "still.png"
+    cv2.imwrite(str(still), np.full((480, 640, 3), 120, np.uint8))
+    raw = server.ps_compare(siteDir=str(tmp_path), scenePath=str(tmp_path / "scene.json"), camera="camera",
+                            a=str(tmp_path / "a.record.json"), b=str(tmp_path / "b.record.json"), video=str(still))
+    out = json.loads(raw)
+    print(f"SO-101 20 s pair: model-facing text {len(raw)} chars, data {len(json.dumps(data_of(out)))} chars "
+          f"in {out['dataParts']} parts")
+    assert len(raw) < 20_000 and out["frames"] == 601 and out["stride"] == 1

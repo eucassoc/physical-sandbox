@@ -88,7 +88,7 @@ def test_tool_list_marks_the_screen_and_hides_the_screen_only_tools(env):
             return [t.model_dump(by_alias=True) for t in (await client.list_tools()).tools]
     tools = {t["name"]: t for t in run(go())}
     assert set(tools) == {"ps_fit_floor", "ps_spike_image", "ps_floor_solve", "ps_objects_propose",
-                          "ps_site_decide", "ps_site_status", "ps_compare", "ps_model_part"}
+                          "ps_site_decide", "ps_site_status", "ps_compare", "ps_model_part", "ps_compare_part"}
     for name in ("ps_fit_floor", "ps_spike_image", "ps_floor_solve", "ps_objects_propose", "ps_site_decide"):
         assert tools[name]["_meta"]["ui"]["resourceUri"] == "ui://physical-sandbox/fit-floor.html"
     for name in ("ps_spike_image", "ps_floor_solve", "ps_site_decide"):

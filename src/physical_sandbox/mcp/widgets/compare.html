@@ -70,8 +70,8 @@ const sayEl = document.getElementById('say');
 const say = (s, isError = false) => { sayEl.textContent = s; sayEl.classList.toggle('err', isError); };
 // Failures inside the screen are otherwise invisible: every one ends up in the bottom line.
 const fail = (what, err) => say(`${what}: ${err?.message ?? err}`, true);
-window.addEventListener('error', (e) => fail('画面でエラーが起きました', e.error ?? e.message));
-window.addEventListener('unhandledrejection', (e) => fail('画面でエラーが起きました', e.reason));
+window.addEventListener('error', (e) => fail('表示できませんでした', e.error ?? e.message));
+window.addEventListener('unhandledrejection', (e) => fail('表示できませんでした', e.reason));
 
 const COLORS = ['#2f7fe0', '#f08c1a'];   // record A blue, record B orange
 const show = { recA: true, recB: true, machine: true, box: true, trail: true, link: true };
@@ -79,7 +79,8 @@ let data = null;
 let photo = null;
 let frame = 0;
 let timer = null;
-let three = null;       // { renderer, scene, camera, records: [group per record, its meshes with the link index] }
+let three = null;       // { renderer, scene, camera, records, geometries, materials }
+let ready = false;      // the poses, times and pixel paths have arrived
 let generation = 0;     // counts the tool results: an older one's loads must not touch the newer
 
 const app = new App({ name: 'PsCompare', version: '0.1.0' }, {}, { autoResize: true });
@@ -184,11 +185,20 @@ async function buildMachines(mine) {
   });
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 600);
   placeCamera(camera, data.camera);
-  three = { renderer, scene, camera, records };
+  three = { renderer, scene, camera, records, geometries, materials: [depthOnly, ...materials] };
+}
+
+/** Frees the previous result's GPU memory (shapes, materials, the renderer's own buffers). */
+function release() {
+  if (!three) return;
+  three.geometries.forEach((g) => g.dispose());
+  three.materials.forEach((m) => m.dispose());
+  three.renderer.dispose();
+  three = null;
 }
 
 function drawMachines() {
-  if (!three) return;
+  if (!three || !ready) return;
   const { renderer, scene, camera, records } = three;
   const shown = [];
   records.forEach((rec, r) => {
@@ -226,7 +236,7 @@ function strokePath(points, close) {
 }
 
 function draw() {
-  if (!data) return;
+  if (!data || !ready) return;
   const k = canvas.width / data.width;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -252,16 +262,17 @@ function draw() {
         strokePath(dev.tool_trail, false);
         ctx.stroke();
         ctx.setLineDash([]);
-        const tip = dev.centers[frame];
-        if (tip) {
-          ctx.beginPath();
-          ctx.arc(tip[0], tip[1], 6 / k, 0, 2 * Math.PI);
-          ctx.fillStyle = COLORS[r];
-          ctx.fill();
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 2 / k;
-          ctx.stroke();
-        }
+      }
+      // The tool tip belongs to the record, so it stays with the path hidden
+      const tip = dev.centers[frame];
+      if (tip) {
+        ctx.beginPath();
+        ctx.arc(tip[0], tip[1], 6 / k, 0, 2 * Math.PI);
+        ctx.fillStyle = COLORS[r];
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2 / k;
+        ctx.stroke();
       }
     }
   });
@@ -277,8 +288,8 @@ function draw() {
     }
   }
   drawMachines();
-  const total = (data.frames - 1) * data.stepS;
-  document.getElementById('clock').textContent = `${(frame * data.stepS).toFixed(1)} / ${total.toFixed(1)} s`;
+  const total = data.t[data.t.length - 1];
+  document.getElementById('clock').textContent = `${data.t[frame].toFixed(1)} / ${total.toFixed(1)} s`;
 }
 
 function drawPhoto() {
@@ -286,6 +297,13 @@ function drawPhoto() {
   c.fillStyle = '#222';
   c.fillRect(0, 0, photoCanvas.width, photoCanvas.height);
   if (photo) c.drawImage(photo, 0, 0, photoCanvas.width, photoCanvas.height);
+}
+
+/** The frame whose time is closest to t seconds. */
+function nearestFrame(t) {
+  let best = 0;
+  data.t.forEach((x, i) => { if (Math.abs(x - t) < Math.abs(data.t[best] - t)) best = i; });
+  return best;
 }
 
 function setFrame(i) {
@@ -305,6 +323,8 @@ const mm = (m) => `${(m * 1000).toFixed(1)} mm`;
 const deg = (r) => `${(r * 180 / Math.PI).toFixed(1)}°`;
 const sec = (s) => `${s.toFixed(2)} s`;
 const dash = (v, f) => (v === null || v === undefined ? '—' : f(v));
+// What the numbers cannot tell yet, in words a person reads (the server's names otherwise)
+const UNKNOWN_NAMES = { clearance: '周りとのすき間', reach: '届いたか', world: '世界の食い違い', grasps: 'つかむ瞬間' };
 const when = (t) => `<span class="go" data-t="${t}">${sec(t)}</span>`;   // a time that jumps the slider there
 
 function figures() {
@@ -326,12 +346,13 @@ function figures() {
     f.grasps.forEach((g, i) => row(`${i + 1} 回目につかんだとき`, `手先のずれ ${mm(g.tool_gap_m)}（A の ${when(g.a_s)}、B の ${sec(g.b_s)}）`));
   }
   for (const name of f.unknown) {
-    row(`${name}（まだ分かりません）`, `<span class="why">${esc(f.unknown_reasons[name] ?? '')}</span>`);
+    row(`${UNKNOWN_NAMES[name] ?? name}（まだ分かりません）`, `<span class="why">${esc(f.unknown_reasons[name] ?? '')}</span>`);
   }
   document.getElementById('figures').innerHTML = rows.join('');
   document.getElementById('figures').querySelectorAll('.go').forEach((el) => el.addEventListener('click', () => {
+    if (!ready) return;
     stop();
-    setFrame(Math.round(Number(el.dataset.t) / data.stepS));
+    setFrame(nearestFrame(Number(el.dataset.t)));
   }));
   const px = Object.entries(site.residualPx).map(([cam, v]) => `${esc(cam)} ${v.toFixed(1)} px`).join('、');
   document.getElementById('site').innerHTML =
@@ -349,7 +370,7 @@ document.querySelectorAll('[data-show]').forEach((box) => box.addEventListener('
 }));
 slider.addEventListener('input', () => { stop(); setFrame(Number(slider.value)); });
 playButton.addEventListener('click', () => {
-  if (!data) return;
+  if (!data || !ready) return;
   if (timer) { stop(); return; }
   if (frame >= data.frames - 1) setFrame(0);
   playButton.textContent = '一時停止';
@@ -367,26 +388,25 @@ function disable(id, box) {
 app.ontoolresult = async (result) => {
   const mine = ++generation;
   stop();
+  release();
+  ready = false;
   const body = result?.content?.[0]?.text;
-  if (result?.isError) { say(`比べられませんでした: ${String(body).slice(0, 400)}`, true); return; }
+  if (result?.isError) { say(`比較できませんでした: ${String(body).slice(0, 400)}`, true); return; }
   try {
     data = JSON.parse(body);
-  } catch (err) { say(`受け取れませんでした: ${String(body).slice(0, 200)}`, true); return; }
-  three = null;
+  } catch (err) { say(`表示できませんでした: ${String(body).slice(0, 200)}`, true); return; }
   photo = null;
   frame = 0;
   const h = Math.round(1280 * data.height / data.width);
   for (const c of [photoCanvas, canvas, glCanvas]) { c.width = 1280; c.height = h; }
   slider.max = String(data.frames - 1);
   slider.value = '0';
-  slider.disabled = playButton.disabled = data.frames < 2;
-  document.getElementById('lblBox').classList.remove('off');
+  slider.disabled = playButton.disabled = true;
+  document.getElementById('lblBox').classList.toggle('off', !data.floor);
   document.querySelector('[data-show=box]').disabled = !data.floor;
-  if (!data.floor) document.getElementById('lblBox').classList.add('off');
   figures();
   drawPhoto();
-  draw();
-  say('映像とロボットを読み込んでいます…');
+  say('映像・ロボット・動きを読み込んでいます…');
   const photoDone = (async () => {
     const b64 = await fetchParts('ps_spike_image', { imagePath: data.imagePath }, data.parts);
     const img = new Image();
@@ -395,7 +415,20 @@ app.ontoolresult = async (result) => {
     if (mine !== generation) return;
     photo = img;
     drawPhoto();
-  })().catch((err) => fail('映像を受け取れませんでした', err));
+  })().catch((err) => fail('映像を表示できませんでした', err));
+  // The poses, times and pixel paths are kept by the server on disk: they do not come with the answer
+  const dataDone = (async () => {
+    const part = JSON.parse(await fetchParts('ps_compare_part', { key: data.dataKey }, data.dataParts));
+    if (mine !== generation) return;
+    data.poses = part.poses;
+    data.t = part.t;
+    data.figures.series = part.series;
+    data.records.forEach((rec, i) => rec.devices.forEach((dev, j) => Object.assign(dev, part.records[i].devices[j])));
+    ready = true;
+    slider.disabled = playButton.disabled = data.frames < 2;
+    draw();
+    requestAnimationFrame(() => { if (mine === generation) draw(); });
+  })().catch((err) => fail('動きを表示できませんでした', err));
   const machineDone = (async () => {
     if (!THREE) throw new Error('three が読み込まれていません');
     await buildMachines(mine);
@@ -405,10 +438,10 @@ app.ontoolresult = async (result) => {
     requestAnimationFrame(() => { if (mine === generation) draw(); });
   })().catch((err) => {
     disable('lblMachine', 'machine');
-    fail('ロボットを出せませんでした（通り道と床の枠だけで見られます）', err);
+    fail('ロボットを表示できませんでした（通り道と床の枠だけで見られます）', err);
   });
-  await Promise.all([photoDone, machineDone]);
-  if (mine === generation && photo && three) say('');
+  await Promise.all([photoDone, dataDone, machineDone]);
+  if (mine === generation && photo && three && ready) say('');
 };
 
 app.onhostcontextchanged = (c) => document.documentElement.classList.toggle('dark', c?.theme === 'dark');

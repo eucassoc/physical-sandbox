@@ -41,6 +41,11 @@ _ELLIPSOID = int(mujoco.mjtGeom.mjGEOM_ELLIPSOID)
 _BOX = int(mujoco.mjtGeom.mjGEOM_BOX)
 
 
+def is_key(key) -> bool:
+    """Whether ``key`` looks like a pack's or a comparison's key (40 hex characters): no path can get through."""
+    return isinstance(key, str) and bool(_KEY.match(key))
+
+
 def _models_dir() -> Path:
     d = Path(os.environ.get("PS_CACHE_DIR", "~/.cache/physical-sandbox")).expanduser() / "models"
     d.mkdir(parents=True, exist_ok=True)
@@ -223,7 +228,7 @@ def pack_model(machine: Machine, chunk: int) -> dict:
 
 def model_part(key: str, part: int, chunk: int) -> str:
     """One ``chunk``-character part of the pack's base64 text ('' past the end)."""
-    if not isinstance(key, str) or not _KEY.match(key):
+    if not is_key(key):
         raise ValueError("bad model key")
     if part < 0:
         raise ValueError("part must be >= 0")

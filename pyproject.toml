@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "physical-sandbox"
+version = "0.1.0"
+description = "Overlay robots on photos and videos of a real site at real scale, and compare motions with numbers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Atsushi Kojo" }]
+dependencies = [
+  "numpy",
+  "opencv-python-headless",
+  "mujoco>=3",
+  "pyarrow",
+  "matplotlib",
+]
+
+[project.optional-dependencies]
+sam = ["ultralytics"]
+mcp = ["mcp>=2.3", "fast-simplification"]
+dev = ["pytest"]
+
+[project.scripts]
+psbx = "physical_sandbox.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

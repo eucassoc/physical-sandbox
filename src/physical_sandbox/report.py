@@ -44,7 +44,7 @@ def _rows(d: dict, header: dict) -> list[tuple]:
     for k, v in d["jerk"].items():
         rows.append((f"jerk.{k}", v, "m/s^3", None, ""))
     if d.get("grip_threshold") is not None:
-        rows.append(("grip_threshold", d["grip_threshold"], "rad", None, "gripper value a grasp closes through"))
+        rows.append(("grip_threshold", d["grip_threshold"], "rad", None, "グリッパーがこの値を下回ったときを、つかむ瞬間とする"))
     found_none = "grasps" in d["unknown"]
     for k, v in d["grasp_counts"].items():
         rows.append((f"grasp_count.{k}", v, "count", None, d["unknown_reasons"].get("grasps", "") if found_none else ""))

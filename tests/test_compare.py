@@ -173,3 +173,95 @@ def test_refuses_different_machines_or_joints(scene):
         compare(scene, a, _motion([0.0, 0.1], names=["slide", "side", "grip"]))
     with pytest.raises(ValueError, match="step_s"):
         compare(scene, a, a, step_s=0)
+
+
+# --- DTW (the path shape without time) ---------------------------------------------------------
+
+def _full_dtw_mean(pa, pb):
+    """Plain O(N*M) python DTW with the same tie-break (diagonal, then i-1, then j-1)."""
+    n, m = len(pa), len(pb)
+    acc = np.full((n + 1, m + 1), np.inf)
+    length = np.zeros((n + 1, m + 1), int)
+    acc[0, 0] = 0.0
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            opts = [(acc[i - 1, j - 1], length[i - 1, j - 1]), (acc[i - 1, j], length[i - 1, j]),
+                    (acc[i, j - 1], length[i, j - 1])]
+            best = min(range(3), key=lambda k: opts[k][0])
+            acc[i, j] = np.linalg.norm(pa[i - 1] - pb[j - 1]) + opts[best][0]
+            length[i, j] = opts[best][1] + 1
+    return acc[n, m] / length[n, m]
+
+
+def test_dtw_hand_computed_value():
+    from physical_sandbox.compare import _dtw_mean
+
+    pa = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], float)
+    pb = np.array([[0, 0, 0], [2, 0, 1]], float)
+    # costs: a0 [0, sqrt5], a1 [1, sqrt2], a2 [2, 1]; best path (0,0),(1,0),(2,1) = 0 + 1 + 1 over 3 pairs
+    # (the 4-pair path (0,0),(1,0),(1,1),(2,1) costs 0+1+sqrt2+1, the diagonal-ish (0,0),(1,1),(2,1) costs 0+sqrt2+1)
+    assert _dtw_mean(pa, pb) == pytest.approx(2.0 / 3.0, abs=1e-12)
+
+
+@pytest.mark.parametrize("n,m", [(12, 12), (15, 9), (7, 20)])
+def test_banded_dtw_equals_the_full_one_when_the_band_covers_the_path(n, m):
+    from physical_sandbox.compare import _dtw_mean
+
+    rng = np.random.default_rng(n * 100 + m)
+    pa, pb = rng.normal(size=(n, 3)), rng.normal(size=(m, 3))
+    full = _full_dtw_mean(pa, pb)
+    assert _dtw_mean(pa, pb, band=max(n, m)) == pytest.approx(full, abs=1e-12)
+
+
+def test_a_narrow_band_can_only_cost_more():
+    from physical_sandbox.compare import _dtw_mean
+
+    rng = np.random.default_rng(3)
+    pa, pb = rng.normal(size=(40, 3)), rng.normal(size=(40, 3))
+    assert _dtw_mean(pa, pb, band=2) >= _dtw_mean(pa, pb, band=40) - 1e-12
+
+
+def test_dtw_memory_stays_bounded_for_long_motions():
+    import tracemalloc
+
+    from physical_sandbox.compare import _dtw_mean
+
+    t = np.linspace(0, 1, 4000)
+    pa = np.column_stack([t, np.zeros_like(t), np.zeros_like(t)])
+    tracemalloc.start()
+    try:
+        _dtw_mean(pa, pa + [0.0, 0.01, 0.0])
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 120e6  # the old full cost tensor alone would be 4000 * 4000 * 3 * 8 = 384 MB
+
+
+def test_dtw_refuses_a_band_matrix_over_the_limit(monkeypatch):
+    import physical_sandbox.compare as cmp
+
+    monkeypatch.setattr(cmp, "_MAX_DTW_CELLS", 1000)
+    pa = np.zeros((500, 3))
+    with pytest.raises(ValueError, match=r"500.*500|DTW"):
+        cmp._dtw_mean(pa, pa)
+
+
+# --- jerk ----------------------------------------------------------------------------------------
+
+def test_jerk_of_a_cubic_ramp_is_six_times_its_coefficient(scene):
+    c3 = 0.5  # x(t) = c3 t^3, so the third derivative is 6 c3 = 3 m/s^3 everywhere
+    t = np.arange(0, 1.0 + 1e-9, 1 / 60)
+    ramp = _motion(c3 * t ** 3, fps=60.0)
+    for step in (1 / 60, 1 / 30, 1 / 20):  # every step is a whole number of samples, so the grid is exact
+        c = compare(scene, ramp, ramp, step_s=step)
+        assert c.jerk["a"] == pytest.approx(6 * c3, rel=1e-6)
+        assert c.jerk["b"] == pytest.approx(6 * c3, rel=1e-6)
+
+
+def test_jerk_is_nan_with_fewer_than_four_samples_and_null_in_the_dict(scene):
+    short = _motion([0.0, 0.1, 0.2])  # 3 samples at 30 fps
+    c = compare(scene, short, short)
+    assert math.isnan(c.jerk["a"]) and math.isnan(c.jerk["b"])
+    d = c.to_dict()
+    assert d["jerk"] == {"a": None, "b": None}
+    assert json.loads(json.dumps(d, allow_nan=False)) == d

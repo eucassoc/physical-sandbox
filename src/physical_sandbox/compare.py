@@ -26,7 +26,7 @@ class Comparison:
     shape_deviation_m: float  # mean tool-tip distance along the DTW path of the two tool paths
     joints: dict  # {name: {mean_rad, max_rad, at_s}}
     duration_s: dict  # {a, b, diff} with diff = b - a
-    jerk: dict  # {a, b}: RMS of the tool tip's third derivative, m/s^3
+    jerk: dict  # {a, b}: RMS of the tool tip's third derivative, m/s^3 (NaN under 4 samples; null in to_dict)
     grasps: list  # [{a_s, b_s, tool_gap_m}]
     grasp_counts: dict  # {a, b}: grasps found in each motion (unpaired ones are not in ``grasps``)
     series: dict  # {t, tool_gap_m} for plotting
@@ -34,7 +34,7 @@ class Comparison:
     unknown_reasons: dict = field(default_factory=lambda: {k: _STAGE3 for k in _UNKNOWN})
 
     def to_dict(self) -> dict:
-        """Plain JSON types only."""
+        """Plain JSON types only (a NaN jerk becomes null)."""
         return {
             "labels": dict(self.labels),
             "step_s": float(self.step_s),
@@ -42,7 +42,7 @@ class Comparison:
             "shape_deviation_m": float(self.shape_deviation_m),
             "joints": {n: {k: float(v) for k, v in d.items()} for n, d in self.joints.items()},
             "duration_s": {k: float(v) for k, v in self.duration_s.items()},
-            "jerk": {k: float(v) for k, v in self.jerk.items()},
+            "jerk": {k: (float(v) if math.isfinite(v) else None) for k, v in self.jerk.items()},
             "grasps": [{k: float(v) for k, v in g.items()} for g in self.grasps],
             "grasp_counts": {k: int(v) for k, v in self.grasp_counts.items()},
             "series": {"t": [float(x) for x in self.series["t"]],
@@ -72,28 +72,54 @@ def _tips(scene: Scene, m: Motion, times) -> np.ndarray:
     return scene.tool_path(_sampled(m, np.asarray(times, float)))
 
 
-def _dtw_mean(pa: np.ndarray, pb: np.ndarray) -> float:
-    """Total Euclidean cost along the optimal DTW path divided by the number of matched pairs."""
+# DTW keeps an (N + 1) x (2 * band + 3) matrix of float64 costs and int32 lengths (12 bytes a cell).
+# 30 million cells is about 360 MB: a 5 minute pair at 30 fps (9000 samples each, default band) needs 16 million.
+_MAX_DTW_CELLS = 30_000_000
+
+
+def _dtw_mean(pa: np.ndarray, pb: np.ndarray, band: int | None = None) -> float:
+    """Total Euclidean cost along the optimal DTW path divided by the number of matched pairs.
+
+    The path is kept inside a Sakoe-Chiba band ``|i - j| <= band`` (``band`` is raised to ``|N - M|`` so the
+    end points can meet; the default is ``max(|N - M|, 10 % of max(N, M), 10)`` samples). A path that would
+    leave the band (for example a long wait in the middle of one motion only) is not found, and the result is
+    then at least the unbanded value. Memory is the band only, never N x M: when the band matrix would exceed
+    ``_MAX_DTW_CELLS`` cells a ValueError names the sizes (use a larger ``step_s``).
+    """
     n, m = len(pa), len(pb)
-    cost = np.sqrt(((pa[:, None, :] - pb[None, :, :]) ** 2).sum(axis=2))
-    acc = np.full((n + 1, m + 1), np.inf)
-    length = np.zeros((n + 1, m + 1), int)
-    acc[0, 0] = 0.0
-    for k in range(2, n + m + 1):  # anti-diagonals: every cell depends only on the two before it
-        i = np.arange(max(1, k - m), min(n, k - 1) + 1)
+    if band is None:
+        band = max(abs(n - m), math.ceil(0.1 * max(n, m)), 10)
+    w = int(max(band, abs(n - m)))
+    cells = (n + 1) * (2 * w + 3)
+    if cells > _MAX_DTW_CELLS:
+        raise ValueError(f"DTW of {n} x {m} samples with a band of {w} needs {cells} cells, over the limit "
+                         f"{_MAX_DTW_CELLS}; compare with a larger step_s")
+    acc = np.full((n + 1, 2 * w + 3), np.inf)
+    length = np.zeros((n + 1, 2 * w + 3), np.int32)
+    # cell (i, j) lives at acc[i, j - i + w + 1]; the two spare columns stay inf (outside the band)
+    acc[0, w + 1] = 0.0
+    for k in range(2, n + m + 1):  # anti-diagonals i + j = k: each cell depends only on the two before it
+        lo = max(1, k - m, -((w - k) // 2))  # ceil((k - w) / 2)
+        hi = min(n, k - 1, (k + w) // 2)
+        if lo > hi:
+            continue
+        i = np.arange(lo, hi + 1)
         j = k - i
-        cand = np.stack([acc[i - 1, j - 1], acc[i - 1, j], acc[i, j - 1]])
-        lens = np.stack([length[i - 1, j - 1], length[i - 1, j], length[i, j - 1]])
+        c = j - i + w + 1
+        cand = np.stack([acc[i - 1, c], acc[i - 1, c + 1], acc[i, c - 1]])
+        lens = np.stack([length[i - 1, c], length[i - 1, c + 1], length[i, c - 1]])
         pick = cand.argmin(axis=0)
         cols = np.arange(len(i))
-        acc[i, j] = cost[i - 1, j - 1] + cand[pick, cols]
-        length[i, j] = lens[pick, cols] + 1
-    return float(acc[n, m] / length[n, m])
+        acc[i, c] = np.linalg.norm(pa[i - 1] - pb[j - 1], axis=1) + cand[pick, cols]
+        length[i, c] = lens[pick, cols] + 1
+    end = m - n + w + 1
+    return float(acc[n, end] / length[n, end])
 
 
 def _jerk(tips: np.ndarray, step_s: float) -> float:
+    """RMS of the third finite difference of the tool tip / step_s^3 (m/s^3); NaN under 4 samples."""
     if len(tips) < 4:
-        return 0.0
+        return float("nan")
     d3 = np.diff(tips, n=3, axis=0) / step_s ** 3
     return float(np.sqrt((d3 ** 2).sum(axis=1).mean()))
 
@@ -110,7 +136,13 @@ def _closings(m: Motion, joint: int, threshold: float) -> list:
 
 def compare(scene: Scene, a: Motion, b: Motion, *, step_s: float = 1 / 30,
             grip_threshold: float | None = None) -> Comparison:
-    """Numbers for the gaps between motions ``a`` and ``b`` of the same machine placed in ``scene``."""
+    """Numbers for the gaps between motions ``a`` and ``b`` of the same machine placed in ``scene``.
+
+    Everything is measured on the ``step_s`` grid (each motion linearly resampled), so jerk is the jerk of
+    that resampled tool tip: a coarse ``step_s`` smooths it, and a motion with fewer than 4 grid samples
+    has no jerk (NaN). The path shape uses a banded DTW (see ``_dtw_mean``), which raises ValueError for
+    motions too long for the memory limit.
+    """
     if not step_s > 0:
         raise ValueError(f"step_s must be positive, got {step_s}")
     if a.machine != b.machine:

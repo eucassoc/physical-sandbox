@@ -89,13 +89,15 @@ def save_scene(scene: Scene, path) -> None:
 
     The machines' urdf paths are stored relative to the scene folder, so the folder can be moved or shared.
     An existing ``<name>.record.json`` is overwritten only when the scene file already at ``path`` lists it;
-    otherwise ``FileExistsError``. Both files are written to temporary names first, then renamed (the
+    otherwise ``FileExistsError``. Saving a scene without motions removes the record the previous save of
+    this scene listed. Both files are written to temporary names first, then renamed (the
     record, then the scene), so a failure does not leave a half-written pair.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     rec = path.with_name(f"{path.stem}.record.json")
-    if scene.motions and rec.exists() and not _lists_record(path, rec.name):
+    owned = _lists_record(path, rec.name)
+    if scene.motions and rec.exists() and not owned:
         raise FileExistsError(f"{rec} already exists and is not this scene's record; "
                               f"choose another scene name or remove it")
     data = {
@@ -115,6 +117,8 @@ def save_scene(scene: Scene, path) -> None:
         if scene.motions:
             os.replace(tmp_rec, rec)
         os.replace(tmp_scene, path)
+        if not scene.motions and owned:
+            rec.unlink(missing_ok=True)  # the scene no longer lists it, and it was this scene's own
     finally:
         tmp_rec.unlink(missing_ok=True)
         tmp_scene.unlink(missing_ok=True)
@@ -139,8 +143,10 @@ def load_scene(path, site: Site) -> Scene:
     """Read a scene file for ``site``; refuses a scene made for another site.
 
     A scene file is treated as untrusted: its records must be plain relative paths that stay inside the
-    scene folder. A machine's urdf is looked up in the scene folder first, then as written (it may point
-    outside the folder on purpose, e.g. ``../robots/arm.urdf``); it is only read as a machine description.
+    scene folder. A machine's urdf is looked up in the scene folder first, then as written, and may point
+    outside the folder on purpose (robot folders are shared, e.g. ``../robots/arm.urdf``). The urdf and the
+    meshes it names are read and copied into the cache, so a scene from an untrusted source can make this
+    tool read the files its urdf points at (nothing is sent anywhere).
     """
     path = Path(path)
     data = json.loads(path.read_text())

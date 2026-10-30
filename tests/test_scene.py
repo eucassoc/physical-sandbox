@@ -168,7 +168,7 @@ def test_missing_urdf_names_machine_and_candidates(tmp_path):
     path = tmp_path / "scene.json"
     path.write_text(json.dumps({"format": "physical-sandbox.scene/1", "site": "s-1", "records": [],
                                 "machines": {"arm": {"urdf": "gone.urdf", "x": 0, "y": 0, "yaw": 0}}}))
-    with pytest.raises(ValueError, match=r"'arm'.*gone\.urdf.*scene\.json|'arm'.*gone\.urdf") as e:
+    with pytest.raises(ValueError, match=r"machine 'arm': urdf 'gone\.urdf' not found") as e:
         load_scene(path, Site(id="s-1", cameras={}))
     assert str(tmp_path / "gone.urdf") in str(e.value)
 
@@ -215,5 +215,23 @@ def test_load_names_missing_keys(tmp_path):
     path = tmp_path / "scene.json"
     path.write_text(json.dumps({"format": "physical-sandbox.scene/1", "site": "s-1", "records": [],
                                 "machines": {"arm": {"urdf": "x.urdf", "x": 0}}}))
-    with pytest.raises(ValueError, match="'arm'.*'y'|'arm'.*'urdf'"):
+    with pytest.raises(ValueError, match="machine 'arm': missing 'y'"):
         load_scene(path, Site(id="s-1", cameras={}))
+
+
+def test_save_with_then_without_then_with_motions(urdf, tmp_path):
+    path = tmp_path / "scene.json"
+    site = Site(id="s-1", cameras={})
+    save_scene(_scene(urdf), path)
+    assert (tmp_path / "scene.record.json").exists()
+    save_scene(_scene(urdf, with_motion=False), path)
+    assert not (tmp_path / "scene.record.json").exists()  # its own record goes with the motions
+    save_scene(_scene(urdf), path)  # no FileExistsError on the user's own file
+    assert len(load_scene(path, site).motions) == 1
+
+
+def test_save_without_motions_keeps_unrelated_record(urdf, tmp_path):
+    other = tmp_path / "scene.record.json"
+    other.write_text("precious")
+    save_scene(_scene(urdf, with_motion=False), tmp_path / "scene.json")
+    assert other.read_text() == "precious"

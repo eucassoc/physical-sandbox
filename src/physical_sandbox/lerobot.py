@@ -17,8 +17,10 @@ from .motion import Motion
 # Dataset units -> URDF joint range. Per joint: (in_lo, in_hi, sign). The dataset normalises the five
 # arm joints to -100..100 and the gripper to 0..100; the value is mapped linearly onto the URDF's
 # [lower, upper] (sign -1 flips the direction).
-# UNVERIFIED: this mapping has not been checked against the video yet (Task 15 corrects it by
-# overlaying the robot on the recording). Treat angles from it as approximate.
+# Checked by eye on lerobot/svla_so101_pickplace (examples/so101-pickplace): with physical-sandbox-proto's
+# SO-101 URDF, the shell drawn from these angles lies on the real arm at rest, at the grasp and over the
+# tray, so no direction or end needed correcting. Not measured: an offset of a few degrees per joint would
+# not show at that camera's scale, and another calibration of the same arm may differ.
 JOINT_MAP: dict = {
     "shoulder_pan": (-100.0, 100.0, 1),
     "shoulder_lift": (-100.0, 100.0, 1),

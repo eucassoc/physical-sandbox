@@ -53,6 +53,9 @@ let dragging = -1;
 let solving = false;
 let again = false;
 let solvedOk = false;
+let decidedOnce = false; // a site file was written for this screen
+let dirty = true;        // something changed since the last 決定 (or nothing was decided yet)
+let generation = 0;      // counts the tool results; an older one's photo load must not touch the newer
 
 const app = new App({ name: 'PsFitFloor', version: '0.1.0' }, {}, { autoResize: true });
 
@@ -161,9 +164,18 @@ function showChips() {
       if (keep.has(o.name)) keep.delete(o.name); else keep.add(o.name);
       showChips();
       draw();
+      changed('物体の選択を変えました');
     });
     objectsEl.append(b);
   });
+}
+
+// 決定 is enabled while the floor solves and there is something new to decide
+function updateDecide() { decideButton.disabled = !(solvedOk && dirty); }
+function changed(why) {
+  dirty = true;
+  updateDecide();
+  if (decidedOnce) say(`${why}。もう一度「決定」すると、場所のファイルを上書きします`);
 }
 
 const FLOOR_OK = '床（薄い格子、1 m ごと）が地面に合っていれば「決定」を、ずれていれば橙の角をつかんで指定し直してください';
@@ -172,26 +184,29 @@ const FLOOR_OK = '床（薄い格子、1 m ごと）が地面に合っていれ�
 async function solve() {
   if (solving) { again = true; return; }
   solving = true;
+  const mine = state;
   try {
-    const out = await call('ps_floor_solve', { width: state.width, height: state.height, corners: state.corners, edgesM: state.edgesM });
+    const out = await call('ps_floor_solve', { width: mine.width, height: mine.height, corners: mine.corners, edgesM: mine.edgesM });
+    if (mine !== state) { again = true; return; } // a newer tool result replaced the state meanwhile
     grid = out.ok ? out.lines : null;
     solvedOk = !!out.ok;
     if (out.ok) {
-      const note = out.mirrored ? '。角が逆回りなので、床を鏡に映して解きました' : '';
+      const note = (out.mirrored ? '。角が逆回りなので、床を鏡に映して解きました' : '')
+        + (decidedOnce && dirty ? '。もう一度「決定」すると、場所のファイルを上書きします' : '');
       const names = (state.objects ?? []).length ? `。物体 ${(state.objects ?? []).length} 個` : '';
       say(`${FLOOR_OK}（画角 ${out.fovDeg}°、ずれ ${out.residualPx} 画素${names}）${note}`);
     } else {
       say(`この角の位置では床が決まりません（${out.reason}）。角を動かしてください`, true);
     }
-    decideButton.disabled = !out.ok;
+    updateDecide();
   } catch (err) {
     solvedOk = false;
-    decideButton.disabled = true;
+    updateDecide();
     fail('サーバに届きませんでした', err);
   } finally {
     solving = false;
     draw();
-    if (again) { again = false; solve(); }
+    if (again) { again = false; if (state) solve(); }
   }
 }
 
@@ -205,59 +220,88 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointermove', (e) => {
   if (dragging < 0) return;
   state.corners[dragging] = toPhoto(e);
+  dirty = true;
+  updateDecide();
   draw();
   solve();
 });
-canvas.addEventListener('pointerup', () => { dragging = -1; });
+// However a drag ends (also when the browser cancels it or takes the pointer away), it ends
+const endDrag = () => { dragging = -1; };
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+canvas.addEventListener('lostpointercapture', endDrag);
+measuredBox.addEventListener('change', () => changed('長さの扱いを変えました'));
 
 decideButton.addEventListener('click', async () => {
   decideButton.disabled = true;
+  let out;
   try {
     const corners = state.corners.map((c) => ({ u: Math.round(c.u * 10) / 10, v: Math.round(c.v * 10) / 10 }));
     const objects = (state.objects ?? []).filter((o) => keep.has(o.name)).map((o) => ({ name: o.name, kind: o.kind }));
-    const out = await call('ps_site_decide', {
+    out = await call('ps_site_decide', {
       siteDir: state.siteDir, imagePath: state.imagePath, corners, edgesM: state.edgesM, objects,
       measured: measuredBox.checked,
     });
     if (!out.ok) {
       say(`場所を決定できませんでした: ${out.reason}`, true);
-      decideButton.disabled = !solvedOk;
+      updateDecide();
       return;
     }
-    say('決定しました。チャットに結果を返しました');
-    const names = objects.length ? objects.map((o) => o.name).join('、') : 'なし';
-    await app.sendMessage({
-      role: 'user',
-      content: [{ type: 'text', text: `場所を決定しました。場所のファイル: ${out.sitePath}、ずれ ${out.residualPx} 画素、物体: ${names}、長さ: ${measuredBox.checked ? '実測' : '推定'}` }],
-    });
+    out.names = objects.map((o) => o.name);
   } catch (err) {
     fail('決定できませんでした', err);
-    decideButton.disabled = !solvedOk;
+    updateDecide();
+    return;
+  }
+  // The site file is written. Whatever happens to the message, the site is decided.
+  decidedOnce = true;
+  dirty = false;
+  updateDecide();
+  say(`決定しました。場所のファイルを書きました: ${out.sitePath}`);
+  try {
+    await app.sendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: `場所を決定しました。場所のファイル: ${out.sitePath}、ずれ ${out.residualPx} 画素、物体: ${out.names.length ? out.names.join('、') : 'なし'}、長さ: ${measuredBox.checked ? '実測' : '推定'}` }],
+    });
+    say('決定しました。チャットに結果を返しました');
+  } catch (err) {
+    fail(`場所のファイルは書きましたが（${out.sitePath}）、チャットに結果を返せませんでした。チャットで「決定した」と伝えてください`, err);
   }
 });
 
 app.ontoolresult = async ({ content, isError }) => {
+  const mine = ++generation; // a newer result makes this one stop wherever it is
   try {
     const text = content?.[0]?.text;
     if (isError) throw new Error(text ?? 'エラー');
-    state = JSON.parse(text);
-    keep = new Set((state.objects ?? []).map((o) => o.name));
+    const next = JSON.parse(text);
+    state = next;
+    photo = null;
+    grid = null;
+    dragging = -1;
+    solvedOk = false;
+    decidedOnce = false;
+    dirty = true;
+    keep = new Set((next.objects ?? []).map((o) => o.name));
+    updateDecide();
     canvas.width = 1280;
-    canvas.height = Math.round(1280 * state.height / state.width);
+    canvas.height = Math.round(1280 * next.height / next.width);
     showChips();
     draw();
     // The photo in parts: one result per part keeps each under the host's size cap
     let b64 = '';
-    for (let part = 0; part < state.parts; part += 1) {
-      say(`写真を読み込んでいます…（${part + 1}/${state.parts}）`);
-      b64 += (await call('ps_spike_image', { imagePath: state.imagePath, part })).data;
+    for (let part = 0; part < next.parts; part += 1) {
+      say(`写真を読み込んでいます…（${part + 1}/${next.parts}）`);
+      const out = await call('ps_spike_image', { imagePath: next.imagePath, part });
+      if (mine !== generation) return;
+      b64 += out.data;
     }
-    photo = new Image();
-    photo.onload = () => { draw(); solve(); };
-    photo.onerror = () => say('写真を表示できませんでした', true);
-    photo.src = `data:image/jpeg;base64,${b64}`;
+    const img = new Image();
+    img.onload = () => { if (mine !== generation) return; photo = img; draw(); solve(); };
+    img.onerror = () => { if (mine === generation) say('写真を表示できませんでした', true); };
+    img.src = `data:image/jpeg;base64,${b64}`;
   } catch (err) {
-    fail('写真を読み込めませんでした', err);
+    if (mine === generation) fail('写真を読み込めませんでした', err);
   }
 };
 

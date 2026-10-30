@@ -317,3 +317,171 @@ def test_a_separate_start_answers_from_what_the_first_left_on_disk(env, monkeypa
     data, decided = run(second(state["parts"]))
     assert cv2.imdecode(np.frombuffer(base64.b64decode(data), np.uint8), cv2.IMREAD_COLOR) is not None
     assert decided["ok"] and load_site(decided["sitePath"]).objects[0].name == "pole"
+
+
+# ---- libraries that print to stdout must not corrupt the protocol ----
+
+CHATTY_SERVER = '''
+import logging, os, sys
+import numpy as np
+from physical_sandbox.mcp import server
+
+# like ultralytics: a logger whose StreamHandler holds the original sys.stdout
+log = logging.getLogger("chatty")
+log.setLevel(logging.INFO)
+log.addHandler(logging.StreamHandler(sys.stdout))
+
+
+def segmenter():
+    print("Downloading weights ...")
+    log.info("weights saved")
+    os.write(1, b"raw write on fd 1\\n")
+    sys.stdout.flush()
+
+    def run(image, boxes):
+        print("settings created")
+        log.info("predicting")
+        out = {}
+        for name, (x0, y0, x1, y1) in boxes.items():
+            m = np.zeros(image.shape[:2], bool)
+            m[y0:y1, x0:x1] = True
+            out[name] = m
+        return out
+    return run
+
+
+server.make_segmenter = segmenter
+server.main()
+'''
+
+
+def test_library_output_on_stdout_does_not_corrupt_the_protocol(env):
+    async def go():
+        params = StdioServerParameters(command=sys.executable, args=["-c", CHATTY_SERVER],
+                                       env={"PS_CACHE_DIR": str(env["cache"])})
+        async with Client(params) as client:
+            await client.call_tool("ps_fit_floor", {"imagePath": env["image"], "edgesM": EDGES,
+                                                    "siteDir": env["site"], "corners": CORNERS})
+            proposed = json.loads(text(await client.call_tool(
+                "ps_objects_propose", {"imagePath": env["image"], "boxes": boxes("pole"), "siteDir": env["site"]})))
+            status = json.loads(text(await client.call_tool("ps_site_status", {"siteDir": env["site"]})))
+            decided = json.loads(text(await client.call_tool("ps_site_decide", {
+                "siteDir": env["site"], "imagePath": env["image"], "corners": CORNERS, "edgesM": EDGES,
+                "objects": [{"name": "pole"}], "measured": False})))
+            return proposed, status, decided
+    proposed, status, decided = run(go())
+    assert [o["name"] for o in proposed["objects"]] == ["pole"]
+    assert status["decided"] is False and decided["ok"]
+
+
+def _raw_session(env, script, calls):
+    """Speak JSON-RPC to a server over pipes, wait for every answer, and give back its raw stdout lines and its
+    stderr (the Client would swallow a stray line, so this checks what a stricter host would see)."""
+    import os
+    import subprocess
+    import threading
+    messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+    ] + [{"jsonrpc": "2.0", "id": i + 2, "method": "tools/call", "params": {"name": n, "arguments": a}}
+         for i, (n, a) in enumerate(calls)]
+    proc = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, env={**os.environ, "PS_CACHE_DIR": str(env["cache"])})
+    timer = threading.Timer(60, proc.kill)  # never hang the suite
+    timer.start()
+    try:
+        for m in messages:
+            proc.stdin.write(json.dumps(m) + "\n")
+        proc.stdin.flush()
+        lines, answered = [], 0
+        while answered < 1 + len(calls):  # read until every request has been answered
+            line = proc.stdout.readline()
+            if not line:
+                break
+            lines.append(line.rstrip("\n"))
+            try:
+                answered += "id" in json.loads(line)
+            except ValueError:
+                pass  # a stray line: the test below fails on it
+        proc.stdin.close()
+        proc.wait(timeout=30)
+        return lines, proc.stderr.read()
+    finally:
+        timer.cancel()
+        proc.kill()
+
+
+def test_stdout_carries_only_protocol_lines_while_a_library_prints(env):
+    lines, err = _raw_session(env, CHATTY_SERVER, [
+        ("ps_objects_propose", {"imagePath": env["image"], "boxes": boxes("pole"), "siteDir": env["site"],
+                                "edgesM": EDGES, "corners": CORNERS})])
+    parsed = [json.loads(line) for line in lines]  # every line is JSON, or this raises
+    assert all(m.get("jsonrpc") == "2.0" for m in parsed)
+    answer = next(m for m in parsed if m.get("id") == 2)
+    assert not answer["result"].get("isError")
+    assert "predicting" in err and "raw write on fd 1" in err  # it went to stderr instead
+
+
+# ---- hardening ----
+
+def test_decide_answers_with_a_reason_for_malformed_input(env, monkeypatch):
+    propose(env, monkeypatch, "pole")
+    decide = lambda objs: json.loads(server.ps_site_decide(env["site"], env["image"], CORNERS, EDGES, objs, False))
+    assert decide(["pole"])["ok"] is False  # not dicts
+    twice = decide([{"name": "pole"}, {"name": "pole"}])
+    assert twice["ok"] is False and "twice" in twice["reason"]
+    # a damaged proposal file loses its damaged entries instead of raising
+    path = server._work(env["site"]) / "proposal.json"
+    d = json.loads(path.read_text())
+    d["objects"] = [{"name": "pole"}, "junk"]
+    path.write_text(json.dumps(d))
+    out = decide([{"name": "pole"}])
+    assert out["ok"] is False and "pole" in out["reason"]
+    path.write_text("not json")
+    assert decide([{"name": "pole"}])["ok"] is False
+    assert not (server.Path(env["site"]) / "site.json").exists()
+
+
+def test_decide_needs_the_picture_to_have_been_opened_for_this_site(env):
+    out = json.loads(server.ps_site_decide(env["site"], env["image"], CORNERS, EDGES, [], False))
+    assert out["ok"] is False and "ps_fit_floor" in out["reason"]
+    assert not (server.Path(env["site"]) / "site.json").exists()
+
+
+def test_the_screen_cannot_make_display_copies(env):
+    with pytest.raises(ValueError, match="ps_fit_floor"):
+        server.ps_spike_image(env["image"], 0)
+    assert not list((env["cache"] / "photos").glob("*"))
+    server.ps_fit_floor(env["image"], EDGES, env["site"], CORNERS)
+    assert json.loads(server.ps_spike_image(env["image"], 0))["data"]
+
+
+def test_proposals_match_on_the_resolved_path(env, monkeypatch):
+    from pathlib import Path
+    other = f"{Path(env['image']).parent}/./{Path(env['image']).name}"  # the same file, spelled differently
+    assert other != env["image"]
+    fake_segmenter(monkeypatch, {"pole"})
+    server.ps_fit_floor(env["image"], EDGES, env["site"], CORNERS)
+    out = json.loads(server.ps_objects_propose(other, boxes("pole"), env["site"]))  # finds the floor of the first
+    assert out["edgesM"] == EDGES and out["corners"] == CORNERS
+    assert [o["name"] for o in json.loads(server.ps_fit_floor(env["image"], EDGES, env["site"]))["objects"]] == ["pole"]
+    decided = json.loads(server.ps_site_decide(env["site"], other, CORNERS, EDGES, [{"name": "pole"}], False))
+    assert decided["ok"]
+
+
+def test_the_site_history_keeps_only_the_photos_file_name(env, monkeypatch):
+    propose(env, monkeypatch, "pole")
+    out = json.loads(server.ps_site_decide(env["site"], env["image"], CORNERS, EDGES, [{"name": "pole"}], False))
+    entry = load_site(out["sitePath"]).history[0]
+    assert entry["image"] == "still.png"
+    assert env["image"] not in json.dumps(entry)
+
+
+def test_propose_decodes_the_picture_once(env, monkeypatch):
+    fake_segmenter(monkeypatch, {"pole"})
+    opened = []
+    real = server.open_source
+    monkeypatch.setattr(server, "open_source", lambda spec: opened.append(spec) or real(spec))
+    server.ps_objects_propose(env["image"], boxes("pole"), env["site"], edgesM=EDGES)
+    assert len(opened) == 1  # the display copy is made from the frame the segmenter got

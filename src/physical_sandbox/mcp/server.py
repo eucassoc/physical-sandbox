@@ -65,10 +65,17 @@ def _write_atomic(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
-def photo(image_path: str) -> dict:
+def _resolved(image_path: str) -> str:
+    """The picture's resolved path: proposals and the floor state are matched on it, not on the raw string."""
+    return str(Path(image_path).expanduser().resolve())
+
+
+def photo(image_path: str, frame: np.ndarray | None = None, make: bool = True) -> dict:
     """The photo's size and a JPEG display copy as base64: ``{width, height, b64}``. The copy is made once and
     kept in the cache directory, so a different start of the server finds it. The size is that of the frame the
-    calculations use (EXIF rotation applied, as ``open_source`` reads it)."""
+    calculations use (EXIF rotation applied, as ``open_source`` reads it). ``frame`` is that frame when the
+    caller has already decoded it (so it is not decoded twice); with ``make=False`` an image that has no copy
+    yet is refused instead of decoded (the screen's own calls only fetch what a tool already opened)."""
     p = Path(image_path).expanduser()
     if not p.is_file():
         raise ValueError(f"cannot find the picture {image_path!r}")
@@ -77,8 +84,12 @@ def photo(image_path: str) -> dict:
     cache = _cache_dir()
     jpg, meta = cache / f"{key}.jpg", cache / f"{key}.json"
     if not (jpg.exists() and meta.exists()):
-        with open_source(p) as src:
-            img = src.frame(0)
+        if not make:
+            raise ValueError(f"{image_path!r} has not been opened: use ps_fit_floor on it first")
+        if frame is None:
+            with open_source(p) as src:
+                frame = src.frame(0)
+        img = frame
         h, w = img.shape[:2]
         k = min(1.0, MAX_SIDE / max(w, h))
         small = cv2.resize(img, (max(1, round(w * k)), max(1, round(h * k))), interpolation=cv2.INTER_AREA)
@@ -108,12 +119,29 @@ def _write_json(path: Path, data) -> None:
     _write_atomic(path, json.dumps(data).encode())
 
 
+_OBJECT_KEYS = ("name", "kind", "box", "outline", "ground_px", "mask_rle")
+
+
 def _proposal(site_dir: str, image_path: str, width: int, height: int) -> dict:
-    """The stored proposal when it is for this picture, else an empty one."""
+    """The stored proposal when it is for this picture (by resolved path and size), else an empty one. Entries
+    that lack a field are dropped, so a damaged file never breaks a caller."""
+    key = _resolved(image_path)
     d = _read_json(_work(site_dir) / "proposal.json")
-    if isinstance(d, dict) and d.get("imagePath") == image_path and (d.get("width"), d.get("height")) == (width, height):
-        return d
-    return {"imagePath": image_path, "width": width, "height": height, "objects": []}
+    ok = (isinstance(d, dict) and d.get("imageKey") == key and (d.get("width"), d.get("height")) == (width, height)
+          and isinstance(d.get("objects"), list))
+    objects = [o for o in d["objects"] if isinstance(o, dict) and all(k in o for k in _OBJECT_KEYS)] if ok else []
+    return {"imagePath": image_path, "imageKey": key, "width": width, "height": height, "objects": objects}
+
+
+def _fit(site_dir: str, image_path: str) -> dict:
+    """The floor state ``ps_fit_floor`` stored for this picture (by resolved path), or {}."""
+    d = _read_json(_work(site_dir) / "fit.json")
+    return d if isinstance(d, dict) and d.get("imageKey") == _resolved(image_path) else {}
+
+
+def _write_fit(site_dir: str, image_path: str, edges, corners: list[dict]) -> None:
+    _write_json(_work(site_dir) / "fit.json", {"imagePath": image_path, "imageKey": _resolved(image_path),
+                                               "edgesM": list(edges), "corners": corners})
 
 
 def _screen_object(o: dict) -> dict:
@@ -152,8 +180,7 @@ def _json(d: dict) -> str:
     return json.dumps(d)
 
 
-def _state(image_path: str, edges_m, corners, site_dir: str, objects: list[dict]) -> dict:
-    img = photo(image_path)
+def _state(image_path: str, img: dict, edges_m, corners, site_dir: str, objects: list[dict]) -> dict:
     w, h = img["width"], img["height"]
     return {"imagePath": image_path, "width": w, "height": h, "parts": -(-len(img["b64"]) // CHUNK),
             "edgesM": list(edges_m), "corners": corners, "siteDir": site_dir, "objects": objects}
@@ -188,14 +215,14 @@ def ps_fit_floor(imagePath: str, edgesM: list[float], siteDir: str, corners: lis
     img = photo(imagePath)
     w, h = img["width"], img["height"]
     corners = [{"u": u, "v": v} for u, v in _corners(corners)] if corners else _default_corners(w, h)
-    _write_json(_work(siteDir) / "fit.json", {"imagePath": imagePath, "edgesM": list(edges), "corners": corners})
+    _write_fit(siteDir, imagePath, edges, corners)
     objects = [_screen_object(o) for o in _proposal(siteDir, imagePath, w, h)["objects"]]
-    return _json(_state(imagePath, edges, corners, siteDir, objects))
+    return _json(_state(imagePath, img, edges, corners, siteDir, objects))
 
 
 @apps.tool(resource_uri=URI, visibility=["app"], description="One part of the photo (screen only).")
 def ps_spike_image(imagePath: str, part: int) -> str:
-    b64 = photo(imagePath)["b64"]
+    b64 = photo(imagePath, make=False)["b64"]
     return _json({"part": part, "data": b64[part * CHUNK:(part + 1) * CHUNK]})
 
 
@@ -234,8 +261,7 @@ def ps_floor_solve(width: float, height: float, corners: list[dict], edgesM: lis
     "The result lists the names SAM found no mask for in 'missing'."))
 def ps_objects_propose(imagePath: str, boxes: list[dict], siteDir: str, edgesM: list[float] | None = None,
                        corners: list[dict] | None = None) -> str:
-    fit = _read_json(_work(siteDir) / "fit.json")
-    fit = fit if isinstance(fit, dict) and fit.get("imagePath") == imagePath else {}
+    fit = _fit(siteDir, imagePath)
     edges_value = edgesM if edgesM is not None else fit.get("edgesM")
     if edges_value is None:
         raise ValueError("the floor's edge lengths are not known: call ps_fit_floor first, or pass edgesM")
@@ -260,6 +286,7 @@ def ps_objects_propose(imagePath: str, boxes: list[dict], siteDir: str, edgesM: 
     with open_source(Path(imagePath).expanduser()) as src:
         image = src.frame(0)
     h, w = image.shape[:2]
+    img = photo(imagePath, frame=image)  # the display copy from this same frame
     masks = make_segmenter()(image, {n: box for n, (_, box) in asked.items()})
 
     proposal = _proposal(siteDir, imagePath, w, h)
@@ -278,8 +305,9 @@ def ps_objects_propose(imagePath: str, boxes: list[dict], siteDir: str, edgesM: 
     _write_json(_work(siteDir) / "proposal.json", proposal)
 
     pts = _corners(corners if corners is not None else fit.get("corners") or _default_corners(w, h))
-    state = _state(imagePath, edges, [{"u": u, "v": v} for u, v in pts], siteDir,
-                   [_screen_object(o) for o in proposal["objects"]])
+    shown = [{"u": u, "v": v} for u, v in pts]
+    _write_fit(siteDir, imagePath, edges, shown)  # so the screen's decide finds the floor, whoever opened it
+    state = _state(imagePath, img, edges, shown, siteDir, [_screen_object(o) for o in proposal["objects"]])
     state["missing"] = missing
     return _json(state)
 
@@ -290,16 +318,21 @@ def ps_site_decide(siteDir: str, imagePath: str, corners: list[dict], edgesM: li
                    measured: bool = False) -> str:
     try:
         px, edges = _corners(corners), _edges(edgesM)
+        if not _fit(siteDir, imagePath):
+            return _json({"ok": False, "reason": "this picture was not opened for this site: use ps_fit_floor first"})
+        if not isinstance(objects, list) or not all(isinstance(o, dict) for o in objects):
+            return _json({"ok": False, "reason": "objects must be a list of {name, kind}"})
+        names = [str(o.get("name", "")) for o in objects]
+        if len(set(names)) != len(names):
+            return _json({"ok": False, "reason": f"an object name is used twice: {sorted(names)}"})
         with open_source(Path(imagePath).expanduser()) as src:
             w, h = src.size
         sol = solve_floor(w, h, px, edges)
         if sol.camera is None:
             return _json({"ok": False, "reason": sol.reason})
-        proposal = _proposal(siteDir, imagePath, w, h)
-        stored = {o["name"]: o for o in proposal["objects"]}
+        stored = {o["name"]: o for o in _proposal(siteDir, imagePath, w, h)["objects"]}
         site_objects = []
-        for o in objects:
-            name = str(o.get("name", ""))
+        for o, name in zip(objects, names):
             if name not in stored:
                 return _json({"ok": False, "reason": f"no cut-out for {name!r}: run ps_objects_propose for it"})
             s = stored[name]
@@ -316,14 +349,13 @@ def ps_site_decide(siteDir: str, imagePath: str, corners: list[dict], edgesM: li
             residual_px={CAMERA: float(sol.residual_px)}, confirmed_by_person=True,
             dimensions="measured" if measured else "estimated",
             history=[{"at": datetime.now(timezone.utc).isoformat(), "what": "floor fixed and confirmed by a person",
-                      "image": imagePath, "mirrored": bool(sol.mirrored),
-                      "objects": [o.name for o in site_objects]}])
+                      "image": Path(imagePath).name, "mirrored": bool(sol.mirrored), "objects": names}])
         site = locate_objects(site, CAMERA)
         path = Path(siteDir).expanduser() / "site.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         save_site(site, path)
-    except (ValueError, OSError) as e:
-        return _json({"ok": False, "reason": str(e)})
+    except (ValueError, OSError, KeyError, TypeError, AttributeError) as e:
+        return _json({"ok": False, "reason": f"{type(e).__name__}: {e}"})
     return _json({"ok": True, "sitePath": str(path), "residualPx": round(float(sol.residual_px), 2),
                   "mirrored": bool(sol.mirrored)})
 
@@ -356,6 +388,9 @@ server.tool(description="Whether the site in siteDir is decided (confirmed by th
 
 
 def main() -> None:
+    # While serving, the SDK (mcp >= 2.3) keeps the protocol on a private duplicate of fd 1 and points fd 1 at
+    # stderr, so what a library prints or logs to stdout (ultralytics does, on its first run) cannot corrupt it.
+    # tests/test_mcp_site.py checks this over raw pipes, so an SDK that stops doing it is noticed.
     server.run("stdio")
 
 

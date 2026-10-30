@@ -4,9 +4,10 @@ import numpy as np
 import pytest
 
 from physical_sandbox.camera import Camera
-from physical_sandbox.site import Floor, ObjectView, Site, SiteObject, mask_to_rle
 from physical_sandbox.objects import ground_px
-from physical_sandbox.site import add_camera, locate_objects
+from physical_sandbox.site import (
+    Floor, ObjectView, Site, SiteObject, add_camera, locate_objects, mask_to_rle,
+)
 
 
 def look_at(position, target, width, height, f, dist=None):
@@ -101,6 +102,7 @@ def test_add_camera_ignores_names_with_no_known_position_and_lists_them():
     with pytest.raises(ValueError, match="4 or more") as e:
         add_camera(site, "b", 800, 600, seen)
     assert "ghost" in str(e.value) and "corner-1" in str(e.value)
+    assert "box" in str(e.value) and "cone" in str(e.value)  # known to the site but not supplied
 
 
 def test_add_camera_accepts_a_list_of_ground_points_and_uses_the_middle():
@@ -110,7 +112,7 @@ def test_add_camera_accepts_a_list_of_ground_points_and_uses_the_middle():
     seen = {}
     for n, p in POINTS.items():
         u, v = cam2.project(np.array([p]))[0]
-        seen[n] = [(u - 5, v), (u, v), (u + 5, v)]
+        seen[n] = [(u - 40, v + 25), (u, v), (u + 15, v - 30)]  # asymmetric: only the middle one is right
     _, residual = add_camera(site, "b", 800, 600, seen)
     assert residual < 1.0
 
@@ -121,14 +123,35 @@ def test_add_camera_refuses_a_solution_below_the_floor():
     below = look_at([5.5, 4.0, -2.5], [2.0, 1.2, 0.0], 800, 600, 700)
     site = make_site(cam1)
     seen = {n: tuple(below.project(np.array([p]))[0]) for n, p in POINTS.items()}
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="no camera fits"):
         add_camera(site, "b", 800, 600, seen)
+
+
+def test_add_camera_with_points_in_one_line_is_refused():
+    cam1 = look_at([2.0, -4.0, 3.0], [2.0, 1.2, 0.0], 640, 480, 600)
+    cam2 = look_at([5.5, 4.0, 2.5], [2.0, 1.2, 0.0], 800, 600, 700)
+    line = {f"p{i}": [0.5 * i, 1.0, 0.0] for i in range(5)}
+    site = dataclasses.replace(make_site(cam1), objects=[
+        SiteObject(n, "fixed", {}, np.array(p, float)) for n, p in line.items()])
+    seen = {n: tuple(cam2.project(np.array([p]))[0]) for n, p in line.items()}
+    with pytest.raises(ValueError, match="no camera fits"):
+        add_camera(site, "b", 800, 600, seen)
+
+
+def test_add_camera_works_with_exactly_four_points():
+    cam1 = look_at([2.0, -4.0, 3.0], [2.0, 1.2, 0.0], 640, 480, 600)
+    cam2 = look_at([5.5, 4.0, 2.5], [2.0, 1.2, 0.0], 800, 600, 700)
+    site = make_site(cam1)
+    seen = {n: tuple(cam2.project(np.array([POINTS[n]]))[0]) for n in ["pole", "post", "kerb", "cone"]}
+    new_site, residual = add_camera(site, "b", 800, 600, seen)
+    assert residual < 1.0
+    assert "b" in new_site.cameras
 
 
 def test_locate_objects_puts_objects_on_the_floor_from_one_camera():
     cam1 = look_at([2.0, -4.0, 3.0], [2.0, 1.2, 0.0], 640, 480, 600)
     site = make_site(cam1)
-    # forget the metres of all but the pole; the pole keeps its own ground_m via no view in camera "zzz"
+    # forget every object's metres; the loose one has no view in "a", so it keeps its own
     objs = [dataclasses.replace(o, ground_m=None) for o in site.objects]
     loose = SiteObject("loose", "target", {}, np.array([9.0, 9.0, 0.0]))
     site2 = dataclasses.replace(site, objects=objs + [loose])

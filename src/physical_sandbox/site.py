@@ -1,7 +1,8 @@
 """The site file: where things are compared.
 
 A site holds its cameras, its floor, and the fixed things chosen as whole objects. This module is only
-the site's data and its file I/O; solving a floor and cutting out objects live elsewhere.
+the site's data and its file I/O, plus the two steps that tie cameras to it (``locate_objects`` and
+``add_camera``); the planar camera fit itself lives in ``floor``, and cutting out objects in ``objects``.
 """
 from __future__ import annotations
 
@@ -11,11 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-import cv2
 import numpy as np
 
 from .camera import Camera
-from .floor import MAX_FOV_DEG, MIN_FOV_DEG
+from .floor import fit_planar, focal_from_homography
 
 FORMAT = "physical-sandbox.site/1"
 
@@ -209,48 +209,6 @@ def _pixel(value) -> tuple[float, float]:
     return float(a[0]), float(a[1])
 
 
-def _focal_from_homography(world_xy: np.ndarray, px_c: np.ndarray) -> float | None:
-    """The focal length that makes the first two columns of the floor's homography orthogonal and equally
-    long, or None when the points do not allow it (the same two conditions as ``floor.solve_floor``)."""
-    H, _ = cv2.findHomography(world_xy, px_c)
-    if H is None:
-        return None
-    h1, h2 = H[:, 0], H[:, 1]
-    A = np.array([h1[0] * h2[0] + h1[1] * h2[1], h1[0] ** 2 + h1[1] ** 2 - h2[0] ** 2 - h2[1] ** 2])
-    B = np.array([h1[2] * h2[2], h1[2] ** 2 - h2[2] ** 2])
-    aa = float(A @ A)
-    w = -float(A @ B) / aa if aa > 0 else -1.0
-    return float(1 / np.sqrt(w)) if w > 0 else None
-
-
-def _fit_from_floor_points(width: int, height: int, world: np.ndarray, px: np.ndarray, f0: float):
-    """calibrateCamera on one planar view from focal guess ``f0``: (camera, residual) or None if it is no solution."""
-    cx, cy = width / 2, height / 2
-    flags = (cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_PRINCIPAL_POINT | cv2.CALIB_FIX_ASPECT_RATIO
-             | cv2.CALIB_ZERO_TANGENT_DIST | cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3)
-    K0 = np.array([[f0, 0, cx], [0, f0, cy], [0, 0, 1]])
-    try:
-        _, K, _, rvecs, tvecs = cv2.calibrateCamera(
-            [world.astype(np.float32)], [px.astype(np.float32)], (int(width), int(height)), K0, np.zeros(5),
-            flags=flags)
-    except cv2.error:
-        return None
-    fov = np.degrees(2 * np.arctan(width / (2 * K[0, 0])))
-    if not (MIN_FOV_DEG <= fov <= MAX_FOV_DEG):
-        return None
-    R, _ = cv2.Rodrigues(rvecs[0])
-    t = tvecs[0].reshape(3)
-    if not ((world @ R.T + t)[:, 2] > 0).all():
-        return None  # a used point is behind the camera
-    camera = Camera(width, height, K, np.zeros(5), R, t)
-    if camera.position[2] <= 0:
-        return None  # a planar view has a mirror solution under the floor; the camera must be above it
-    residual = float(np.linalg.norm(camera.project(world) - px, axis=1).max())
-    if not np.isfinite(residual):
-        return None
-    return camera, residual
-
-
 def add_camera(site: Site, name: str, width: int, height: int,
                seen: dict[str, object]) -> tuple[Site, float]:
     """Tie a further camera to the site from what it shares with what is already known.
@@ -264,10 +222,12 @@ def add_camera(site: Site, name: str, width: int, height: int,
     known = _known_positions(site)
     used = [n for n in seen if n in known]
     unused = [n for n in seen if n not in known]
+    missing = [n for n in known if n not in seen]
     if len(used) < 4:
         raise ValueError(
             f"a camera needs 4 or more shared points whose place in the site is known; got {len(used)} "
-            f"({', '.join(used) or 'none'}). Unknown or missing: {', '.join(unused) or 'none'}"
+            f"({', '.join(used) or 'none'}). Not usable (no known place in the site): {', '.join(unused) or 'none'}. "
+            f"Known but not supplied: {', '.join(missing) or 'none'}"
         )
     world = np.array([known[n] for n in used], float)
     px = np.array([_pixel(seen[n]) for n in used], float)
@@ -275,15 +235,17 @@ def add_camera(site: Site, name: str, width: int, height: int,
         raise ValueError("every shared point must be on the floor (z = 0)")
 
     guesses = []
-    f_h = _focal_from_homography(world[:, :2], px - [width / 2, height / 2])
+    f_h = focal_from_homography(world[:, :2], px - [width / 2, height / 2])
     if f_h is not None:
         guesses.append(f_h)
     guesses.append(width / (2 * np.tan(np.radians(60.0) / 2)))  # a 60 degree field of view
     best = None
     for f0 in guesses:
-        fit = _fit_from_floor_points(width, height, world, px, f0)
-        if fit is not None and (best is None or fit[1] < best[1]):
-            best = fit
+        camera, residual = fit_planar(width, height, world, px, f0)
+        if camera is None or camera.position[2] <= 0:
+            continue  # a planar view has a mirror solution under the floor; the camera must be above it
+        if best is None or residual < best[1]:
+            best = (camera, residual)
     if best is None:
         raise ValueError(
             "no camera fits these points: they may lie in one line, be seen square-on, or put the camera below "

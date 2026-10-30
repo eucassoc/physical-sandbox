@@ -138,6 +138,27 @@ def test_the_screen_and_bridge_ship_as_package_data():
     assert "widgets/*.html" in patterns and "widgets/vendor/*.js" in patterns
 
 
+def test_the_vendored_bundles_licences_ship_with_them_and_are_named_in_the_notice():
+    import fnmatch
+    import tomllib
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    patterns = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["setuptools"]["package-data"][
+        "physical_sandbox.mcp"]
+    vendor = root / "src" / "physical_sandbox" / "mcp" / "widgets" / "vendor"
+    shipped = {p.name for p in vendor.iterdir()
+               if any(fnmatch.fnmatch(f"widgets/vendor/{p.name}", pat) for pat in patterns)}
+    assert {"three.iife.js", "ext-apps-app-with-deps.js", "LICENSE-three.txt", "LICENSE-ext-apps.txt"} <= shipped
+    three = (vendor / "LICENSE-three.txt").read_text()
+    assert "three.js authors" in three and "Permission is hereby granted" in three
+    ext = (vendor / "LICENSE-ext-apps.txt").read_text()
+    for name in ("@modelcontextprotocol/ext-apps", "@modelcontextprotocol/client", "zod", "content-type",
+                 "Colin McDonnell", "Douglas Christopher Wilson", "Model Context Protocol a Series of LF Projects"):
+        assert name in ext, name
+    notice = (root / "NOTICE").read_text()
+    assert "LICENSE-three.txt" in notice and "LICENSE-ext-apps.txt" in notice
+
+
 # ---- the floor ----
 
 def test_floor_solve_on_a_synthetic_floor_leaves_under_half_a_pixel():

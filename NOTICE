@@ -3,5 +3,13 @@ Copyright 2026 Atsushi Kojo
 
 This product is licensed under the Apache License, Version 2.0.
 
-This product bundles three.js (MIT License, Copyright 2010-2026 three.js authors) as
-src/physical_sandbox/mcp/widgets/vendor/three.iife.js, to draw the in-chat comparison screen.
+This product bundles third-party code in src/physical_sandbox/mcp/widgets/vendor/, for the in-chat screens:
+
+- three.js r180 (MIT License, Copyright 2010-2025 three.js authors) as three.iife.js, to draw the comparison
+  screen. Licence: widgets/vendor/LICENSE-three.txt.
+- The MCP Apps SDK, @modelcontextprotocol/ext-apps 2.0.4 (MIT License / Apache License 2.0, Copyright Model
+  Context Protocol a Series of LF Projects, LLC.) as ext-apps-app-with-deps.js, the bridge between a screen and
+  the chat. That file also bundles the MCP TypeScript SDK (@modelcontextprotocol/client and
+  @modelcontextprotocol/core, MIT License / Apache License 2.0), zod (MIT License, Copyright Colin McDonnell),
+  content-type (MIT License, Copyright Douglas Christopher Wilson) and @standard-schema/spec (MIT License).
+  Licences: widgets/vendor/LICENSE-ext-apps.txt.

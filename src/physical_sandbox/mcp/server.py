@@ -167,9 +167,20 @@ def _camera_name(value, fit: dict | None = None) -> str:
     return value.strip()
 
 
-def _screen_object(o: dict) -> dict:
-    """What the screen needs of a stored object (not the mask)."""
-    return {k: o[k] for k in ("name", "kind", "outline", "ground_px", "box")}
+def _model_object(o: dict) -> dict:
+    """What the model reads of a stored object: its name, kind and box (the outline goes to the screen only)."""
+    return {k: o[k] for k in ("name", "kind", "box")}
+
+
+def _with_objects(state: dict, objects: list[dict]) -> dict:
+    """The state with the objects as the model reads them, and the key to the screen's outlines (or None)."""
+    state["objects"] = [_model_object(o) for o in objects]
+    if objects:  # outlines are up to 200 points each: they reach the screen through ps_objects_part
+        key, parts = _store_data({"objects": [{k: o[k] for k in ("name", "outline", "ground_px")} for o in objects]})
+    else:
+        key, parts = None, 0
+    state["objectsKey"], state["objectsParts"] = key, parts
+    return state
 
 
 # ---- checking what comes in ----
@@ -242,12 +253,14 @@ def ps_fit_floor(imagePath: str, edgesM: list[float], siteDir: str, corners: lis
     w, h = img["width"], img["height"]
     corners = [{"u": u, "v": v} for u, v in _corners(corners)] if corners else _default_corners(w, h)
     _write_fit(siteDir, imagePath, edges, corners, camera)
-    objects = [_screen_object(o) for o in _proposal(siteDir, imagePath, w, h)["objects"]]
-    return _json(_state(imagePath, img, edges, corners, siteDir, objects))
+    objects = _proposal(siteDir, imagePath, w, h)["objects"]
+    return _json(_with_objects(_state(imagePath, img, edges, corners, siteDir, []), objects))
 
 
 @apps.tool(resource_uri=URI, visibility=["app"], description="One part of the photo (screen only).")
 def ps_spike_image(imagePath: str, part: int) -> str:
+    if part < 0:
+        raise ValueError("part must be >= 0")
     b64 = photo(imagePath, make=False)["b64"]
     return _json({"part": part, "data": b64[part * CHUNK:(part + 1) * CHUNK]})
 
@@ -281,7 +294,7 @@ def ps_floor_solve(width: float, height: float, corners: list[dict], edgesM: lis
 
 @apps.tool(resource_uri=URI, description=(
     "Cut out fixed objects the agent chose, from rough boxes, and show their outlines and names in the same "
-    "screen. boxes: [{name, kind ('fixed' or 'target'), x0, y0, x1, y1}] in the photo's pixels. The cut-outs "
+    "screen (the result gives each object's name, kind and box; the outlines go to the screen only). boxes: [{name, kind ('fixed' or 'target'), x0, y0, x1, y1}] in the photo's pixels. The cut-outs "
     "are kept under siteDir/.work; a second call adds to them (the same name is replaced). The floor corners "
     "and lengths come from the earlier ps_fit_floor on this siteDir, or from edgesM and corners given here; so "
     "does camera (the camera's name in the site, default 'camera'). "
@@ -335,7 +348,7 @@ def ps_objects_propose(imagePath: str, boxes: list[dict], siteDir: str, edgesM: 
     pts = _corners(corners if corners is not None else fit.get("corners") or _default_corners(w, h))
     shown = [{"u": u, "v": v} for u, v in pts]
     _write_fit(siteDir, imagePath, edges, shown, camera)  # so the screen's decide finds the floor, whoever opened it
-    state = _state(imagePath, img, edges, shown, siteDir, [_screen_object(o) for o in proposal["objects"]])
+    state = _with_objects(_state(imagePath, img, edges, shown, siteDir, []), proposal["objects"])
     state["missing"] = missing
     return _json(state)
 
@@ -438,12 +451,30 @@ def _scene_picture(scene_path: str) -> str | None:
     return str(given if given.is_absolute() else Path(scene_path).expanduser().parent / given)
 
 
+def _local_video(spec) -> str:
+    """The picture the model asked for, limited to what is on this machine: a local file, an ``rtsp://`` camera
+    or a camera number. An ``http(s)://`` address (or any other ``scheme://``) is refused here: a tool call must
+    not make this machine fetch from the web (``psbx compare`` on the command line still opens them)."""
+    from ..errors import InputError
+
+    text = str(spec).strip()
+    if text.isdigit() or text.lower().startswith("rtsp://"):
+        return text
+    if "://" in text:
+        raise InputError(f"video {text!r}: only a local file, an rtsp:// camera or a camera number can be "
+                         f"opened from the chat (http(s) addresses are not)")
+    return str(spec)
+
+
 def _write_still(frame: np.ndarray, spec, start_s: float, cam: Camera) -> Path:
     """The picture's frame as a PNG in the cache directory, so the screen's picture calls (and a different start
-    of the server) find it."""
+    of the server) find it. ``cam`` is the site camera the frame was read for, before any undistortion: the key
+    holds its K and lens numbers, so a site re-fitted on the same picture never reuses a still undistorted for
+    the old lens."""
     p = Path(str(spec)).expanduser()
     stamp = f"{p.resolve()}:{p.stat().st_mtime_ns}:{p.stat().st_size}" if p.is_file() else f"{spec}:{time.time_ns()}"
-    key = hashlib.sha1(f"{stamp}:{start_s}:{cam.dist.tobytes().hex()}:{frame.shape}".encode()).hexdigest()
+    lens = f"{np.asarray(cam.K, float).tobytes().hex()}:{np.asarray(cam.dist, float).tobytes().hex()}"
+    key = hashlib.sha1(f"{stamp}:{start_s}:{lens}:{frame.shape}".encode()).hexdigest()
     d = _cache_dir().parent / "frames"
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"{key}.png"
@@ -502,17 +533,19 @@ def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA
             raise InputError("give video: the picture to draw on (a still or a recording). The site file keeps no "
                              "picture, A is not a LeRobot episode whose recording could be used, and the scene "
                              "file names none")
+    spec = _local_video(spec)
     with _reading(f"video {str(spec)!r}", open_source, spec) as source:
         try:
             cam = camera_for(source, site.cameras[camera])
         except ValueError as e:
             raise InputError(f"video {str(spec)!r}: {e}") from e
         frame = source.at(start_s)
+    read_for = cam  # the camera the frame was read for, lens and all: the still's key
     if np.any(cam.dist):
         # three draws a pinhole: undo the lens in the picture, and use the pinhole camera for everything else
         frame = cv2.undistort(frame, cam.K, cam.dist)
         cam = Camera(cam.width, cam.height, cam.K, np.zeros(5), cam.R, cam.t)
-    still = _write_still(frame, spec, start_s, cam)
+    still = _write_still(frame, spec, start_s, read_for)
     img = photo(str(still), frame=frame)
 
     if gripThreshold is not None and not math.isfinite(float(gripThreshold)):
@@ -569,6 +602,7 @@ def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA
 
 
 def _compare_dir() -> Path:
+    """Where the screens' data waits for the part tools (the comparison's poses, the proposal's outlines)."""
     d = _cache_dir().parent / "compare"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -590,16 +624,28 @@ def _store_data(data: dict) -> tuple[str, int]:
     "One part of the comparison's data (poses, times, pixel paths) as JSON text (screen only). key is ps_compare's "
     "dataKey."))
 def ps_compare_part(key: str, part: int) -> str:
+    return _data_part(key, part, "ps_compare")
+
+
+def _data_part(key: str, part: int, maker: str) -> str:
+    """One CHUNK of the stored data ``key`` (40 hex characters only: no path gets through)."""
     if not is_key(key):
         raise ValueError("bad data key")
     if part < 0:
         raise ValueError("part must be >= 0")
     path = _compare_dir() / f"{key}.json"
     if not path.is_file():
-        raise ValueError(f"no data {key!r}: run ps_compare first")
+        raise ValueError(f"no data {key!r}: run {maker} first")
     with path.open("rb") as f:
         f.seek(part * CHUNK)
         return _json({"part": part, "data": f.read(CHUNK).decode("ascii")})
+
+
+@apps.tool(resource_uri=URI, visibility=["app"], description=(
+    "One part of the proposed objects' outlines and ground points as JSON text (screen only). key is "
+    "ps_fit_floor's or ps_objects_propose's objectsKey."))
+def ps_objects_part(key: str, part: int) -> str:
+    return _data_part(key, part, "ps_objects_propose")
 
 
 @apps.tool(resource_uri=COMPARE_URI, visibility=["app"], description=(

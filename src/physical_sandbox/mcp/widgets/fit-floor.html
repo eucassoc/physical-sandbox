@@ -45,7 +45,7 @@ const objectsEl = document.getElementById('objects');
 
 const COLORS = ['#3ddc97', '#4cc9f0', '#f72585', '#ffd166', '#b388ff', '#ff7b54', '#80ed99', '#64dfdf'];
 
-let state = null;      // { imagePath, width, height, edgesM, corners, siteDir, objects }
+let state = null;      // { imagePath, width, height, edgesM, corners, siteDir, objects, objectsKey, objectsParts }
 let photo = null;      // the decoded image
 let grid = null;       // lines in photo pixels, or null
 let keep = new Set();  // names of the objects the person keeps
@@ -288,6 +288,18 @@ app.ontoolresult = async ({ content, isError }) => {
     canvas.height = Math.round(1280 * next.height / next.width);
     showChips();
     draw();
+    // The objects' outlines and ground points, which the model's result leaves out, in parts by key
+    if (next.objectsKey) {
+      let text = '';
+      for (let part = 0; part < next.objectsParts; part += 1) {
+        const out = await call('ps_objects_part', { key: next.objectsKey, part });
+        if (mine !== generation) return;
+        text += out.data;
+      }
+      const shapes = new Map(JSON.parse(text).objects.map((o) => [o.name, o]));
+      for (const o of next.objects ?? []) Object.assign(o, shapes.get(o.name) ?? {});
+      draw();
+    }
     // The photo in parts: one result per part keeps each under the host's size cap
     let b64 = '';
     for (let part = 0; part < next.parts; part += 1) {

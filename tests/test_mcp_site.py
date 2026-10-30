@@ -62,6 +62,14 @@ def boxes(*names):
     return [{"name": n, "kind": "fixed", **dict(zip(("x0", "y0", "x1", "y1"), spots[n]))} for n in names]
 
 
+def shapes(out):
+    """The outlines and ground points the screen fetches with ps_objects_part, by name."""
+    if not out["objectsKey"]:
+        return {}
+    data = "".join(json.loads(server.ps_objects_part(out["objectsKey"], i))["data"] for i in range(out["objectsParts"]))
+    return {o["name"]: o for o in json.loads(data)["objects"]}
+
+
 def text(result):
     assert not result.is_error, result.content
     return result.content[0].text
@@ -88,10 +96,12 @@ def test_tool_list_marks_the_screen_and_hides_the_screen_only_tools(env):
             return [t.model_dump(by_alias=True) for t in (await client.list_tools()).tools]
     tools = {t["name"]: t for t in run(go())}
     assert set(tools) == {"ps_fit_floor", "ps_spike_image", "ps_floor_solve", "ps_objects_propose",
-                          "ps_site_decide", "ps_site_status", "ps_compare", "ps_model_part", "ps_compare_part"}
-    for name in ("ps_fit_floor", "ps_spike_image", "ps_floor_solve", "ps_objects_propose", "ps_site_decide"):
+                          "ps_site_decide", "ps_site_status", "ps_compare", "ps_model_part", "ps_compare_part",
+                          "ps_objects_part"}
+    for name in ("ps_fit_floor", "ps_spike_image", "ps_floor_solve", "ps_objects_propose", "ps_site_decide",
+                 "ps_objects_part"):
         assert tools[name]["_meta"]["ui"]["resourceUri"] == "ui://physical-sandbox/fit-floor.html"
-    for name in ("ps_spike_image", "ps_floor_solve", "ps_site_decide"):
+    for name in ("ps_spike_image", "ps_floor_solve", "ps_site_decide", "ps_objects_part"):
         assert tools[name]["_meta"]["ui"]["visibility"] == ["app"]
     for name in ("ps_fit_floor", "ps_objects_propose"):
         assert "model" in (tools[name]["_meta"]["ui"].get("visibility") or ["model"])  # the agent can call it
@@ -117,6 +127,7 @@ def test_the_screen_is_served_as_an_app_with_the_bridge_inlined(env):
     assert "globalThis.ExtApps=" in content.text
     assert server.BUNDLE_MARKER not in content.text
     assert "ps_floor_solve" in content.text and "ps_site_decide" in content.text
+    assert "ps_objects_part" in content.text
 
 
 def test_the_screen_and_bridge_ship_as_package_data():
@@ -191,9 +202,11 @@ def test_propose_cuts_out_named_objects_and_shows_their_outlines(env, monkeypatc
     out = json.loads(server.ps_objects_propose(env["image"], boxes("pole", "gate", "cone"), env["site"]))
     assert [o["name"] for o in out["objects"]] == ["pole", "gate"] and out["missing"] == ["cone"]
     pole = out["objects"][0]
-    assert pole["kind"] == "fixed" and pole["box"] == [300, 500, 420, 700]
-    assert len(pole["outline"]) >= 3 and all(isinstance(x, float) for p in pole["outline"] for x in p)
-    assert pole["ground_px"][1] == [359.5, 699.0]
+    # the model reads names, kinds and boxes; the outlines and ground points go to the screen by key
+    assert pole == {"name": "pole", "kind": "fixed", "box": [300, 500, 420, 700]}
+    outline = shapes(out)["pole"]
+    assert len(outline["outline"]) >= 3 and all(isinstance(x, float) for p in outline["outline"] for x in p)
+    assert outline["ground_px"][1] == [359.5, 699.0]
     # the screen's state comes with it: the floor from the earlier ps_fit_floor
     assert out["corners"] == CORNERS and out["edgesM"] == EDGES and out["siteDir"] == env["site"]
     # kept on disk, so that ps_fit_floor (any start of the server) shows them
@@ -219,7 +232,25 @@ def test_an_outline_is_simplified_to_at_most_200_points(env, monkeypatch):
     server.ps_fit_floor(env["image"], EDGES, env["site"], CORNERS)
     out = json.loads(server.ps_objects_propose(
         env["image"], [{"name": "pond", "kind": "fixed", "x0": 500, "y0": 50, "x1": 1500, "y1": 1050}], env["site"]))
-    assert 3 <= len(out["objects"][0]["outline"]) <= server.MAX_OUTLINE_POINTS
+    assert 3 <= len(shapes(out)["pond"]["outline"]) <= server.MAX_OUTLINE_POINTS
+
+
+def test_the_models_result_holds_no_outline_and_the_screens_part_tool_is_key_guarded(env, monkeypatch):
+    fake_segmenter(monkeypatch, {"pole", "gate"})
+    server.ps_fit_floor(env["image"], EDGES, env["site"], CORNERS)
+    text_ = server.ps_objects_propose(env["image"], boxes("pole", "gate"), env["site"])
+    assert "outline" not in text_ and "ground_px" not in text_
+    again = json.loads(server.ps_fit_floor(env["image"], EDGES, env["site"], CORNERS))
+    assert "outline" not in json.dumps(again) and set(shapes(again)) == {"pole", "gate"}
+    empty = json.loads(server.ps_fit_floor(env["image"], EDGES, str(env["site"]) + "-other", CORNERS))
+    assert empty["objects"] == [] and empty["objectsKey"] is None and empty["objectsParts"] == 0
+    for key in ("../proposal", "", "g" * 40):
+        with pytest.raises(ValueError, match="bad data key"):
+            server.ps_objects_part(key, 0)
+    with pytest.raises(ValueError, match="part"):
+        server.ps_objects_part(again["objectsKey"], -1)
+    with pytest.raises(ValueError, match="no data"):
+        server.ps_objects_part("0" * 40, 0)
 
 
 def test_propose_without_a_floor_asks_for_the_lengths(env, monkeypatch):
@@ -326,6 +357,9 @@ def test_a_separate_start_answers_from_what_the_first_left_on_disk(env, monkeypa
             for i in range(parts):
                 data += json.loads(text(await client.call_tool(
                     "ps_spike_image", {"imagePath": env["image"], "part": i})))["data"]
+            outlines = json.loads(text(await client.call_tool(
+                "ps_objects_part", {"key": state["objectsKey"], "part": 0})))["data"]
+            assert "pole" in outlines and "outline" in outlines
             decided = json.loads(text(await client.call_tool("ps_site_decide", {
                 "siteDir": env["site"], "imagePath": env["image"], "corners": CORNERS, "edgesM": EDGES,
                 "objects": [{"name": "pole", "kind": "fixed"}], "measured": False})))
@@ -466,6 +500,12 @@ def test_decide_needs_the_picture_to_have_been_opened_for_this_site(env):
     out = json.loads(server.ps_site_decide(env["site"], env["image"], CORNERS, EDGES, [], False))
     assert out["ok"] is False and "ps_fit_floor" in out["reason"]
     assert not (server.Path(env["site"]) / "site.json").exists()
+
+
+def test_a_negative_photo_part_is_refused(env):
+    server.ps_fit_floor(env["image"], EDGES, env["site"], CORNERS)
+    with pytest.raises(ValueError, match="part"):
+        server.ps_spike_image(env["image"], -1)
 
 
 def test_the_screen_cannot_make_display_copies(env):

@@ -317,6 +317,41 @@ def test_a_lens_with_distortion_gives_an_undistorted_picture_and_a_pinhole_camer
         want.project(tip_site[None])[0].tolist(), abs=0.01)
 
 
+def test_a_site_refitted_on_the_same_picture_gets_its_own_still(tmp_path, monkeypatch):
+    """The still is undistorted for the site's lens: another lens on the same picture must not reuse it."""
+    monkeypatch.setenv("PS_CACHE_DIR", str(tmp_path / "cache"))
+    make_world(tmp_path, cam=look_at((-2.5, 0.8, 1.2), dist=np.array([-0.3, 0.1, 0, 0, 0])))
+    img = np.zeros((H, W, 3), np.uint8)
+    img[::8] = 255
+    cv2.imwrite(str(tmp_path / "grid.png"), img)
+    w = {"dir": tmp_path, "still": tmp_path / "grid.png"}
+    first = compare(w)
+    make_world(tmp_path, cam=look_at((-2.5, 0.8, 1.2), dist=np.array([0.2, 0.0, 0, 0, 0])))
+    second = compare(w)
+    assert first["imagePath"] != second["imagePath"]
+    a, b = cv2.imread(first["imagePath"]).astype(int), cv2.imread(second["imagePath"]).astype(int)
+    assert np.abs(a - b).mean() > 3
+    want = cv2.undistort(img, second_cam_K(), np.array([0.2, 0.0, 0, 0, 0]))
+    assert np.abs(b - want.astype(int)).mean() < 1
+    # a different focal length with the same lens numbers is a different still too
+    make_world(tmp_path, cam=look_at((-2.5, 0.8, 1.2), f=260.0, dist=np.array([0.2, 0.0, 0, 0, 0])))
+    assert compare(w)["imagePath"] != second["imagePath"]
+
+
+def second_cam_K():
+    return np.asarray(look_at((-2.5, 0.8, 1.2)).K, float)
+
+
+def test_the_model_cannot_open_a_web_address_but_local_cameras_pass(world):
+    for url in ("http://example.com/a.mp4", "https://example.com/live", "HTTPS://example.com/x.png",
+                "ftp://example.com/a.mp4"):
+        with pytest.raises(ValueError, match="local file"):
+            compare(world, video=url)
+    assert server._local_video("0") == "0"
+    assert server._local_video("rtsp://192.168.0.10/stream") == "rtsp://192.168.0.10/stream"
+    assert server._local_video(str(world["still"])) == str(world["still"])
+
+
 def world_tip(tmp_path, out):
     placed = PlacedMachine(machine=load_machine(tmp_path / "blocks.urdf"), urdf=str(tmp_path / "blocks.urdf"),
                            x=0.1, y=0.0, yaw=0.3)

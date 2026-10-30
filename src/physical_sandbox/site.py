@@ -1,0 +1,169 @@
+"""The site file: where things are compared.
+
+A site holds its cameras, its floor, and the fixed things chosen as whole objects. This module is only
+the site's data and its file I/O; solving a floor and cutting out objects live elsewhere.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal
+
+import numpy as np
+
+from .camera import Camera
+
+FORMAT = "physical-sandbox.site/1"
+
+# three's world (y up) <- ROS world (z up); only the old open build's site files need it.
+_M = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], float)
+
+
+@dataclass
+class ObjectView:
+    """One object as one camera sees it."""
+    box: tuple[int, int, int, int]  # x0, y0, x1, y1 in pixels
+    mask_rle: dict  # COCO uncompressed RLE: {"size": [h, w], "counts": [...]}
+    ground_px: list[tuple[float, float]]  # where the object touches the ground, in pixels
+
+
+@dataclass
+class SiteObject:
+    name: str
+    kind: Literal["fixed", "target"]
+    views: dict[str, ObjectView]  # camera name -> view
+    ground_m: np.ndarray | None = None  # (3,) site coordinates, if known
+
+
+@dataclass
+class Floor:
+    camera: str  # the camera the corners were picked in
+    corners_px: list[tuple[float, float]]
+    edges_m: tuple[float, float]
+    corners_m: np.ndarray  # (4, 3), z = 0
+
+
+@dataclass
+class Site:
+    id: str
+    cameras: dict[str, Camera]
+    floor: Floor | None = None
+    objects: list[SiteObject] = field(default_factory=list)
+    residual_px: dict[str, float] = field(default_factory=dict)  # camera name -> reprojection error
+    confirmed_by_person: bool = False
+    dimensions: Literal["measured", "estimated"] = "estimated"
+    history: list[dict] = field(default_factory=list)  # each has at least "at" (ISO 8601 UTC) and "what"
+
+
+# ---- masks: COCO uncompressed RLE, column-major, starting with a run of False ----
+
+def mask_to_rle(mask: np.ndarray) -> dict:
+    m = np.asarray(mask, dtype=bool)
+    if m.ndim != 2:
+        raise ValueError(f"mask must be 2-D, got shape {m.shape}")
+    flat = m.ravel(order="F")
+    counts: list[int] = []
+    current = False
+    run = 0
+    for v in flat:
+        if bool(v) == current:
+            run += 1
+        else:
+            counts.append(run)
+            current = bool(v)
+            run = 1
+    counts.append(run)
+    return {"size": [int(m.shape[0]), int(m.shape[1])], "counts": counts}
+
+
+def rle_to_mask(rle: dict) -> np.ndarray:
+    h, w = rle["size"]
+    counts = rle["counts"]
+    if sum(counts) != h * w:
+        raise ValueError(f"RLE runs add up to {sum(counts)}, expected {h * w}")
+    flat = np.zeros(h * w, dtype=bool)
+    pos = 0
+    value = False
+    for c in counts:
+        if value:
+            flat[pos:pos + c] = True
+        pos += c
+        value = not value
+    return flat.reshape((h, w), order="F")
+
+
+# ---- the file ----
+
+def _view_to_dict(v: ObjectView) -> dict:
+    return {"box": list(v.box), "mask_rle": {"size": list(v.mask_rle["size"]), "counts": list(v.mask_rle["counts"])},
+            "ground_px": [list(p) for p in v.ground_px]}
+
+
+def _view_from_dict(d: dict) -> ObjectView:
+    return ObjectView(tuple(int(x) for x in d["box"]), d["mask_rle"], [(float(x), float(y)) for x, y in d["ground_px"]])
+
+
+def _object_to_dict(o: SiteObject) -> dict:
+    return {"name": o.name, "kind": o.kind, "views": {k: _view_to_dict(v) for k, v in o.views.items()},
+            "ground_m": None if o.ground_m is None else np.asarray(o.ground_m, float).tolist()}
+
+
+def _object_from_dict(d: dict) -> SiteObject:
+    g = d.get("ground_m")
+    return SiteObject(d["name"], d["kind"], {k: _view_from_dict(v) for k, v in d["views"].items()},
+                      None if g is None else np.array(g, float))
+
+
+def _floor_to_dict(f: Floor) -> dict:
+    return {"camera": f.camera, "corners_px": [list(p) for p in f.corners_px], "edges_m": list(f.edges_m),
+            "corners_m": np.asarray(f.corners_m, float).tolist()}
+
+
+def _floor_from_dict(d: dict) -> Floor:
+    return Floor(d["camera"], [(float(x), float(y)) for x, y in d["corners_px"]],
+                 (float(d["edges_m"][0]), float(d["edges_m"][1])), np.array(d["corners_m"], float))
+
+
+def save_site(site: Site, path) -> None:
+    d = {
+        "format": FORMAT,
+        "id": site.id,
+        "cameras": {k: c.to_dict() for k, c in site.cameras.items()},
+        "floor": None if site.floor is None else _floor_to_dict(site.floor),
+        "objects": [_object_to_dict(o) for o in site.objects],
+        "residual_px": {k: float(v) for k, v in site.residual_px.items()},
+        "confirmed_by_person": bool(site.confirmed_by_person),
+        "dimensions": site.dimensions,
+        "history": site.history,
+    }
+    Path(path).write_text(json.dumps(d, indent=2))
+
+
+def load_site(path) -> Site:
+    d = json.loads(Path(path).read_text())
+    fmt = d.get("format") if isinstance(d, dict) else None
+    if fmt != FORMAT:
+        raise ValueError(f"not a site file this version reads: format is {fmt!r}, expected {FORMAT!r}")
+    return Site(
+        id=d["id"],
+        cameras={k: Camera.from_dict(c) for k, c in d["cameras"].items()},
+        floor=None if d.get("floor") is None else _floor_from_dict(d["floor"]),
+        objects=[_object_from_dict(o) for o in d.get("objects", [])],
+        residual_px={k: float(v) for k, v in d.get("residual_px", {}).items()},
+        confirmed_by_person=bool(d.get("confirmed_by_person", False)),
+        dimensions=d.get("dimensions", "estimated"),
+        history=list(d.get("history", [])),
+    )
+
+
+def load_old_site(path) -> Site:
+    """A site file of the old open build (``sites/*.json``): only its camera is copied, as ``'camera'``."""
+    path = Path(path)
+    d = json.loads(path.read_text())
+    intr, extr = d["camera"]["intr"], d["camera"]["extr"]
+    K = [[intr["fx"], 0, intr["cx"]], [0, intr["fy"], intr["cy"]], [0, 0, 1]]
+    R = np.array(extr["R"], float).reshape(3, 3) @ _M  # R_ros = R_three @ M
+    camera = Camera(intr["width"], intr["height"], K, intr["dist"], R, extr["t"])
+    return Site(id=d.get("id") or path.stem, cameras={"camera": camera}, confirmed_by_person=True,
+                dimensions="estimated")

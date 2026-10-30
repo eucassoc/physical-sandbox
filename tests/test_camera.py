@@ -5,27 +5,16 @@ import numpy as np
 import pytest
 
 from physical_sandbox.camera import Camera
+from physical_sandbox.site import load_old_site
 
 OLD_SITE = Path.home() / "work/physical-sandbox-proto/sites/s-1793271472612.json"
 
 pytestmark = pytest.mark.skipif(not OLD_SITE.exists(), reason="the old site file is not on this machine")
 
-# three's world (y up) <- ROS world (z up)
-M = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], float)
-
-
-def camera_from_old_site(path):
-    """Temporary helper: Task 3 replaces it with site.load_old_site."""
-    cam = json.loads(Path(path).read_text())["camera"]
-    intr, extr = cam["intr"], cam["extr"]
-    K = np.array([[intr["fx"], 0, intr["cx"]], [0, intr["fy"], intr["cy"]], [0, 0, 1]], float)
-    R = np.array(extr["R"], float).reshape(3, 3) @ M
-    return Camera(intr["width"], intr["height"], K, np.array(intr["dist"], float), R, np.array(extr["t"], float))
-
 
 @pytest.fixture
 def cam():
-    return camera_from_old_site(OLD_SITE)
+    return load_old_site(OLD_SITE).cameras['camera']
 
 
 def test_project_matches_the_old_ps_camera(cam):

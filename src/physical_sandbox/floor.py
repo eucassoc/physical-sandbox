@@ -84,14 +84,18 @@ def solve_floor(width: int, height: int, corners_px: list[tuple[float, float]], 
     px = np.array(corners_px, dtype=float).reshape(4, 2)
     world = _floor(edges_m, +1.0)
     camera, residual = _solve(width, height, px, world)
+    if camera is not None and camera.position[2] >= 0:
+        return FloorSolution(camera, world, residual, False, None)
+    if camera is None and not allow_mirror:
+        return FloorSolution(None, world, None, False, "flat")
+    if camera is not None and not allow_mirror:
+        return FloorSolution(None, world, None, True, "mirrored")
+    # The camera came out below the floor, or no fit was possible (a corner behind the camera): the corners
+    # may go round the other way, so try the floor mirrored across the line 1 -> 2.
+    mirrored_world = _floor(edges_m, -1.0)
+    mirrored_camera, mirrored_residual = _solve(width, height, px, mirrored_world)
+    if mirrored_camera is not None and mirrored_camera.position[2] >= 0:
+        return FloorSolution(mirrored_camera, mirrored_world, mirrored_residual, True, None)
     if camera is None:
         return FloorSolution(None, world, None, False, "flat")
-    if camera.position[2] >= 0:
-        return FloorSolution(camera, world, residual, False, None)
-    if not allow_mirror:
-        return FloorSolution(None, world, None, True, "mirrored")
-    world = _floor(edges_m, -1.0)
-    camera, residual = _solve(width, height, px, world)
-    if camera is None:
-        return FloorSolution(None, world, None, True, "flat")
-    return FloorSolution(camera, world, residual, True, None)
+    return FloorSolution(None, mirrored_world, None, True, "flat")

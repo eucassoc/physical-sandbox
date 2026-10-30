@@ -88,3 +88,35 @@ def test_no_accepted_solution_has_a_nan_residual():
             assert np.isfinite(sol.residual_px)
             depth = (sol.corners_m @ sol.camera.R.T + sol.camera.t)[:, 2]
             assert (depth > 0).all()
+
+
+def test_a_quad_whose_first_fit_fails_is_still_mirrored_when_the_mirrored_floor_fits():
+    # Found by a seeded random search (seed 0, 2 hits in 30000 random quads, not convex): the +y floor puts
+    # a corner behind the camera, the mirrored floor gives a camera above the floor.
+    # Full precision on purpose: this quad is marginal (rounded to 0.1 px the mirrored fit fails); the
+    # patched test below covers the same path without depending on the numbers.
+    corners = [(865.6868601331811, 1098.3354388157422), (1205.8742979115336, 758.367920837139),
+               (1844.841155049077, 21.271732703624863), (1203.4139343581128, 961.4691803223752)]
+    sol = solve_floor(2020, 1108, corners, (3.5, 6.8))
+    assert sol.reason is None and sol.mirrored
+    assert np.isfinite(sol.residual_px) and sol.camera.position[2] >= 0
+    assert sol.corners_m[2, 1] == pytest.approx(-6.8)
+    assert solve_floor(2020, 1108, corners, (3.5, 6.8), allow_mirror=False).reason == 'flat'
+
+
+def test_the_mirror_path_is_tried_when_the_first_fit_returns_no_camera(monkeypatch):
+    import physical_sandbox.floor as floor
+
+    real = floor._solve
+    calls = []
+
+    def fail_on_the_plus_y_floor(width, height, px, world):
+        calls.append(world[2, 1])
+        return (None, None) if world[2, 1] > 0 else real(width, height, px, world)
+
+    monkeypatch.setattr(floor, "_solve", fail_on_the_plus_y_floor)
+    sol = solve_floor(2020, 1108, list(reversed(TRUE_CORNERS)), (3.5, 6.8))
+    assert calls == [6.8, -6.8] and sol.mirrored and sol.reason is None
+    calls.clear()
+    assert solve_floor(2020, 1108, list(reversed(TRUE_CORNERS)), (3.5, 6.8), allow_mirror=False).reason == 'flat'
+    assert calls == [6.8]

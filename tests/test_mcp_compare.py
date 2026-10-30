@@ -250,6 +250,17 @@ def test_figures_are_the_comparisons_numbers_and_the_site_quality_comes_with_the
                            "dimensionsNote": "寸法は推定（未確認）", "confirmedByPerson": True}
 
 
+def test_grip_threshold_is_passed_on_and_must_be_finite(world, monkeypatch):
+    import physical_sandbox.compare as cmp
+    seen = []
+    real = cmp.compare
+    monkeypatch.setattr(cmp, "compare", lambda *a, **k: seen.append(k.get("grip_threshold")) or real(*a, **k))
+    out = compare(world, gripThreshold=0.2)
+    assert seen == [0.2] and "grip_threshold" in out["figures"]
+    with pytest.raises(ValueError, match="gripThreshold"):
+        compare(world, gripThreshold=float("nan"))
+
+
 def test_labels_can_be_given(world):
     out = compare(world, labelA="手本", labelB="試し")
     assert [r["label"] for r in out["records"]] == ["手本", "試し"]

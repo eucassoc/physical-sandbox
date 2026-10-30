@@ -32,6 +32,7 @@ class Comparison:
     series: dict  # {t, tool_gap_m} for plotting
     unknown: list = field(default_factory=lambda: list(_UNKNOWN))
     unknown_reasons: dict = field(default_factory=lambda: {k: _STAGE3 for k in _UNKNOWN})
+    grip_threshold: float | None = None  # the gripper value a grasp closes through (None: no gripper joint)
 
     def to_dict(self) -> dict:
         """Plain JSON types only (a NaN jerk becomes null)."""
@@ -45,6 +46,7 @@ class Comparison:
             "jerk": {k: (float(v) if math.isfinite(v) else None) for k, v in self.jerk.items()},
             "grasps": [{k: float(v) for k, v in g.items()} for g in self.grasps],
             "grasp_counts": {k: int(v) for k, v in self.grasp_counts.items()},
+            "grip_threshold": None if self.grip_threshold is None else float(self.grip_threshold),
             "series": {"t": [float(x) for x in self.series["t"]],
                        "tool_gap_m": [float(x) for x in self.series["tool_gap_m"]]},
             "unknown": list(self.unknown),
@@ -169,19 +171,27 @@ def compare(scene: Scene, a: Motion, b: Motion, *, step_s: float = 1 / 30,
     jerk = {"a": _jerk(_tips(scene, a, _grid(dur_a, step_s, cover=False)), step_s),
             "b": _jerk(_tips(scene, b, _grid(dur_b, step_s, cover=False)), step_s)}
 
-    # grasps: the gripper joint closing through the threshold, paired in order
+    # grasps: the gripper joint closing through the threshold, paired in order. The default threshold is the
+    # middle of the range the gripper actually went through in the two motions, not of its joint limits: a
+    # gripper that only ever opens a little (as in many teleoperated datasets) would never cross the latter.
     unknown, reasons = list(_UNKNOWN), {k_: _STAGE3 for k_ in _UNKNOWN}
     grasps, counts = [], {"a": 0, "b": 0}
     if "gripper" in names:
         gj = names.index("gripper")
         if grip_threshold is None:
-            lo, hi = scene.machines[a.machine].machine.limits[gj]
-            grip_threshold = float((lo + hi) / 2)
+            both = np.concatenate([a.q[:, gj], b.q[:, gj]])
+            grip_threshold = float((both.min() + both.max()) / 2)
+        elif not math.isfinite(grip_threshold):
+            raise ValueError(f"grip_threshold must be a finite number, got {grip_threshold}")
+        grip_threshold = float(grip_threshold)
         ca, cb = _closings(a, gj, grip_threshold), _closings(b, gj, grip_threshold)
         counts = {"a": len(ca), "b": len(cb)}
         for ta, tb in zip(ca, cb):
             gap_g = np.linalg.norm(_tips(scene, a, [ta])[0] - _tips(scene, b, [tb])[0])
             grasps.append({"a_s": ta, "b_s": tb, "tool_gap_m": float(gap_g)})
+        if not ca and not cb:  # a bare 0 and 0 would read as a fact; say none was found, at which threshold
+            unknown.append("grasps")
+            reasons["grasps"] = f"つかむ瞬間が見つかりませんでした（しきい値 {grip_threshold:.3g}）"
     else:
         unknown.append("grasps")
         reasons["grasps"] = "グリッパーの関節（gripper）がありません"  # the machine has no joint named gripper
@@ -192,4 +202,4 @@ def compare(scene: Scene, a: Motion, b: Motion, *, step_s: float = 1 / 30,
         duration_s={"a": dur_a, "b": dur_b, "diff": dur_b - dur_a},
         jerk=jerk, grasps=grasps, grasp_counts=counts,
         series={"t": [float(x) for x in t], "tool_gap_m": [float(x) for x in gap]},
-        unknown=unknown, unknown_reasons=reasons)
+        unknown=unknown, unknown_reasons=reasons, grip_threshold=grip_threshold if "gripper" in names else None)

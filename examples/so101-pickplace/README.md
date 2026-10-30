@@ -66,6 +66,14 @@ theirs, and at the grasp the gripper tip on the brick. In the first and last fra
 so the orange shell covers the blue one; to see blue alone, draw episode 0 by itself with
 `physical_sandbox.render.render_overlay`.
 
+**Grasps.** `compare` counts a grasp where the gripper closes through the middle of the range it actually went
+through in the two motions: 0.086 rad here (`grip_threshold` in `gaps.json` and `gaps.csv`; `--grip-threshold`
+sets another). In this dataset the gripper only opens to about 20-25 of 100 before closing on the brick, so the
+middle of its URDF range (0.785 rad) would find none. It finds two closings in each episode: the grasp (episode
+0 at 5.60 s, episode 1 at 4.17 s, the tool tips 11 mm apart) and the gripper closing again after the drop (7.70 s
+and 6.58 s, 23 mm apart). With these two episodes the tool gap is at most 226 mm (at 5.77 s, while episode 1
+is already lifting), 89 mm on average, and the path shape differs by 27 mm.
+
 ## What was corrected, and why
 
 **The joint mapping (`JOINT_MAP` in `src/physical_sandbox/lerobot.py`) did not need changing.** The dataset
@@ -112,11 +120,6 @@ checked separately. `python examples/so101-pickplace/fit_site.py` prints the num
 - The scale is estimated. Lengths in `gaps.json` (tool gap, path shape) are in metres of this estimate; the
   fitted lengths moved by about 5 % when the assumed focal length went from 450 to 650 px, and the true error
   is not known. Times and joint angles do not depend on it.
-- **No grasps are found** (`grasp_counts` 0 and 0). `compare` counts a grasp where the gripper closes through
-  the middle of its URDF range (0.785 rad, 50 in dataset units), but in this dataset the gripper only opens to
-  about 20-25 before closing on the brick. A threshold at the middle of the range actually used (about 0.09
-  rad) finds two closings in each episode (the grasp at 5.6 s and 4.2 s, 11 mm apart, and the gripper closing
-  again after the drop). The command has no option for the threshold yet.
 - The site has no fixed objects (the tray, the box at the back): `psbx site fit` takes only the floor. They
   are chosen in the MCP screen.
 - Nobody has confirmed the site or the placement (`confirmedByPerson: false` in both files).

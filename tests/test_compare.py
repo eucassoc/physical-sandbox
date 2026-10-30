@@ -108,7 +108,8 @@ def test_one_grasp_each_pairs_up_with_a_known_time_gap(scene):
     c = compare(scene, a, b)
     assert len(c.grasps) == 1
     g = c.grasps[0]
-    # the default threshold is the middle of the gripper's limits (0..1 -> 0.5): halfway through the 0.2 s close
+    # the default threshold is the middle of the range the gripper went through (0..1 -> 0.5): halfway through
+    # the 0.2 s close
     assert g["a_s"] == pytest.approx(1.1, abs=1e-6)
     assert g["b_s"] == pytest.approx(1.6, abs=1e-6)
     assert g["tool_gap_m"] == pytest.approx(0.1 * 0.5, abs=1e-6)  # slide moves 0.1 m/s, 0.5 s apart
@@ -116,6 +117,39 @@ def test_one_grasp_each_pairs_up_with_a_known_time_gap(scene):
     # a threshold of 0.25 is crossed later in the close
     c2 = compare(scene, a, b, grip_threshold=0.25)
     assert c2.grasps[0]["a_s"] == pytest.approx(1.15, abs=1e-6)
+
+
+def test_a_gripper_that_opens_only_a_little_is_still_found_by_the_default_threshold(scene):
+    """As in the SO-101 dataset: the limits are 0..1 but the gripper only opens to 0.2 before closing."""
+    n = 91
+    t = np.arange(n) / FPS
+    slide = np.linspace(0.0, 0.3, n)
+
+    def small(at):  # 0.2 -> 0.02 over 0.2 s starting at ``at``
+        return 0.02 + 0.18 * np.clip(1.0 - (t - at) / 0.2, 0.0, 1.0)
+
+    c = compare(scene, _motion(slide, small(1.0)), _motion(slide, small(1.5)))
+    assert c.grip_threshold == pytest.approx(0.11)  # the middle of 0.02..0.2, far below the limits' 0.5
+    assert c.grasp_counts == {"a": 1, "b": 1}
+    assert c.grasps[0]["a_s"] == pytest.approx(1.1, abs=1e-6)
+    assert "grasps" not in c.unknown
+    assert c.to_dict()["grip_threshold"] == pytest.approx(0.11)
+
+
+def test_no_grasp_in_either_motion_is_said_with_the_threshold_not_shown_as_a_bare_zero(scene):
+    n = 31
+    slide = np.linspace(0.0, 0.3, n)
+    open_ = np.full(n, 0.5)
+    c = compare(scene, _motion(slide, open_), _motion(slide, open_))
+    assert c.grasp_counts == {"a": 0, "b": 0}
+    assert "grasps" in c.unknown
+    assert c.unknown_reasons["grasps"] == "つかむ瞬間が見つかりませんでした（しきい値 0.5）"
+    # an explicit threshold the closings never cross says so too, with that threshold
+    closes = np.where(np.arange(n) < 15, 0.5, 0.2)
+    c2 = compare(scene, _motion(slide, closes), _motion(slide, closes), grip_threshold=0.1)
+    assert c2.grasp_counts == {"a": 0, "b": 0} and "しきい値 0.1）" in c2.unknown_reasons["grasps"]
+    with pytest.raises(ValueError, match="grip_threshold"):
+        compare(scene, _motion(slide, closes), _motion(slide, closes), grip_threshold=float("nan"))
 
 
 def test_opening_is_not_a_grasp_and_extra_grasps_are_counted(scene):
@@ -146,6 +180,7 @@ def test_no_gripper_joint_says_grasps_are_unknown(scene):
     assert c.grasps == []
     assert "grasps" in c.unknown
     assert c.unknown_reasons["grasps"]
+    assert c.grip_threshold is None and c.to_dict()["grip_threshold"] is None
 
 
 def test_to_dict_is_plain_json_with_unknowns_and_labels(scene):
@@ -155,7 +190,8 @@ def test_to_dict_is_plain_json_with_unknowns_and_labels(scene):
     assert json.loads(json.dumps(d)) == d
     assert d["labels"] == {"a": "demo", "b": "policy"}
     assert d["step_s"] == 1 / 20
-    assert d["unknown"] == ["clearance", "reach", "world"]
+    assert d["unknown"] == ["clearance", "reach", "world", "grasps"]  # the gripper never closes here
+    assert d["grip_threshold"] == 0.0
     assert d["unknown_reasons"]["clearance"] == "奥行きと対象物は段 3"
     for key in ("tool_deviation_m", "shape_deviation_m", "joints", "duration_s", "jerk", "grasps", "series"):
         assert key in d

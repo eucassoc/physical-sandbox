@@ -342,7 +342,8 @@ function figures() {
   }
   const n = f.grasp_counts;
   if (!f.unknown.includes('grasps')) {
-    row('つかんだ回数', `A ${n.a} 回、B ${n.b} 回`);
+    const at = f.grip_threshold === null || f.grip_threshold === undefined ? '' : `（しきい値 ${Number(f.grip_threshold).toPrecision(3)}）`;
+    row('つかんだ回数', `A ${n.a} 回、B ${n.b} 回${at}`);
     f.grasps.forEach((g, i) => row(`${i + 1} 回目につかんだとき`, `手先のずれ ${mm(g.tool_gap_m)}（A の ${when(g.a_s)}、B の ${sec(g.b_s)}）`));
   }
   for (const name of f.unknown) {

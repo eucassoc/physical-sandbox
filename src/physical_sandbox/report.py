@@ -43,8 +43,11 @@ def _rows(d: dict, header: dict) -> list[tuple]:
         rows.append((f"duration.{k}", v, "s", None, ""))
     for k, v in d["jerk"].items():
         rows.append((f"jerk.{k}", v, "m/s^3", None, ""))
+    if d.get("grip_threshold") is not None:
+        rows.append(("grip_threshold", d["grip_threshold"], "rad", None, "gripper value a grasp closes through"))
+    found_none = "grasps" in d["unknown"]
     for k, v in d["grasp_counts"].items():
-        rows.append((f"grasp_count.{k}", v, "count", None, ""))
+        rows.append((f"grasp_count.{k}", v, "count", None, d["unknown_reasons"].get("grasps", "") if found_none else ""))
     for i, g in enumerate(d["grasps"]):
         rows.append((f"grasps.{i}.tool_gap", g["tool_gap_m"], "m", g["a_s"], ""))
         rows.append((f"grasps.{i}.b_s", g["b_s"], "s", None, ""))

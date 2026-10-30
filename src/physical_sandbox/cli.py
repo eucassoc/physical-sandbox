@@ -150,7 +150,7 @@ def _cmd_compare(args) -> int:
             camera_for(source, site.cameras[args.camera])
         except ValueError as e:
             raise InputError(f"--video {str(video)!r}: {_one_line(e)}") from e
-        result = compare(scene, a, b)
+        result = compare(scene, a, b, grip_threshold=args.grip_threshold)
         paths = write_report(result, out, site=site)
         paths["replay.mp4"] = render_overlay(scene, args.camera, source, [a, b], out / "replay.mp4",
                                              start_s=start_s, duration=cap_s)
@@ -162,6 +162,9 @@ def _cmd_compare(args) -> int:
         longer = "B" if b.t[-1] >= a.t[-1] else "A"
         print(f"replay cut at {cap_s:.2f} s: the recording of A's episode ends there ({longer} runs "
               f"{longest:.2f} s); the numbers cover the whole of both motions")
+    if result.grip_threshold is not None and "grasps" not in result.unknown:
+        print(f"grasps: A {result.grasp_counts['a']}, B {result.grasp_counts['b']} "
+              f"(gripper closing through {result.grip_threshold:.3g})")
     if site.dimensions == "estimated":
         print("note: 寸法は推定（未確認）")
     if result.unknown:
@@ -169,6 +172,16 @@ def _cmd_compare(args) -> int:
     for name in ("gaps.json", "gaps.csv", "gaps.png", "replay.mp4"):
         print(paths[name])
     return 0
+
+
+def _finite(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a finite number")
+    return value
 
 
 def _corner(text: str) -> tuple[float, float]:
@@ -246,6 +259,9 @@ def _parser() -> argparse.ArgumentParser:
     c.add_argument("--b", required=True, help="motion B: a recording file[#label] or lerobot:<dir>#<episode>")
     c.add_argument("--out", required=True, help="the output folder")
     c.add_argument("--video", help="the picture to draw on (default: A's own recording when A is LeRobot)")
+    c.add_argument("--grip-threshold", type=_finite, metavar="VALUE",
+                   help="the gripper joint value (radians) a grasp closes through (default: the middle of the "
+                        "range the gripper went through in the two motions)")
     c.set_defaults(run=_cmd_compare)
 
     s = sub.add_parser("site", help="site tools")

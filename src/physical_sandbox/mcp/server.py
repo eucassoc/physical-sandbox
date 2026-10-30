@@ -465,10 +465,12 @@ def _write_still(frame: np.ndarray, spec, start_s: float, cam: Camera) -> Path:
     "(a still or a recording); without it, A's own recording when A is a LeRobot episode, else the picture the "
     "scene file names, else it asks for one. videoCamera is the camera of A's LeRobot dataset to take that "
     "recording from (default: the same name as camera; a site fixed in the chat screen calls its camera "
-    "'camera', so give the dataset's camera name here, such as 'side'). What the numbers cannot tell yet is "
-    "listed with its reason."))
+    "'camera', so give the dataset's camera name here, such as 'side'). gripThreshold is the gripper joint value "
+    "(radians) a grasp closes through (default: the middle of the range the gripper went through in the two "
+    "motions). What the numbers cannot tell yet is listed with its reason."))
 def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA: str | None = None,
-               labelB: str | None = None, video: str | None = None, videoCamera: str | None = None) -> str:
+               labelB: str | None = None, video: str | None = None, videoCamera: str | None = None,
+               gripThreshold: float | None = None) -> str:
     from ..cli import _check_motions, _lerobot_picture, _load_motion, _own_episode_span, _reading
     from ..compare import compare
     from ..errors import InputError
@@ -513,7 +515,9 @@ def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA
     still = _write_still(frame, spec, start_s, cam)
     img = photo(str(still), frame=frame)
 
-    result = compare(scene, ma, mb)
+    if gripThreshold is not None and not math.isfinite(float(gripThreshold)):
+        raise InputError(f"gripThreshold must be a finite number, got {gripThreshold}")
+    result = compare(scene, ma, mb, grip_threshold=gripThreshold)
     placed = scene.machines[ma.machine]
     model = pack_model(placed.machine, CHUNK)
     names = [l["name"] for l in model["links"]]

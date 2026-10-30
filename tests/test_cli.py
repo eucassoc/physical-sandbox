@@ -502,3 +502,77 @@ def test_an_explicit_video_that_is_the_episodes_own_file_still_starts_and_stops_
     assert screen_compare(tmp_path, site_dir, ds, 0, 1, ["--video", str(own)]) == 0
     assert len(frames_of(tmp_path / "out" / "replay.mp4")) == 9
     assert "replay cut at 0.30 s" in capsys.readouterr().out
+
+
+# ---- grasps: the threshold used is told, and none found is said ----
+
+GRIP_URDF = """<?xml version="1.0"?>
+<robot name="pincer">
+  <link name="base">
+    <inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual><origin xyz="0 0 0.15"/><geometry><box size="0.3 0.3 0.3"/></geometry></visual>
+  </link>
+  <link name="jaw">
+    <inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual><origin xyz="0.2 0 0"/><geometry><box size="0.4 0.1 0.1"/></geometry></visual>
+  </link>
+  <joint name="gripper" type="revolute">
+    <parent link="base"/><child link="jaw"/><origin xyz="0 0 0.4"/><axis xyz="0 0 1"/>
+    <limit lower="0" upper="1.5" effort="1" velocity="1"/>
+  </joint>
+</robot>
+"""
+
+
+@pytest.fixture
+def pincer(files):
+    tmp_path, site, still = files
+    urdf = tmp_path / "pincer.urdf"
+    urdf.write_text(GRIP_URDF)
+    placed = PlacedMachine(machine=load_machine(urdf), urdf=str(urdf), x=0.0, y=0.0, yaw=0.0)
+    save_scene(Scene(site=site, machines={"pincer": placed}), tmp_path / "pincer-scene.json")
+    t = np.arange(31) / 10.0
+    for name, at in (("a", 1.0), ("b", 1.5)):  # opens to 0.3 of 1.5, then closes to 0.05
+        q = (0.05 + 0.25 * np.clip(1 - (t - at) / 0.3, 0, 1)).reshape(-1, 1)
+        save_record([motion_from_numpy(q, fps=10.0, joint_names=["gripper"], machine="pincer", label=name)],
+                    "yard", tmp_path / f"p{name}.record.json")
+    return tmp_path, still
+
+
+def run_pincer(tmp_path, still, extra=()):
+    out = tmp_path / "pout"
+    code = main(["compare", "--site", str(tmp_path / "site.json"), "--scene", str(tmp_path / "pincer-scene.json"),
+                 "--camera", "camera", "--a", str(tmp_path / "pa.record.json"), "--b", str(tmp_path / "pb.record.json"),
+                 "--out", str(out), "--video", str(still), *extra])
+    rows = {r["item"]: r for r in csv.DictReader((out / "gaps.csv").open(encoding="utf-8"))} if code == 0 else {}
+    return code, out, rows
+
+
+def test_grasps_use_the_observed_range_and_the_threshold_is_in_the_json_and_csv(pincer, capsys):
+    tmp_path, still = pincer
+    code, out, rows = run_pincer(tmp_path, still)
+    assert code == 0
+    data = json.loads((out / "gaps.json").read_text())
+    assert data["grip_threshold"] == pytest.approx(0.175) and data["grasp_counts"] == {"a": 1, "b": 1}
+    assert float(rows["grip_threshold"]["value"]) == pytest.approx(0.175)
+    assert rows["grasp_count.a"]["value"] == "1" and rows["grasp_count.a"]["note"] == ""
+    assert "unknown.grasps" not in rows
+    assert "grasps: A 1, B 1 (gripper closing through 0.175)" in capsys.readouterr().out
+
+
+def test_grip_threshold_option_and_none_found_is_a_note_not_a_bare_zero(pincer):
+    tmp_path, still = pincer
+    code, out, rows = run_pincer(tmp_path, still, ["--grip-threshold", "0.01"])
+    assert code == 0
+    data = json.loads((out / "gaps.json").read_text())
+    assert data["grip_threshold"] == 0.01 and data["grasp_counts"] == {"a": 0, "b": 0}
+    note = "つかむ瞬間が見つかりませんでした（しきい値 0.01）"
+    assert data["unknown_reasons"]["grasps"] == note
+    assert rows["unknown.grasps"]["note"] == note and rows["grasp_count.a"]["note"] == note
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "x"])
+def test_grip_threshold_must_be_a_finite_number(pincer, bad):
+    tmp_path, still = pincer
+    code, _, _ = run_pincer(tmp_path, still, ["--grip-threshold", bad])
+    assert code == 2

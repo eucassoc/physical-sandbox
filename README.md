@@ -28,8 +28,8 @@ and reopen Claude Desktop with Cmd+Q:
 {
   "mcpServers": {
     "physical-sandbox": {
-      "command": "/path/to/physical-sandbox/.venv/bin/python",
-      "args": ["-m", "physical_sandbox.mcp.server"]
+      "command": "/path/to/physical-sandbox/.venv/bin/psbx",
+      "args": ["mcp"]
     }
   }
 }

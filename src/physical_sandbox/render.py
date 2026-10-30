@@ -18,6 +18,7 @@ OpenGL backend works offscreen; set ``MUJOCO_GL=egl`` or ``osmesa`` on a headles
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import cv2
@@ -32,7 +33,7 @@ from .sources import Source, camera_for
 COLORS = ("#2f7fe0", "#f08c1a")  # record A blue, record B orange
 SHOW = {"machine": True, "trail": True, "link": True}
 _SHELL_ALPHA = 0.5
-_VISIBLE_GROUPS = (0, 1, 2)  # MuJoCo's own default: the collision groups above that are not drawn
+_VISUAL_GROUP = 1  # with discardvisual="false" MuJoCo's URDF loader puts visuals in group 1 and collisions in group 0
 _PRIMITIVES = {  # geom type -> (MJCF name, how many size numbers MJCF wants)
     int(mujoco.mjtGeom.mjGEOM_SPHERE): ("sphere", 1),
     int(mujoco.mjtGeom.mjGEOM_CAPSULE): ("capsule", 2),
@@ -61,7 +62,8 @@ def _camera_xml(cam: Camera) -> str:
     pitch = 1e-5
     return (f'<camera name="photo" pos="{_nums(pos)}" xyaxes="{_nums(xyaxes)}" resolution="{W} {H}" '
             f'sensorsize="{W * pitch:.9g} {H * pitch:.9g}" focalpixel="{cam.K[0, 0]:.9g} {cam.K[1, 1]:.9g}" '
-            f'principalpixel="{cam.K[0, 2] - W / 2:.9g} {cam.K[1, 2] - H / 2:.9g}"/>')
+            # MuJoCo takes the principal point offset the other way round: centre minus cx (checked against OpenCV)
+            f'principalpixel="{W / 2 - cam.K[0, 2]:.9g} {H / 2 - cam.K[1, 2]:.9g}"/>')
 
 
 class _Shells:
@@ -71,12 +73,14 @@ class _Shells:
         self.cam = cam
         self.motions = motions
         assets, bodies = [], []
-        self._body_names: list[list[str]] = []  # per motion: (machine body name, mocap name) pairs
+        self._body_names: list[tuple[int, int]] = []  # (motion index, machine body id) of each mocap body
         meshes_done: set[tuple[str, int]] = set()
         for mi, motion in enumerate(motions):
             src = scene.machines[motion.machine].machine.model
+            # draw the visuals only (group 1); a machine without any (collision shapes only) is drawn from all its geoms
+            groups = (_VISUAL_GROUP,) if (src.geom_group == _VISUAL_GROUP).any() else tuple(range(6))
             for b in range(1, src.nbody):
-                gs = [g for g in range(src.ngeom) if src.geom_bodyid[g] == b and int(src.geom_group[g]) in _VISIBLE_GROUPS]
+                gs = [g for g in range(src.ngeom) if src.geom_bodyid[g] == b and int(src.geom_group[g]) in groups]
                 gxml = []
                 for g in gs:
                     t = int(src.geom_type[g])
@@ -99,6 +103,8 @@ class _Shells:
                     bodies.append(f'<body name="m{mi}_{b}" mocap="true">{"".join(gxml)}</body>')
                     self._body_names.append((mi, b))
         W, H = cam.width, cam.height
+        # extent scales MuJoCo's clipping planes (znear/zfar are fractions of it): a big extent keeps a site
+        # tens of metres deep inside the view whatever the size of the machine
         xml = (f'<mujoco><statistic extent="50"/>'
                f'<visual><global offwidth="{W}" offheight="{H}"/><map znear="0.002" zfar="20"/>'
                f'<headlight ambient="0.6 0.6 0.6" diffuse="0.5 0.5 0.5" specular="0 0 0"/></visual>'
@@ -117,9 +123,13 @@ class _Shells:
         self._src_body_ids = {mi: {scene.machines[m.machine].machine.model.body(b).name: b
                                    for (mj, b) in self._body_names if mj == mi}
                               for mi, m in enumerate(motions)}
-        self.renderer = mujoco.Renderer(self.model, H, W)
-        self._warm()
         self._remap = _distortion_map(cam)
+        self.renderer = mujoco.Renderer(self.model, H, W)
+        try:
+            self._warm()
+        except BaseException:
+            self.renderer.close()
+            raise
 
     def _warm(self):
         mujoco.mj_forward(self.model, self.data)
@@ -158,7 +168,8 @@ def _distortion_map(cam: Camera):
         return None
     u, v = np.meshgrid(np.arange(cam.width, dtype=np.float32), np.arange(cam.height, dtype=np.float32))
     pts = np.stack([u, v], -1).reshape(-1, 1, 2).astype(np.float64)
-    und = cv2.undistortPoints(pts, cam.K, cam.dist, P=cam.K).reshape(cam.height, cam.width, 2).astype(np.float32)
+    crit = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 50, 1e-9)  # the default 5 steps are off by pixels at strong k1
+    und = cv2.undistortPoints(pts, cam.K, cam.dist, None, None, cam.K, crit).reshape(cam.height, cam.width, 2).astype(np.float32)
     return und[..., 0].copy(), und[..., 1].copy()
 
 
@@ -191,6 +202,9 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
         raise ValueError(f"{len(motions)} motions but only {len(colors)} colours")
     if camera_name not in scene.site.cameras:
         raise ValueError(f"the site has no camera {camera_name!r} (it has {sorted(scene.site.cameras)})")
+    unknown = sorted(set(show or {}) - set(SHOW))
+    if unknown:
+        raise ValueError(f"unknown show keys {unknown} (use {sorted(SHOW)})")
     show = {**SHOW, **(show or {})}
     cam = camera_for(source, scene.site.cameras[camera_name])
     bgr = [_bgr(c) for c in colors]
@@ -204,11 +218,13 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
 
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    writer = cv2.VideoWriter(str(out), cv2.VideoWriter_fourcc(*"mp4v"), fps, (cam.width, cam.height))
-    if not writer.isOpened():
-        raise RuntimeError(f"cannot write the video {str(out)!r}")
+    partial = out.with_name(f".{out.stem}.partial{out.suffix}")  # an error never leaves a half-written video at ``out``
     shells = _Shells(scene, motions, cam) if show["machine"] else None
+    writer = None
     try:
+        writer = cv2.VideoWriter(str(partial), cv2.VideoWriter_fourcc(*"mp4v"), fps, (cam.width, cam.height))
+        if not writer.isOpened():
+            raise RuntimeError(f"cannot write the video {str(out)!r}")
         for k in range(n_frames):
             t = k / fps
             img = np.ascontiguousarray(source.at(start_s + t))
@@ -235,8 +251,13 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
                     cv2.line(img, tuple(int(round(c)) for c in a), tuple(int(round(c)) for c in b),
                              (255, 255, 255), 2, cv2.LINE_AA)
             writer.write(img)
-    finally:
         writer.release()
+        writer = None
+        os.replace(partial, out)
+    finally:
+        if writer is not None:
+            writer.release()
+        partial.unlink(missing_ok=True)
         if shells is not None:
             shells.close()
     return out

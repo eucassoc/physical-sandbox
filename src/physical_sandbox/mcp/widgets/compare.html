@@ -1,0 +1,417 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { --fg: #1d1f24; --muted: #5d6470; --bg: #ffffff; --line: #e3e6ea; --err: #b3261e; --note: #8a5a00; --a: #2f7fe0; --b: #f08c1a; color-scheme: light dark; }
+  :root.dark { --fg: #e8eaee; --muted: #a0a6b0; --bg: #1c1d21; --line: #33363c; --err: #ff8a80; --note: #ffcc66; }
+  body { margin: 0; font: 13px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  .wrap { padding: 8px; box-sizing: border-box; max-width: 100%; }
+  * { min-width: 0; }
+  .stage { position: relative; border-radius: 6px; overflow: hidden; background: #222; }
+  .stage canvas { display: block; width: 100%; height: auto; }
+  .stage canvas + canvas { position: absolute; inset: 0; height: 100%; }
+  .row { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+  input[type=range] { flex: 1 1 240px; }
+  button { font: inherit; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--fg); cursor: pointer; min-width: 5.5em; }
+  .shows { gap: 4px 14px; }
+  .shows b { font-weight: 600; margin-right: 2px; }
+  .shows label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+  .shows label.off { opacity: .45; cursor: default; }
+  .sw { width: 22px; height: 0; border-top: 3px solid; display: inline-block; }
+  .sw.b { border-top-style: dashed; }
+  .site { margin-top: 8px; color: var(--muted); }
+  .note { color: var(--note); font-weight: 600; }
+  table { border-collapse: collapse; margin-top: 8px; width: 100%; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; width: 34%; }
+  th, td { overflow-wrap: anywhere; }
+  .go { cursor: pointer; text-decoration: underline dotted; }
+  .why { color: var(--muted); }
+  .say { color: var(--muted); margin-top: 8px; }
+  .say.err { color: var(--err); }
+</style>
+<div class="wrap">
+  <div class="stage">
+    <canvas id="photo" width="1280" height="720"></canvas>
+    <canvas id="gl" width="1280" height="720"></canvas>
+    <canvas id="view" width="1280" height="720"></canvas>
+  </div>
+  <div class="row">
+    <button id="play" disabled>再生</button>
+    <input id="time" type="range" min="0" max="0" value="0" disabled />
+    <span id="clock">0.0 s</span>
+  </div>
+  <div class="row shows" id="shows">
+    <b>記録</b>
+    <label><input type="checkbox" data-show="recA" checked /><i class="sw" style="border-color:#2f7fe0"></i><span id="labelA">A</span></label>
+    <label><input type="checkbox" data-show="recB" checked /><i class="sw b" style="border-color:#f08c1a"></i><span id="labelB">B</span></label>
+    <b>表示</b>
+    <label id="lblMachine"><input type="checkbox" data-show="machine" checked />ロボット</label>
+    <label id="lblBox"><input type="checkbox" data-show="box" checked />床の枠</label>
+    <label><input type="checkbox" data-show="trail" checked />通り道</label>
+    <label><input type="checkbox" data-show="link" checked />A と B を結ぶ線</label>
+  </div>
+  <div class="site" id="site"></div>
+  <table id="figures"></table>
+  <div class="say" id="say">映像を読み込んでいます…</div>
+</div>
+<script>/*__THREE__*/</script>
+<script type="module">
+/*__EXT_APPS_BUNDLE__*/
+const { App } = globalThis.ExtApps;
+const THREE = globalThis.THREE;
+const photoCanvas = document.getElementById('photo');
+const canvas = document.getElementById('view');
+const glCanvas = document.getElementById('gl');
+const ctx = canvas.getContext('2d');
+const slider = document.getElementById('time');
+const playButton = document.getElementById('play');
+const sayEl = document.getElementById('say');
+const say = (s, isError = false) => { sayEl.textContent = s; sayEl.classList.toggle('err', isError); };
+// Failures inside the screen are otherwise invisible: every one ends up in the bottom line.
+const fail = (what, err) => say(`${what}: ${err?.message ?? err}`, true);
+window.addEventListener('error', (e) => fail('画面でエラーが起きました', e.error ?? e.message));
+window.addEventListener('unhandledrejection', (e) => fail('画面でエラーが起きました', e.reason));
+
+const COLORS = ['#2f7fe0', '#f08c1a'];   // record A blue, record B orange
+const show = { recA: true, recB: true, machine: true, box: true, trail: true, link: true };
+let data = null;
+let photo = null;
+let frame = 0;
+let timer = null;
+let three = null;       // { renderer, scene, camera, records: [group per record, its meshes with the link index] }
+let generation = 0;     // counts the tool results: an older one's loads must not touch the newer
+
+const app = new App({ name: 'PsCompare', version: '0.1.0' }, {}, { autoResize: true });
+const recShown = (r) => (r ? show.recB : show.recA);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// ---- The 3D machines, drawn through the site's camera ----
+
+/** The site frame (x forward, y left, z up) as three's world (y up): (x, y, z) -> (x, z, -y) */
+const toThree = (x, y, z) => new THREE.Vector3(x, z, -y);
+
+/** The page camera where the real one is (as PS's video view does it): the picture's frustum from K, at -R^T t.
+ *  The camera is given in the site frame (p_cam = R p + t, x right, y down, z forward): its position and axes are
+ *  carried into three's world; three looks down -z with y up. */
+function placeCamera(camera, { intr, extr }) {
+  const r = extr.R;
+  const t = extr.t;
+  const fullWidth = 2 * Math.max(intr.cx, intr.width - intr.cx);
+  const fullHeight = 2 * Math.max(intr.cy, intr.height - intr.cy);
+  camera.fov = (2 * Math.atan(fullHeight / 2 / intr.fy)) * 180 / Math.PI;
+  camera.setViewOffset(fullWidth, fullHeight, fullWidth / 2 - intr.cx, fullHeight / 2 - intr.cy, intr.width, intr.height);
+  camera.aspect = (fullWidth / fullHeight) * (intr.fy / intr.fx);
+  camera.position.copy(toThree(-(r[0] * t[0] + r[3] * t[1] + r[6] * t[2]), -(r[1] * t[0] + r[4] * t[1] + r[7] * t[2]), -(r[2] * t[0] + r[5] * t[1] + r[8] * t[2])));
+  camera.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(
+    toThree(r[0], r[1], r[2]), toThree(-r[3], -r[4], -r[5]), toThree(-r[6], -r[7], -r[8])));
+  camera.updateProjectionMatrix();
+}
+
+// One call to the server: the JSON it answers, or an Error saying what went wrong
+async function call(name, args) {
+  const res = await app.callServerTool({ name, arguments: args });
+  const text = res?.content?.[0]?.text;
+  if (res?.isError) throw new Error(`${name}: ${text ?? 'エラー'}`);
+  try { return JSON.parse(text); }
+  catch { throw new Error(`${name}: 答えを読めませんでした（${String(text).slice(0, 200)}）`); }
+}
+
+async function fetchParts(name, args, count) {
+  const out = new Array(count);
+  let next = 0;
+  const worker = async () => {
+    while (next < count) {
+      const part = next++;
+      out[part] = (await call(name, { ...args, part })).data;
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  return out.join('');
+}
+
+function bytesOf(b64) {
+  const s = atob(b64);
+  const u = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i += 1) u[i] = s.charCodeAt(i);
+  return u.buffer;
+}
+
+async function buildMachines(mine) {
+  const m = data.model;
+  const buffer = bytesOf(await fetchParts('ps_model_part', { key: m.key }, m.binParts));
+  if (mine !== generation) return;
+  // The links' shapes, each in its own link's frame: positions, then triangle indices
+  const geometries = m.links.map((l) => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(buffer, l.offset, l.vCount * 3), 3));
+    g.setIndex(new THREE.BufferAttribute(new Uint32Array(buffer, l.offset + l.vCount * 12, l.iCount), 1));
+    g.computeVertexNormals();
+    return g;
+  });
+  const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, alpha: true, antialias: true });
+  renderer.setPixelRatio(1);
+  renderer.setSize(glCanvas.width, glCanvas.height, false);
+  const scene = new THREE.Scene();
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x707070, 2.4));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+  sun.position.set(5, 10, 3);
+  scene.add(sun);
+  // The site frame (x forward, y left, z up) inside, three's world (y up) outside: (x, y, z) -> (x, z, -y)
+  const site = new THREE.Group();
+  site.matrixAutoUpdate = false;
+  site.matrix.makeBasis(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 1, 0));
+  scene.add(site);
+  // Each record in its own colour only (none of the machine's own), see-through. A machine first writes its
+  // depth without colour, then its colour over only its front faces: it reads as one tinted shell rather
+  // than a tangle of its own insides
+  const depthOnly = new THREE.MeshBasicMaterial({ colorWrite: false });
+  const materials = COLORS.map((c) => new THREE.MeshLambertMaterial({ color: c, transparent: true, opacity: 0.5, depthWrite: false, depthFunc: THREE.LessEqualDepth }));
+  const records = data.records.map((rec, r) => {
+    const group = new THREE.Group();
+    const meshes = [];
+    m.links.forEach((l, i) => {
+      for (const material of [depthOnly, materials[r]]) {
+        const mesh = new THREE.Mesh(geometries[i], material);
+        mesh.matrixAutoUpdate = false;   // the pose comes from the server as it is
+        mesh.frustumCulled = false;
+        group.add(mesh);
+        meshes.push({ mesh, link: i });
+      }
+    });
+    site.add(group);
+    return { group, meshes };
+  });
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 600);
+  placeCamera(camera, data.camera);
+  three = { renderer, scene, camera, records };
+}
+
+function drawMachines() {
+  if (!three) return;
+  const { renderer, scene, camera, records } = three;
+  const shown = [];
+  records.forEach((rec, r) => {
+    const poses = data.poses[r][frame];
+    rec.group.visible = false;
+    if (!(show.machine && recShown(r) && poses)) return;
+    for (const { mesh, link } of rec.meshes) {
+      mesh.matrix.set(...poses[link]);   // 16 numbers, row by row
+      mesh.matrixWorldNeedsUpdate = true;
+    }
+    shown.push(rec);
+  });
+  // One machine at a time with the depth cleared between them: no machine hides another, they all show through
+  renderer.autoClear = false;
+  renderer.clear();
+  for (const rec of shown) {
+    rec.group.visible = true;
+    renderer.clearDepth();
+    renderer.render(scene, camera);
+    rec.group.visible = false;
+  }
+}
+
+// ---- Floor box, trails, tool tips and the A-B line on top ----
+
+/** Draws the points as lines; a null (a point behind the camera) breaks the line. */
+function strokePath(points, close) {
+  let open = false;
+  ctx.beginPath();
+  for (const p of points) {
+    if (!p) { open = false; continue; }
+    if (open) ctx.lineTo(p[0], p[1]); else { ctx.moveTo(p[0], p[1]); open = true; }
+  }
+  if (close) ctx.closePath();
+}
+
+function draw() {
+  if (!data) return;
+  const k = canvas.width / data.width;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  if (show.box && data.floor) {
+    strokePath(data.floor, true);
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.lineWidth = 2.5 / k;
+    ctx.setLineDash([10 / k, 6 / k]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  data.records.forEach((rec, r) => {
+    if (!recShown(r)) return;
+    for (const dev of rec.devices) {
+      if (show.trail) {
+        // A solid, B dashed (tells them apart in print too)
+        ctx.setLineDash(r ? [14 / k, 10 / k] : []);
+        ctx.strokeStyle = COLORS[r];
+        ctx.lineWidth = 4 / k;
+        strokePath(dev.tool_trail, false);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        const tip = dev.centers[frame];
+        if (tip) {
+          ctx.beginPath();
+          ctx.arc(tip[0], tip[1], 6 / k, 0, 2 * Math.PI);
+          ctx.fillStyle = COLORS[r];
+          ctx.fill();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 2 / k;
+          ctx.stroke();
+        }
+      }
+    }
+  });
+  const [a, b] = data.records;
+  if (show.link && show.recA && show.recB) {
+    for (const dev of a.devices) {
+      const p = dev.centers[frame];
+      const q = b.devices.find((d) => d.id === dev.id)?.centers[frame];
+      if (!p || !q) continue;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2 / k;
+      ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke();
+    }
+  }
+  drawMachines();
+  const total = (data.frames - 1) * data.stepS;
+  document.getElementById('clock').textContent = `${(frame * data.stepS).toFixed(1)} / ${total.toFixed(1)} s`;
+}
+
+function drawPhoto() {
+  const c = photoCanvas.getContext('2d');
+  c.fillStyle = '#222';
+  c.fillRect(0, 0, photoCanvas.width, photoCanvas.height);
+  if (photo) c.drawImage(photo, 0, 0, photoCanvas.width, photoCanvas.height);
+}
+
+function setFrame(i) {
+  frame = Math.max(0, Math.min(data.frames - 1, i));
+  slider.value = String(frame);
+  draw();
+}
+
+function stop() {
+  if (timer) { clearInterval(timer); timer = null; }
+  playButton.textContent = '再生';
+}
+
+// ---- The numbers ----
+
+const mm = (m) => `${(m * 1000).toFixed(1)} mm`;
+const deg = (r) => `${(r * 180 / Math.PI).toFixed(1)}°`;
+const sec = (s) => `${s.toFixed(2)} s`;
+const dash = (v, f) => (v === null || v === undefined ? '—' : f(v));
+const when = (t) => `<span class="go" data-t="${t}">${sec(t)}</span>`;   // a time that jumps the slider there
+
+function figures() {
+  const f = data.figures;
+  const site = data.site;
+  const rows = [];
+  const row = (name, value) => rows.push(`<tr><th>${esc(name)}</th><td>${value}</td></tr>`);
+  row('手先のずれ（同じ時刻）', `最大 ${mm(f.tool_deviation_m.max)}（${when(f.tool_deviation_m.at_s)}）、平均 ${mm(f.tool_deviation_m.mean)}`);
+  row('通り道の形のずれ', mm(f.shape_deviation_m));
+  const d = f.duration_s;
+  row('動いた時間', `A ${sec(d.a)}、B ${sec(d.b)}（B − A = ${d.diff >= 0 ? '+' : ''}${d.diff.toFixed(2)} s）`);
+  row('なめらかさ（ジャーク）', `A ${dash(f.jerk.a, (v) => `${v.toPrecision(3)} m/s³`)}、B ${dash(f.jerk.b, (v) => `${v.toPrecision(3)} m/s³`)}`);
+  for (const [name, j] of Object.entries(f.joints)) {
+    row(`関節 ${name} のずれ`, `最大 ${deg(j.max_rad)}（${when(j.at_s)}）、平均 ${deg(j.mean_rad)}`);
+  }
+  const n = f.grasp_counts;
+  if (!f.unknown.includes('grasps')) {
+    row('つかんだ回数', `A ${n.a} 回、B ${n.b} 回`);
+    f.grasps.forEach((g, i) => row(`${i + 1} 回目につかんだとき`, `手先のずれ ${mm(g.tool_gap_m)}（A の ${when(g.a_s)}、B の ${sec(g.b_s)}）`));
+  }
+  for (const name of f.unknown) {
+    row(`${name}（まだ分かりません）`, `<span class="why">${esc(f.unknown_reasons[name] ?? '')}</span>`);
+  }
+  document.getElementById('figures').innerHTML = rows.join('');
+  document.getElementById('figures').querySelectorAll('.go').forEach((el) => el.addEventListener('click', () => {
+    stop();
+    setFrame(Math.round(Number(el.dataset.t) / data.stepS));
+  }));
+  const px = Object.entries(site.residualPx).map(([cam, v]) => `${esc(cam)} ${v.toFixed(1)} px`).join('、');
+  document.getElementById('site').innerHTML =
+    `場所 ${esc(site.site)}　ずれ ${px || '—'}　寸法 ${site.dimensions === 'measured' ? '実測' : '推定'}　` +
+    `${site.confirmedByPerson ? '人が確認済み' : '人の確認はまだ'}` +
+    (site.dimensionsNote ? `　<span class="note">${esc(site.dimensionsNote)}</span>` : '') +
+    (data.stride > 1 ? `　<span class="why">コマは ${data.stride} 個おきに送っています</span>` : '');
+  document.getElementById('labelA').textContent = `A: ${data.records[0].label}`;
+  document.getElementById('labelB').textContent = `B: ${data.records[1].label}`;
+}
+
+document.querySelectorAll('[data-show]').forEach((box) => box.addEventListener('change', () => {
+  show[box.dataset.show] = box.checked;
+  draw();
+}));
+slider.addEventListener('input', () => { stop(); setFrame(Number(slider.value)); });
+playButton.addEventListener('click', () => {
+  if (!data) return;
+  if (timer) { stop(); return; }
+  if (frame >= data.frames - 1) setFrame(0);
+  playButton.textContent = '一時停止';
+  timer = setInterval(() => {
+    if (frame >= data.frames - 1) { stop(); return; }
+    setFrame(frame + 1);
+  }, data.stepS * 1000);
+});
+
+function disable(id, box) {
+  document.getElementById(id).classList.add('off');
+  document.querySelector(`[data-show=${box}]`).disabled = true;
+}
+
+app.ontoolresult = async (result) => {
+  const mine = ++generation;
+  stop();
+  const body = result?.content?.[0]?.text;
+  if (result?.isError) { say(`比べられませんでした: ${String(body).slice(0, 400)}`, true); return; }
+  try {
+    data = JSON.parse(body);
+  } catch (err) { say(`受け取れませんでした: ${String(body).slice(0, 200)}`, true); return; }
+  three = null;
+  photo = null;
+  frame = 0;
+  const h = Math.round(1280 * data.height / data.width);
+  for (const c of [photoCanvas, canvas, glCanvas]) { c.width = 1280; c.height = h; }
+  slider.max = String(data.frames - 1);
+  slider.value = '0';
+  slider.disabled = playButton.disabled = data.frames < 2;
+  document.getElementById('lblBox').classList.remove('off');
+  document.querySelector('[data-show=box]').disabled = !data.floor;
+  if (!data.floor) document.getElementById('lblBox').classList.add('off');
+  figures();
+  drawPhoto();
+  draw();
+  say('映像とロボットを読み込んでいます…');
+  const photoDone = (async () => {
+    const b64 = await fetchParts('ps_spike_image', { imagePath: data.imagePath }, data.parts);
+    const img = new Image();
+    img.src = `data:image/jpeg;base64,${b64}`;
+    await img.decode();
+    if (mine !== generation) return;
+    photo = img;
+    drawPhoto();
+  })().catch((err) => fail('映像を受け取れませんでした', err));
+  const machineDone = (async () => {
+    if (!THREE) throw new Error('three が読み込まれていません');
+    await buildMachines(mine);
+    if (mine !== generation) return;
+    draw();
+    // The first frame of a fresh WebGL canvas can reach the screen opaque black in some browsers: draw once more
+    requestAnimationFrame(() => { if (mine === generation) draw(); });
+  })().catch((err) => {
+    disable('lblMachine', 'machine');
+    fail('ロボットを出せませんでした（通り道と床の枠だけで見られます）', err);
+  });
+  await Promise.all([photoDone, machineDone]);
+  if (mine === generation && photo && three) say('');
+};
+
+app.onhostcontextchanged = (c) => document.documentElement.classList.toggle('dark', c?.theme === 'dark');
+await app.connect();
+document.documentElement.classList.toggle('dark', app.getHostContext()?.theme === 'dark');
+</script>

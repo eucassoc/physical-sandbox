@@ -1,7 +1,12 @@
-"""MCP server (stdio) with the in-chat screen to fix a site.
+"""MCP server (stdio) with the in-chat screens: fix a site, and compare two motions on it.
 
-An AI agent looks at a photo, proposes the floor's four corners and the fixed objects; the screen shows them
-over the photo; the person drags a corner if needed and presses 決定 (Decide); the site file is written.
+Fix a site: an AI agent looks at a photo, proposes the floor's four corners and the fixed objects; the screen
+shows them over the photo; the person drags a corner if needed and presses 決定 (Decide); the site file is written.
+
+Compare: the agent calls ``ps_compare`` on a site, a scene and two motions; the screen shows the site's picture
+with both motions' machines as see-through shells in the records' colours, the tool-tip trails, a slider and the
+numbers. The screen holds no kinematics: the server sends each link's shape once (``ps_model_part``) and, per
+frame and record, each link's 4x4 pose in the site frame.
 
 Nothing is kept in memory. The host may answer the screen's calls from a different start of this server, so
 what the screen needs later goes to disk: the photo's display copy in the cache directory
@@ -18,6 +23,8 @@ import hashlib
 import json
 import math
 import os
+import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,12 +37,15 @@ try:
 except ImportError as e:  # pragma: no cover
     raise ImportError("The MCP server needs the [mcp] extra: pip install 'physical-sandbox[mcp]'") from e
 
+from ..camera import Camera
 from ..floor import solve_floor
 from ..objects import ground_px, sam_segmenter
 from ..site import Floor, ObjectView, Site, SiteObject, load_site, locate_objects, mask_to_rle, save_site
-from ..sources import open_source
+from ..sources import camera_for, open_source
+from .pack import model_part, pack_model
 
 URI = "ui://physical-sandbox/fit-floor.html"
+COMPARE_URI = "ui://physical-sandbox/compare.html"
 CHUNK = 20_000  # characters of base64 per photo part: each result stays under the host's size cap
 MAX_SIDE = 1280  # the display copy's longer side
 MAX_OUTLINE_POINTS = 200
@@ -44,6 +54,9 @@ KINDS = ("fixed", "target")
 
 _HERE = Path(__file__).parent
 BUNDLE_MARKER = "/*__EXT_APPS_BUNDLE__*/"
+THREE_MARKER = "/*__THREE__*/"
+POSES_BUDGET = 1_600_000  # characters of JSON for all the poses; a longer motion is sampled every n-th frame
+MAX_TRAIL_POINTS = 600
 
 
 def make_segmenter():
@@ -376,12 +389,165 @@ def ps_site_status(siteDir: str) -> str:
                   "confirmedByPerson": site.confirmed_by_person})
 
 
-def _widget() -> str:
+# ---- compare two motions ----
+
+def _num(x: float):
+    """A number for the poses' JSON: an integral value is written without its '.0' (a quarter of the bytes are
+    zeros and ones)."""
+    return int(x) if x == int(x) else x
+
+
+def _compact(a: np.ndarray, digits: int) -> list:
+    return [_num(float(x)) for x in np.round(np.asarray(a, float), digits).reshape(-1)]
+
+
+def _pixels(cam: Camera, pts: np.ndarray) -> list:
+    """Site points (N, 3) as pixel pairs with two decimals; null for a point that is not in front of the camera."""
+    out = []
+    for p in cam.project(pts):
+        out.append(None if not np.isfinite(p).all() else [round(float(p[0]), 2), round(float(p[1]), 2)])
+    return out
+
+
+def _scene_picture(scene_path: str) -> str | None:
+    """The picture a scene file names (``"picture"``, relative to the scene's folder), or None."""
+    d = _read_json(Path(scene_path).expanduser())
+    name = d.get("picture") if isinstance(d, dict) else None
+    if not isinstance(name, str) or not name:
+        return None
+    given = Path(name).expanduser()
+    return str(given if given.is_absolute() else Path(scene_path).expanduser().parent / given)
+
+
+def _write_still(frame: np.ndarray, spec, start_s: float, cam: Camera) -> Path:
+    """The picture's frame as a PNG in the cache directory, so the screen's picture calls (and a different start
+    of the server) find it."""
+    p = Path(str(spec)).expanduser()
+    stamp = f"{p.resolve()}:{p.stat().st_mtime_ns}:{p.stat().st_size}" if p.is_file() else f"{spec}:{time.time_ns()}"
+    key = hashlib.sha1(f"{stamp}:{start_s}:{cam.dist.tobytes().hex()}:{frame.shape}".encode()).hexdigest()
+    d = _cache_dir().parent / "frames"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{key}.png"
+    if not path.exists():
+        ok, buf = cv2.imencode(".png", frame)
+        if not ok:
+            raise ValueError(f"cannot write the picture {str(spec)!r} as a still")
+        _write_atomic(path, buf.tobytes())
+    return path
+
+
+@apps.tool(resource_uri=COMPARE_URI, description=(
+    "Open a screen inside the chat to compare two motions of a machine on a site: the site's picture with the "
+    "machine of each motion as a see-through shell in its own colour (A blue, B orange), the tool-tip paths, a "
+    "slider and a play button, and the table of numbers (the gaps, with the times they happen; click a time to "
+    "jump there). siteDir is the folder with site.json; scenePath the scene file (where the machine stands); "
+    "camera the site camera's name; a and b the two motions: a recording file[#label] or "
+    "lerobot:<dataset_dir>#<episode>. labelA and labelB name them on the screen. video is the picture to draw on "
+    "(a still or a recording); without it, A's own recording when A is a LeRobot episode, else the picture the "
+    "scene file names, else it asks for one. What the numbers cannot tell yet is listed with its reason."))
+def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA: str | None = None,
+               labelB: str | None = None, video: str | None = None) -> str:
+    from ..cli import _check_motions, _load_motion, _reading
+    from ..compare import compare
+    from ..errors import InputError
+    from ..lerobot import lerobot_video
+    from ..report import _header
+    from ..scene import load_scene
+
+    site = _reading(f"siteDir {siteDir!r}", load_site, Path(siteDir).expanduser() / "site.json")
+    if camera not in site.cameras:
+        raise InputError(f"the site has no camera {camera!r} (it has {', '.join(sorted(site.cameras))})")
+    scene = _reading(f"scenePath {scenePath!r}", load_scene, Path(scenePath).expanduser(), site)
+    ma, a_lerobot = _load_motion(a, scene)
+    mb, _ = _load_motion(b, scene)
+    _check_motions(scene, ma, mb)
+    if labelA:
+        ma = replace(ma, label=labelA)
+    if labelB:
+        mb = replace(mb, label=labelB)
+
+    start_s = 0.0
+    if video:
+        spec = video
+    elif a_lerobot is not None:
+        spec, start_s, _ = lerobot_video(*a_lerobot, camera)
+    else:
+        spec = _scene_picture(scenePath)
+        if spec is None:
+            raise InputError("give video: the picture to draw on (a still or a recording). The site file keeps no "
+                             "picture, A is not a LeRobot episode whose recording could be used, and the scene "
+                             "file names none")
+    with _reading(f"video {str(spec)!r}", open_source, spec) as source:
+        try:
+            cam = camera_for(source, site.cameras[camera])
+        except ValueError as e:
+            raise InputError(f"video {str(spec)!r}: {e}") from e
+        frame = source.at(start_s)
+    if np.any(cam.dist):
+        # three draws a pinhole: undo the lens in the picture, and use the pinhole camera for everything else
+        frame = cv2.undistort(frame, cam.K, cam.dist)
+        cam = Camera(cam.width, cam.height, cam.K, np.zeros(5), cam.R, cam.t)
+    still = _write_still(frame, spec, start_s, cam)
+    img = photo(str(still), frame=frame)
+
+    result = compare(scene, ma, mb)
+    placed = scene.machines[ma.machine]
+    model = pack_model(placed.machine, CHUNK)
+    names = [l["name"] for l in model["links"]]
+    base = placed.base_transform()
+    times = result.series["t"]
+    poses, tips = [], []  # per record, per frame
+    for m in (ma, mb):
+        rows, tip = [], []
+        for t in times:
+            local = placed.machine.link_poses(m.at(t))
+            rows.append([_compact(base @ local[n], 5) for n in names])
+            tip.append((base @ local[placed.machine.tool_link])[:3, 3])
+        poses.append(rows)
+        tips.append(np.array(tip))
+    stride = max(1, -(-len(json.dumps(poses, separators=(",", ":"))) // POSES_BUDGET))
+    keep = range(0, len(times), stride)
+    poses = [[rows[k] for k in keep] for rows in poses]
+
+    records = []
+    for m, tip, label in zip((ma, mb), tips, (ma.label or "A", mb.label or "B")):
+        path = scene.tool_path(m)
+        path = path[::max(1, -(-len(path) // MAX_TRAIL_POINTS))]
+        records.append({"label": label, "devices": [{
+            "id": m.machine, "centers": _pixels(cam, tip[list(keep)]), "tool_trail": _pixels(cam, path)}]})
+    floor = None
+    if site.floor is not None:
+        box = _pixels(cam, site.floor.corners_m)
+        floor = box if all(box) else None
+    out = {
+        "imagePath": str(still), "width": img["width"], "height": img["height"],
+        "parts": -(-len(img["b64"]) // CHUNK),
+        "stepS": float(result.step_s) * stride, "stride": stride, "frames": len(keep),
+        "records": records, "figures": result.to_dict(), "site": _header(site),
+        "camera": {"intr": {"width": cam.width, "height": cam.height, "fx": float(cam.K[0, 0]),
+                            "fy": float(cam.K[1, 1]), "cx": float(cam.K[0, 2]), "cy": float(cam.K[1, 2])},
+                   "extr": {"R": [float(x) for x in cam.R.reshape(-1)], "t": [float(x) for x in cam.t]}},
+        "floor": floor, "model": model, "poses": poses,
+    }
+    return json.dumps(out, separators=(",", ":"))
+
+
+@apps.tool(resource_uri=COMPARE_URI, visibility=["app"], description=(
+    "One part of a machine's thinned shapes, as base64 text (screen only). key comes from ps_compare's model."))
+def ps_model_part(key: str, part: int) -> str:
+    return _json({"part": part, "data": model_part(key, part, CHUNK)})
+
+
+def _widget(name: str, three: bool = False) -> str:
     bundle = (_HERE / "widgets/vendor/ext-apps-app-with-deps.js").read_text()
-    return (_HERE / "widgets/fit-floor.html").read_text().replace(BUNDLE_MARKER, bundle)
+    html = (_HERE / "widgets" / name).read_text().replace(BUNDLE_MARKER, bundle)
+    if three:
+        html = html.replace(THREE_MARKER, (_HERE / "widgets/vendor/three.iife.js").read_text())
+    return html
 
 
-apps.add_html_resource(URI, _widget())
+apps.add_html_resource(URI, _widget("fit-floor.html"))
+apps.add_html_resource(COMPARE_URI, _widget("compare.html", three=True))
 server = MCPServer("physical-sandbox", extensions=[apps])
 server.tool(description="Whether the site in siteDir is decided (confirmed by the person), with its residual in "
                         "pixels, its object names and whether its lengths are measured or estimated.")(ps_site_status)

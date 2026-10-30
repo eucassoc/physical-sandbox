@@ -1,0 +1,472 @@
+"""The in-chat screen to compare two motions: ps_compare, its model parts, and the packing of the shapes.
+
+A synthetic site, scene and records (a tiny URDF of boxes) and a still stand in for real data; the SO-101
+test runs only when its URDF is on this machine.
+"""
+import asyncio
+import base64
+import json
+import os
+import sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import cv2
+import mujoco
+import numpy as np
+import pytest
+
+pytest.importorskip("mcp")
+
+from mcp import Client  # noqa: E402
+from mcp.client.stdio import StdioServerParameters  # noqa: E402
+
+from physical_sandbox.camera import Camera  # noqa: E402
+from physical_sandbox.machine import load_machine  # noqa: E402
+from physical_sandbox.mcp import pack, server  # noqa: E402
+from physical_sandbox.motion import motion_from_numpy, save_record  # noqa: E402
+from physical_sandbox.scene import PlacedMachine, Scene, save_scene  # noqa: E402
+from physical_sandbox.site import Floor, Site, save_site  # noqa: E402
+
+URDF = """<?xml version="1.0"?>
+<robot name="blocks">
+  <link name="base">
+    <inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual><origin xyz="0 0 0.15"/><geometry><box size="0.3 0.3 0.3"/></geometry></visual>
+  </link>
+  <link name="arm">
+    <inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual><origin xyz="0.2 0 0"/><geometry><box size="0.4 0.1 0.1"/></geometry></visual>
+    <visual><origin xyz="0.4 0 0"/><geometry><sphere radius="0.06"/></geometry></visual>
+  </link>
+  <joint name="turn" type="revolute">
+    <parent link="base"/><child link="arm"/><origin xyz="0 0 0.4"/><axis xyz="0 0 1"/>
+    <limit lower="-3" upper="3" effort="1" velocity="1"/>
+  </joint>
+  <link name="tip">
+    <inertial><mass value="0.1"/><inertia ixx="0.01" iyy="0.01" izz="0.01" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+  <joint name="tip_fixed" type="fixed"><parent link="arm"/><child link="tip"/><origin xyz="0.4 0 0"/></joint>
+</robot>
+"""
+W, H = 320, 240
+SO101 = Path(os.environ.get("PS_SO101_URDF", "~/work/physical-sandbox-proto/robots/so101/so101.urdf")).expanduser()
+
+
+def look_at(eye, target=(0, 0, 0.2), size=(W, H), f=300.0, dist=None):
+    eye, target = np.array(eye, float), np.array(target, float)
+    fwd = (target - eye) / np.linalg.norm(target - eye)
+    right = np.cross(fwd, [0, 0, 1])
+    right /= np.linalg.norm(right)
+    down = np.cross(fwd, right)
+    R = np.array([right, down, fwd])
+    K = [[f, 0, size[0] / 2], [0, f, size[1] / 2], [0, 0, 1]]
+    return Camera(size[0], size[1], K, np.zeros(5) if dist is None else dist, R, -R @ eye)
+
+
+def motion(end, label, fps=10.0, n=11):
+    q = np.linspace(0, end, n).reshape(-1, 1)
+    return motion_from_numpy(q, fps=fps, joint_names=["turn"], machine="blocks", label=label)
+
+
+def make_world(tmp_path, cam=None, floor=True):
+    urdf = tmp_path / "blocks.urdf"
+    urdf.write_text(URDF)
+    corners_m = np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]], float)
+    site = Site(id="yard", cameras={"camera": cam or look_at((-2.5, 0.8, 1.2))}, residual_px={"camera": 0.7},
+                floor=Floor("camera", [(0, 0)] * 4, (2.0, 2.0), corners_m) if floor else None,
+                confirmed_by_person=True, dimensions="estimated")
+    save_site(site, tmp_path / "site.json")
+    placed = PlacedMachine(machine=load_machine(urdf), urdf=str(urdf), x=0.1, y=0.0, yaw=0.3)
+    save_scene(Scene(site=site, machines={"blocks": placed}), tmp_path / "scene.json")
+    save_record([motion(1.0, "slow")], "yard", tmp_path / "a.record.json")
+    save_record([motion(1.5, "wide")], "yard", tmp_path / "b.record.json")
+    still = tmp_path / "grey.png"
+    cv2.imwrite(str(still), np.full((H, W, 3), 128, np.uint8))
+    return site, placed, still
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    monkeypatch.setenv("PS_CACHE_DIR", str(tmp_path / "cache"))
+    site, placed, still = make_world(tmp_path)
+    return {"dir": tmp_path, "site": site, "placed": placed, "still": still, "cache": tmp_path / "cache"}
+
+
+def args(w, **over):
+    d = dict(siteDir=str(w["dir"]), scenePath=str(w["dir"] / "scene.json"), camera="camera",
+             a=str(w["dir"] / "a.record.json"), b=str(w["dir"] / "b.record.json"), video=str(w["still"]))
+    d.update(over)
+    return d
+
+
+def compare(w, **over):
+    return json.loads(server.ps_compare(**args(w, **over)))
+
+
+def text(result):
+    assert not result.is_error, result.content
+    return result.content[0].text
+
+
+@asynccontextmanager
+async def started(w):
+    params = StdioServerParameters(command=sys.executable, args=["-m", "physical_sandbox.mcp.server"],
+                                   env={"PS_CACHE_DIR": str(w["cache"])})
+    async with Client(params) as client:
+        yield client
+
+
+def run(coro):
+    return asyncio.run(asyncio.wait_for(coro, 120))
+
+
+# ---- what the host sees ----
+
+def test_the_compare_tool_opens_the_screen_and_the_model_part_tool_is_the_screens_own(world):
+    async def go():
+        async with started(world) as client:
+            return {t.name: t.model_dump(by_alias=True) for t in (await client.list_tools()).tools}
+    tools = run(go())
+    assert tools["ps_compare"]["_meta"]["ui"]["resourceUri"] == "ui://physical-sandbox/compare.html"
+    assert "model" in (tools["ps_compare"]["_meta"]["ui"].get("visibility") or ["model"])
+    assert tools["ps_model_part"]["_meta"]["ui"]["resourceUri"] == "ui://physical-sandbox/compare.html"
+    assert tools["ps_model_part"]["_meta"]["ui"]["visibility"] == ["app"]
+    for name in ("ps_compare", "ps_model_part"):
+        schema = json.dumps(tools[name]["inputSchema"])
+        assert "$ref" not in schema and "prefixItems" not in schema, name
+    required = set(tools["ps_compare"]["inputSchema"]["required"])
+    assert required == {"siteDir", "scenePath", "camera", "a", "b"}
+
+
+def test_the_compare_screen_is_served_with_the_bridge_and_three_inlined(world):
+    async def go():
+        async with started(world) as client:
+            return await client.read_resource("ui://physical-sandbox/compare.html")
+    content = run(go()).contents[0]
+    assert content.mime_type == "text/html;profile=mcp-app"
+    assert "globalThis.ExtApps=" in content.text
+    assert "WebGLRenderer" in content.text and "globalThis.THREE" in content.text
+    assert server.BUNDLE_MARKER not in content.text and server.THREE_MARKER not in content.text
+    assert "ps_model_part" in content.text and "ps_spike_image" in content.text
+
+
+def test_three_ships_as_package_data():
+    assert (Path(server.__file__).parent / "widgets" / "vendor" / "three.iife.js").is_file()
+    assert (Path(server.__file__).parent / "widgets" / "compare.html").is_file()
+
+
+# ---- what ps_compare answers ----
+
+def test_the_answer_has_one_pose_set_per_frame_and_record(world):
+    out = compare(world)
+    n = len(out["figures"]["series"]["t"])
+    assert out["frames"] == n and out["stride"] == 1
+    assert out["stepS"] == pytest.approx(out["figures"]["step_s"])
+    assert len(out["poses"]) == 2
+    links = out["model"]["links"]
+    assert [l["name"] for l in links] == ["base", "arm"]  # the tip has no shape: not sent
+    for r in range(2):
+        assert len(out["poses"][r]) == out["frames"]
+        for frame in out["poses"][r]:
+            assert len(frame) == len(links) and all(len(p) == 16 for p in frame)
+    assert [r["label"] for r in out["records"]] == ["slow", "wide"]
+    for rec in out["records"]:
+        assert [d["id"] for d in rec["devices"]] == ["blocks"]
+        dev = rec["devices"][0]
+        assert len(dev["centers"]) == out["frames"] and len(dev["tool_trail"]) >= 2
+
+
+def test_a_pose_is_the_link_in_the_site_frame(world):
+    out = compare(world)
+    placed, a = world["placed"], world["site"]
+    motions = {m.label: m for m in (motion(1.0, "slow"), motion(1.5, "wide"))}
+    T = placed.base_transform()
+    for r, label in enumerate(("slow", "wide")):
+        for k in (0, 7, out["frames"] - 1):
+            t = out["figures"]["series"]["t"][k]
+            want = T @ placed.machine.link_poses(motions[label].at(t))["arm"]
+            got = np.array(out["poses"][r][k][1]).reshape(4, 4)
+            assert np.allclose(got, want, atol=2e-5)
+    # a machine placed at (0.1, 0) turned 0.3 rad: the base link sits there
+    base = np.array(out["poses"][0][0][0]).reshape(4, 4)
+    assert np.allclose(base[:3, 3], [0.1, 0.0, 0.0], atol=1e-5)
+    assert np.allclose(base[:2, :2], [[np.cos(0.3), -np.sin(0.3)], [np.sin(0.3), np.cos(0.3)]], atol=1e-5)
+
+
+def test_the_tool_tip_is_projected_through_the_pinhole_camera(world):
+    out = compare(world)
+    cam = world["site"].cameras["camera"]
+    k = out["frames"] - 1
+    t = out["figures"]["series"]["t"][k]
+    placed = world["placed"]
+    tip = (placed.base_transform() @ placed.machine.link_poses(motion(1.5, "wide").at(t))["tip"])[:3, 3]
+    u, v = cam.project(tip[None])[0]
+    assert out["records"][1]["devices"][0]["centers"][k] == pytest.approx([u, v], abs=0.01)
+    cam_json = out["camera"]
+    assert cam_json["intr"] == {"width": W, "height": H, "fx": 300.0, "fy": 300.0, "cx": 160.0, "cy": 120.0}
+    assert np.allclose(cam_json["extr"]["R"], cam.R.reshape(-1)) and np.allclose(cam_json["extr"]["t"], cam.t)
+
+
+def test_the_floor_is_a_box_in_pixels_and_absent_without_a_floor(world, tmp_path, monkeypatch):
+    out = compare(world)
+    assert len(out["floor"]) == 4 and all(len(p) == 2 for p in out["floor"])
+    other = tmp_path / "nofloor"
+    other.mkdir()
+    make_world(other, floor=False)
+    w2 = {"dir": other, "still": other / "grey.png"}
+    assert compare(w2)["floor"] is None
+
+
+def test_figures_are_the_comparisons_numbers_and_the_site_quality_comes_with_them(world):
+    out = compare(world)
+    f = out["figures"]
+    assert f["labels"] == {"a": "slow", "b": "wide"}
+    assert f["tool_deviation_m"]["max"] > 0 and set(f["joints"]) == {"turn"}
+    assert set(f["unknown"]) >= {"clearance", "reach", "world"} and all(f["unknown_reasons"][k] for k in f["unknown"])
+    assert out["site"] == {"site": "yard", "residualPx": {"camera": 0.7}, "dimensions": "estimated",
+                           "dimensionsNote": "寸法は推定（未確認）", "confirmedByPerson": True}
+
+
+def test_labels_can_be_given(world):
+    out = compare(world, labelA="手本", labelB="試し")
+    assert [r["label"] for r in out["records"]] == ["手本", "試し"]
+    assert out["figures"]["labels"] == {"a": "手本", "b": "試し"}
+
+
+def test_the_still_is_a_display_copy_the_screen_can_fetch(world):
+    out = compare(world)
+    assert (out["width"], out["height"]) == (W, H) and Path(out["imagePath"]).is_file()
+    assert Path(world["cache"]).resolve() in Path(out["imagePath"]).resolve().parents
+    data = "".join(json.loads(server.ps_spike_image(out["imagePath"], i))["data"] for i in range(out["parts"]))
+    img = cv2.imdecode(np.frombuffer(base64.b64decode(data), np.uint8), cv2.IMREAD_COLOR)
+    assert img.shape[:2] == (H, W) and abs(int(img[5, 5, 0]) - 128) < 6
+
+
+def test_without_a_picture_it_asks_for_one(world):
+    with pytest.raises(ValueError, match="video"):
+        compare(world, video=None)
+
+
+def test_the_scene_may_name_its_picture(world):
+    p = world["dir"] / "scene.json"
+    d = json.loads(p.read_text())
+    d["picture"] = "grey.png"
+    p.write_text(json.dumps(d))
+    out = compare(world, video=None)
+    assert (out["width"], out["height"]) == (W, H)
+
+
+def test_bad_input_is_named(world):
+    with pytest.raises(ValueError, match="camera 'ghost'"):
+        compare(world, camera="ghost")
+    with pytest.raises(ValueError, match="gone.record.json"):
+        compare(world, a=str(world["dir"] / "gone.record.json"))
+    with pytest.raises(ValueError, match="site"):
+        compare(world, siteDir=str(world["dir"] / "nowhere"))
+
+
+def test_a_lens_with_distortion_gives_an_undistorted_picture_and_a_pinhole_camera(tmp_path, monkeypatch):
+    monkeypatch.setenv("PS_CACHE_DIR", str(tmp_path / "cache"))
+    dist = np.array([-0.3, 0.1, 0, 0, 0])
+    make_world(tmp_path, cam=look_at((-2.5, 0.8, 1.2), dist=dist))
+    img = np.zeros((H, W, 3), np.uint8)
+    img[::8] = 255
+    cv2.imwrite(str(tmp_path / "grid.png"), img)
+    w = {"dir": tmp_path, "still": tmp_path / "grid.png"}
+    out = compare(w)
+    saved = cv2.imread(out["imagePath"])
+    assert saved.shape == img.shape and np.abs(saved.astype(int) - img.astype(int)).mean() > 3  # it was warped
+    assert "dist" not in json.dumps(out["camera"])
+    want = look_at((-2.5, 0.8, 1.2))  # the same pose without the lens
+    tip_site = world_tip(tmp_path, out)
+    assert out["records"][0]["devices"][0]["centers"][-1] == pytest.approx(
+        want.project(tip_site[None])[0].tolist(), abs=0.01)
+
+
+def world_tip(tmp_path, out):
+    placed = PlacedMachine(machine=load_machine(tmp_path / "blocks.urdf"), urdf=str(tmp_path / "blocks.urdf"),
+                           x=0.1, y=0.0, yaw=0.3)
+    t = out["figures"]["series"]["t"][-1]
+    return (placed.base_transform() @ placed.machine.link_poses(motion(1.0, "slow").at(t))["tip"])[:3, 3]
+
+
+def test_a_picture_of_another_shape_is_refused(world, tmp_path):
+    odd = tmp_path / "odd.png"
+    cv2.imwrite(str(odd), np.zeros((100, 300, 3), np.uint8))
+    with pytest.raises(ValueError, match="aspect"):
+        compare(world, video=str(odd))
+
+
+# ---- LeRobot A without a video: the episode's own recording at its start ----
+
+def test_a_lerobot_episode_gives_its_own_recording_frame_at_the_episodes_start(world, monkeypatch):
+    tmp_path = world["dir"]
+    data = tmp_path / "ds"
+    (data / "meta").mkdir(parents=True)
+    (data / "meta" / "info.json").write_text("{}")
+    import physical_sandbox.lerobot as lerobot
+    import physical_sandbox.motion as motion_mod
+    monkeypatch.setattr(motion_mod, "motion_from_lerobot",
+                        lambda d, ep, *, machine, machine_name, **k: motion(1.0, f"episode {ep}"))
+    video = tmp_path / "ds.mp4"
+    w = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (W, H))
+    for k in range(60):
+        w.write(np.full((H, W, 3), 4 * k, np.uint8))  # frame k is grey 4k
+    w.release()
+    monkeypatch.setattr(lerobot, "lerobot_video", lambda d, ep, cam: (video, 1.0, 1.5))
+    out = compare(world, a=f"lerobot:{data}#4", video=None)
+    assert out["records"][0]["label"] == "episode 4"
+    saved = cv2.imread(out["imagePath"])
+    assert abs(int(saved[2, 2, 0]) - 120) < 16  # file time 1.0 s = frame 30 = grey 120; frame 0 would be grey 0
+
+
+# ---- two separate starts of the server ----
+
+def test_a_separate_start_answers_model_and_picture_parts_from_the_disk(world):
+    async def first():
+        async with started(world) as client:
+            return json.loads(text(await client.call_tool("ps_compare", args(world))))
+
+    async def second(out):
+        async with started(world) as client:  # a new process: nothing in its memory
+            model = ""
+            for i in range(out["model"]["binParts"]):
+                part = json.loads(text(await client.call_tool("ps_model_part", {"key": out["model"]["key"], "part": i})))
+                assert part["part"] == i
+                model += part["data"]
+            past = json.loads(text(await client.call_tool(
+                "ps_model_part", {"key": out["model"]["key"], "part": out["model"]["binParts"]})))
+            image = ""
+            for i in range(out["parts"]):
+                image += json.loads(text(await client.call_tool(
+                    "ps_spike_image", {"imagePath": out["imagePath"], "part": i})))["data"]
+            return model, past, image
+
+    out = run(first())
+    model, past, image = run(second(out))
+    assert past["data"] == ""
+    blob = base64.b64decode(model)
+    links = out["model"]["links"]
+    end = links[-1]["offset"] + 12 * links[-1]["vCount"] + 4 * links[-1]["iCount"]
+    assert len(blob) == end
+    for l in links:
+        pos = np.frombuffer(blob, "<f4", l["vCount"] * 3, l["offset"]).reshape(-1, 3)
+        idx = np.frombuffer(blob, "<u4", l["iCount"], l["offset"] + 12 * l["vCount"])
+        assert idx.max() < l["vCount"] and np.isfinite(pos).all()
+    assert cv2.imdecode(np.frombuffer(base64.b64decode(image), np.uint8), cv2.IMREAD_COLOR) is not None
+
+
+def test_model_part_refuses_a_key_that_is_not_a_pack(world):
+    for key in ("../../etc/passwd", "x" * 40, "0" * 40, ""):
+        with pytest.raises(ValueError):
+            server.ps_model_part(key, 0)
+    compare(world)
+    with pytest.raises(ValueError, match="part"):
+        server.ps_model_part(compare(world)["model"]["key"], -1)
+
+
+# ---- the size of the answer ----
+
+def test_a_twenty_second_motion_stays_under_two_megabytes(world):
+    d = world["dir"]
+    long = motion_from_numpy(np.linspace(0, 2.0, 601).reshape(-1, 1), fps=30.0, joint_names=["turn"],
+                             machine="blocks", label="long")
+    save_record([long], "yard", d / "long.record.json")
+    raw = server.ps_compare(**args(world, a=str(d / "long.record.json"), b=str(d / "long.record.json")))
+    assert len(raw) < 2_000_000
+    out = json.loads(raw)
+    assert out["frames"] == len(out["poses"][0]) == len(out["poses"][1])
+    assert out["frames"] == len(range(0, len(out["figures"]["series"]["t"]), out["stride"]))
+    assert out["stepS"] == pytest.approx(out["figures"]["step_s"] * out["stride"])
+
+
+def test_a_big_answer_is_sampled_every_nth_frame(world, monkeypatch):
+    monkeypatch.setattr(server, "POSES_BUDGET", 20_000)
+    d = world["dir"]
+    long = motion_from_numpy(np.linspace(0, 2.0, 601).reshape(-1, 1), fps=30.0, joint_names=["turn"],
+                             machine="blocks", label="long")
+    save_record([long], "yard", d / "long.record.json")
+    out = json.loads(server.ps_compare(**args(world, a=str(d / "long.record.json"), b=str(d / "long.record.json"))))
+    assert out["stride"] > 1
+    assert out["frames"] == len(out["poses"][0]) == len(out["records"][0]["devices"][0]["centers"])
+    assert len(json.dumps(out["poses"])) < 40_000
+
+
+# ---- the packing of shapes ----
+
+def volume(v, f):
+    """The enclosed volume by the divergence theorem: positive when the faces point outward."""
+    a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
+    return float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6)
+
+
+@pytest.mark.parametrize("name,t,size,want", [
+    ("box", mujoco.mjtGeom.mjGEOM_BOX, [0.1, 0.2, 0.3], 8 * 0.1 * 0.2 * 0.3),
+    ("sphere", mujoco.mjtGeom.mjGEOM_SPHERE, [0.5, 0, 0], 4 / 3 * np.pi * 0.5 ** 3),
+    ("cylinder", mujoco.mjtGeom.mjGEOM_CYLINDER, [0.3, 0.5, 0], np.pi * 0.09 * 1.0),
+    ("capsule", mujoco.mjtGeom.mjGEOM_CAPSULE, [0.2, 0.4, 0], np.pi * 0.04 * 0.8 + 4 / 3 * np.pi * 0.2 ** 3),
+    ("ellipsoid", mujoco.mjtGeom.mjGEOM_ELLIPSOID, [0.1, 0.2, 0.3], 4 / 3 * np.pi * 0.1 * 0.2 * 0.3),
+])
+def test_primitives_are_closed_shapes_facing_outward(name, t, size, want):
+    v, f = pack._primitive(int(t), np.array(size, float))
+    assert f.min() == 0 and f.max() == len(v) - 1
+    assert 0.8 * want < volume(v, f) < 1.05 * want  # a tessellation is slightly inside the true shape
+
+
+def write_sphere_obj(path, rings=60, segs=60):
+    """A UV sphere whose every triangle has its own three vertices (as a mesh split at texture seams has)."""
+    pts = lambda i, j: (np.sin(np.pi * i / rings) * np.cos(2 * np.pi * j / segs),  # noqa: E731
+                        np.sin(np.pi * i / rings) * np.sin(2 * np.pi * j / segs), np.cos(np.pi * i / rings))
+    lines, n = ["mtllib x.mtl", "usemtl m"], 0
+    for i in range(rings):
+        for j in range(segs):
+            quad = [pts(i, j), pts(i + 1, j), pts(i + 1, j + 1), pts(i, j + 1)]
+            for tri in ((0, 1, 2), (0, 2, 3)):
+                for k in tri:
+                    lines.append("v %.6f %.6f %.6f" % tuple(0.1 * c for c in quad[k]))
+                lines.append(f"f {n + 1} {n + 2} {n + 3}")
+                n += 3
+    path.write_text("\n".join(lines) + "\n")
+    return 2 * rings * segs
+
+
+def test_a_dense_mesh_is_welded_and_thinned_and_the_pack_is_kept_on_disk(tmp_path, monkeypatch):
+    monkeypatch.setenv("PS_CACHE_DIR", str(tmp_path / "cache"))
+    faces = write_sphere_obj(tmp_path / "ball.obj")
+    urdf = tmp_path / "ball.urdf"
+    urdf.write_text('<robot name="ball"><link name="base"><inertial><mass value="1"/>'
+                    '<inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>'
+                    '<visual><geometry><mesh filename="ball.obj"/></geometry></visual></link></robot>')
+    machine = load_machine(urdf)
+    made = pack.pack_model(machine, 20_000)
+    (link,) = made["links"]
+    assert link["name"] == "base"
+    assert link["iCount"] // 3 <= faces / 4 and link["iCount"] // 3 >= 300  # about a ninth, never under 300
+    assert link["vCount"] < faces  # welded: nowhere near three vertices a face
+    blob = base64.b64decode("".join(pack.model_part(made["key"], i, 20_000) for i in range(made["binParts"])))
+    pos = np.frombuffer(blob, "<f4", link["vCount"] * 3).reshape(-1, 3)
+    r = np.linalg.norm(pos, axis=1)
+    assert 0.09 < r.min() and r.max() < 0.11  # still a ball of radius 0.1
+    files = sorted((tmp_path / "cache" / "models").iterdir())
+    stamps = [f.stat().st_mtime_ns for f in files]
+    again = pack.pack_model(load_machine(urdf), 20_000)
+    assert again == made and [f.stat().st_mtime_ns for f in files] == stamps  # found, not made again
+    # a different mesh is a different key
+    write_sphere_obj(tmp_path / "ball.obj", rings=40, segs=40)
+    assert pack.pack_model(load_machine(urdf), 20_000)["key"] != made["key"]
+
+
+@pytest.mark.skipif(not SO101.exists(), reason="the SO-101 URDF is not on this machine (set PS_SO101_URDF)")
+def test_so101_packs_into_a_screen_sized_model_and_a_twenty_second_answer_fits(tmp_path, monkeypatch):
+    monkeypatch.setenv("PS_CACHE_DIR", str(tmp_path / "cache"))
+    machine = load_machine(SO101)
+    made = pack.pack_model(machine, 20_000)
+    names = [l["name"] for l in made["links"]]
+    assert len(names) >= 6
+    total_faces = sum(l["iCount"] for l in made["links"]) // 3
+    src = machine.model
+    visual = [g for g in range(src.ngeom) if src.geom_group[g] == 1 and src.geom_type[g] == int(mujoco.mjtGeom.mjGEOM_MESH)]
+    original = sum(int(src.mesh_facenum[src.geom_dataid[g]]) for g in visual)
+    assert total_faces < original / 3
+    assert made["binParts"] < 120

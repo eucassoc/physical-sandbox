@@ -2,3 +2,6 @@ physical-sandbox
 Copyright 2026 Atsushi Kojo
 
 This product is licensed under the Apache License, Version 2.0.
+
+This product bundles three.js (MIT License, Copyright 2010-2026 three.js authors) as
+src/physical_sandbox/mcp/widgets/vendor/three.iife.js, to draw the in-chat comparison screen.

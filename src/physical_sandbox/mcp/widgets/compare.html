@@ -183,6 +183,7 @@ async function buildMachines(mine) {
     site.add(group);
     return { group, meshes };
   });
+  // near 0.05 m: the same near clip as the replay video (render.NEAR_M), so both cut a close machine alike
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 600);
   placeCamera(camera, data.camera);
   three = { renderer, scene, camera, records, geometries, materials: [depthOnly, ...materials] };

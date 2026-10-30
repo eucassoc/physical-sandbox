@@ -30,7 +30,7 @@ URDF = """<?xml version="1.0"?>
 """
 W, H = 320, 240
 GREY = 128
-CODEC = 8  # mp4v shifts a flat grey to about (124, 127, 124)
+CODEC = 8  # the video codec shifts a flat grey by a few levels (mp4v: to about (124, 127, 124))
 
 
 def look_at(eye, target=(0, 0, 0.2), size=(W, H), f=300.0, dist=None, pp=None):
@@ -392,3 +392,52 @@ def test_duration_cuts_the_video_short_of_the_longest_motion(world):
     assert n(duration=5.0) == 10  # never longer than the motion
     with pytest.raises(ValueError, match="duration"):
         n(duration=0)
+
+
+@pytest.mark.parametrize("h264", [True, False])
+def test_the_video_is_written_with_h264_or_else_mpeg4(world, monkeypatch, h264):
+    import physical_sandbox.render as render
+    make, still, tmp = world
+    scene, _ = make()
+    tried = []
+    real = cv2.VideoWriter
+
+    def writer(path, fourcc, fps, size):
+        name = "".join(chr((fourcc >> (8 * i)) & 0xFF) for i in range(4))
+        tried.append(name)
+        if name == "avc1" and not h264:  # as an OpenCV build without an H.264 encoder answers
+            return real(path, 0, -1, (0, 0))
+        return real(path, fourcc, fps, size)
+    monkeypatch.setattr(render.cv2, "VideoWriter", writer)
+    out = render_overlay(scene, "camera", open_source(still), [motion(0.5)], tmp / "c.mp4", fps=10.0)
+    assert tried == (["avc1"] if h264 else ["avc1", "mp4v"])
+    assert out.stat().st_size > 0 and len(read(out)) == 10  # 1.0 s at 10 fps
+
+
+def test_the_near_clip_is_the_compare_screens(world):
+    """The replay video and the in-chat screen cut a machine close to the camera at the same depth."""
+    import re
+    from pathlib import Path
+
+    import physical_sandbox.render as render
+    make, _, _ = world
+    scene, cam = make()
+    shells = render._Shells(scene, [motion(1.0)], cam)
+    try:
+        near = shells.model.vis.map.znear * shells.model.stat.extent
+    finally:
+        shells.close()
+    assert near == pytest.approx(render.NEAR_M) and render.NEAR_M == 0.05
+    html = (Path(render.__file__).parent / "mcp" / "widgets" / "compare.html").read_text()
+    screen_near = float(re.search(r"new THREE\.PerspectiveCamera\(\s*[\d.]+,\s*[\d.]+,\s*([\d.]+),", html).group(1))
+    assert screen_near == render.NEAR_M
+
+
+def test_a_machine_between_the_old_and_the_new_near_clip_is_drawn(world, tmp_path):
+    """The camera 7 cm from the box's face: the old near clip (0.1 m) cut the face away, 0.05 m keeps it."""
+    make, still, tmp = world
+    cam = look_at((-0.22, 0.0, 0.15), target=(0.0, 0.0, 0.15), f=150.0)  # the base box's face is at x = -0.15
+    scene, _ = make(cam=cam)
+    frame = read(render_overlay(scene, "camera", open_source(still), [motion(0.1, n=2)], tmp / "n.mp4",
+                                fps=10.0, show={"trail": False, "link": False}))[0]
+    assert bluish(frame[H // 2, W // 2])

@@ -14,6 +14,7 @@ from typing import Literal
 
 import numpy as np
 
+from ._atomic import write_text_atomic
 from .camera import Camera
 from .floor import fit_planar, focal_from_homography
 
@@ -136,7 +137,7 @@ def save_site(site: Site, path) -> None:
         "dimensions": site.dimensions,
         "history": site.history,
     }
-    Path(path).write_text(json.dumps(d, indent=2))
+    write_text_atomic(path, json.dumps(d, indent=2))  # a failed write leaves the old site file whole
 
 
 def load_site(path) -> Site:

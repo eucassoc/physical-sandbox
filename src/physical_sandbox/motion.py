@@ -14,6 +14,8 @@ from pathlib import Path
 
 import numpy as np
 
+from ._atomic import write_text_atomic
+
 _PRODUCT = re.compile(r"^[a-z0-9][a-z0-9_-]*$")  # device.schema.json's pattern for ``product``
 
 
@@ -119,19 +121,26 @@ def save_record(motions, site_id: str, path) -> None:
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record, indent=1) + "\n")
+    write_text_atomic(path, json.dumps(record, indent=1) + "\n")  # a failed write leaves the old file whole
 
 
 def load_record(path) -> list:
-    """The motions in a recording: every device that names a product and has a trace of joints."""
+    """The motions in a recording: every device that names a product and has a trace of joints.
+
+    Other traces (positions only, a device not in the equipment or without a product) are skipped; a
+    recording where no device has joints raises ValueError naming what was skipped.
+    """
     rec = json.loads(Path(path).read_text())
     devices = {d["id"]: d for d in ((rec.get("equipment") or {}).get("devices") or [])}
-    motions = []
+    motions, skipped = [], []
     for tr in rec.get("traces") or []:
         did = tr.get("deviceId")
         samples = tr.get("samples") or []
-        if did not in devices or not samples or not all("joints" in s for s in samples):
-            raise ValueError(f"trace of device {did!r} has no joint angles (or no such device in the equipment)")
+        product = devices.get(did, {}).get("product")
+        if (did not in devices or not isinstance(product, str) or not product or not samples
+                or not all(isinstance(s, dict) and isinstance(s.get("joints"), dict) and s["joints"] for s in samples)):
+            skipped.append(did)
+            continue
         names = list(samples[0]["joints"])
         if any(list(s["joints"]) != names for s in samples):
             raise ValueError(f"trace of device {did!r} changes its joints from sample to sample")
@@ -141,4 +150,7 @@ def load_record(path) -> list:
             t=np.array([s["t"] for s in samples], float),
             q=np.array([[s["joints"][n] for n in names] for s in samples], float),
             source=dev.get("_source", ""), label=dev.get("displayName", "") if isinstance(dev.get("displayName", ""), str) else ""))
+    if not motions:
+        raise ValueError("no device in the recording has a trace of joint angles"
+                         + (f" (skipped: {', '.join(repr(d) for d in skipped)})" if skipped else ""))
     return motions

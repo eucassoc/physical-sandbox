@@ -194,12 +194,38 @@ def _corner(text: str) -> tuple[float, float]:
     return u, v
 
 
+def _corners(text: str) -> list[tuple[float, float]]:
+    """Four corners from ``u,v;u,v;u,v;u,v`` (``_glue_corners`` makes that from four separate words)."""
+    parts = [p for p in text.replace(";", " ").split() if p]
+    if len(parts) != 4:
+        raise InputError(f"--corners needs four corners u,v going round, got {len(parts)}: {text!r}")
+    return [_corner(p) for p in parts]
+
+
+def _glue_corners(argv: list[str]) -> list[str]:
+    """``--corners A B C D`` -> ``--corners=A;B;C;D``, so that a corner left of the picture (``-12,340``, a
+    negative u) is not taken for an option. Up to four words are taken, stopping at one that starts with --."""
+    out, i = [], 0
+    while i < len(argv):
+        word = argv[i]
+        if word == "--corners":
+            taken = []
+            while i + 1 < len(argv) and len(taken) < 4 and not argv[i + 1].startswith("--"):
+                i += 1
+                taken.append(argv[i])
+            out.append("--corners=" + ";".join(taken))
+        else:
+            out.append(word)
+        i += 1
+    return out
+
+
 def _cmd_site_fit(args) -> int:
     from .floor import solve_floor
     from .site import Floor, Site, save_site
     from .sources import open_source
 
-    corners = [_corner(c) for c in args.corners]
+    corners = _corners(args.corners)
     edges = (float(args.edges[0]), float(args.edges[1]))
     if not (math.isfinite(edges[0]) and math.isfinite(edges[1]) and edges[0] > 0 and edges[1] > 0):
         raise InputError(f"--edges must be finite, positive lengths in metres, got {edges[0]} {edges[1]}")
@@ -270,7 +296,9 @@ def _parser() -> argparse.ArgumentParser:
     f.add_argument("image")
     f.add_argument("--edges", nargs=2, type=float, required=True, metavar=("A", "B"),
                    help="lengths in metres of edge 1-2 and edge 2-3")
-    f.add_argument("--corners", nargs=4, required=True, metavar="u,v", help="the four corners, going round")
+    f.add_argument("--corners", required=True, metavar="u,v",
+                   help="the four corners in pixels, going round: four words u,v (a negative u is fine), or one "
+                        "u,v;u,v;u,v;u,v")
     f.add_argument("--out", required=True, help="the site file to write")
     f.add_argument("--camera", default="camera", help="the camera's name in the site (default: camera)")
     f.add_argument("--measured", action="store_true", help="the edge lengths were measured, not estimated")
@@ -292,7 +320,7 @@ def _one_line(e: BaseException) -> str:
 
 def main(argv=None) -> int:
     try:
-        args = _parser().parse_args(argv)
+        args = _parser().parse_args(_glue_corners(list(sys.argv[1:] if argv is None else argv)))
     except SystemExit as e:  # argparse: --help is 0, bad usage is 2
         return e.code if isinstance(e.code, int) else 2
     try:

@@ -131,3 +131,20 @@ def test_old_site_id_falls_back_to_the_file_stem(tmp_path):
     p = tmp_path / "my-site.json"
     p.write_text(json.dumps(d))
     assert load_old_site(p).id == "my-site"
+
+
+def test_a_failed_save_leaves_the_old_site_file_whole(tmp_path, monkeypatch):
+    path = tmp_path / "site.json"
+    save_site(make_site(), path)
+    before = path.read_text()
+    import physical_sandbox._atomic as atomic
+
+    def broken(src, dst):
+        raise OSError("disk full")
+    monkeypatch.setattr(atomic.os, "replace", broken)
+    other = make_site()
+    other.id = "changed"
+    with pytest.raises(OSError, match="disk full"):
+        save_site(other, path)
+    assert path.read_text() == before and load_site(path).id == "s-test"
+    assert [p.name for p in tmp_path.iterdir()] == ["site.json"]  # no temporary file left behind

@@ -152,3 +152,36 @@ def test_load_refuses_a_record_without_traces_of_joints(tmp_path):
                                 "traces": [{"deviceId": "x", "samples": [{"t": 0, "position": [0, 0, 0]}]}]}))
     with pytest.raises(ValueError, match="x"):
         load_record(path)
+
+
+def test_a_failed_save_leaves_the_old_recording_whole(tmp_path, monkeypatch):
+    path = tmp_path / "r.json"
+    save_record([_motion()], "site-1", path)
+    before = path.read_text()
+    import physical_sandbox._atomic as atomic
+
+    def broken(src, dst):
+        raise OSError("disk full")
+    monkeypatch.setattr(atomic.os, "replace", broken)
+    with pytest.raises(OSError, match="disk full"):
+        save_record([_motion(label="new")], "site-1", path)
+    assert path.read_text() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["r.json"]
+
+
+def _record(traces, devices):
+    return {"schemaVersion": 3, "frame": {"frameId": "site"}, "markers": [],
+            "equipment": {"site": {"id": "s"}, "devices": devices}, "names": {}, "traces": traces}
+
+
+def test_load_skips_devices_without_joints_and_keeps_the_others(tmp_path):
+    path = tmp_path / "r.json"
+    path.write_text(json.dumps(_record(
+        traces=[{"deviceId": "cart", "samples": [{"t": 0, "position": [0, 0, 0]}]},
+                {"deviceId": "arm", "samples": [{"t": 0, "joints": {"a": 0.1}}, {"t": 1, "joints": {"a": 0.2}}]},
+                {"deviceId": "ghost", "samples": [{"t": 0, "joints": {"a": 0.0}}]},
+                {"deviceId": "noproduct", "samples": [{"t": 0, "joints": {"a": 0.0}}]}],
+        devices=[{"id": "cart", "product": "cart"}, {"id": "arm", "product": "so101"}, {"id": "noproduct"}])))
+    motions = load_record(path)
+    assert [m.machine for m in motions] == ["so101"]
+    assert motions[0].q[:, 0].tolist() == [0.1, 0.2]

@@ -297,6 +297,51 @@ def test_site_fit_bad_corner_text(tmp_path, capsys):
     assert code == 2 and "x" in capsys.readouterr().err
 
 
+@pytest.fixture
+def old_argparse(monkeypatch):
+    """argparse before Python 3.12.7 / 3.13 took a word like -12,340 for an option: make every parser do so."""
+    import argparse
+    import re
+    import physical_sandbox.cli as cli
+    real = cli._parser
+
+    def parser():
+        p = real()
+        todo = [p]
+        while todo:
+            q = todo.pop()
+            q._negative_number_matcher = re.compile(r"^-\d+$|^-\d*\.\d+$")
+            for a in q._actions:
+                if isinstance(a, argparse._SubParsersAction):
+                    todo += list(a.choices.values())
+        return p
+    monkeypatch.setattr(cli, "_parser", parser)
+
+
+def test_site_fit_takes_a_corner_left_of_the_picture(tmp_path, capsys, old_argparse):
+    image, px = floor_image(tmp_path)
+    words = [f"{u:.3f},{v:.3f}" for u, v in px]
+    assert words[3].startswith("-")  # corner 4 is left of the picture: a negative u
+    out = tmp_path / "s.json"
+    assert main(["site", "fit", str(image), "--edges", "4", "3", "--corners", *words, "--out", str(out)]) == 0
+    assert load_site(out).floor.corners_px[3][0] < 0
+    # one word with semicolons works too, also with = in front
+    for form in (["--corners", ";".join(words)], ["--corners=" + ";".join(words)]):
+        out.unlink()
+        assert main(["site", "fit", str(image), "--edges", "4", "3", *form, "--out", str(out)]) == 0
+    # -12,340 is a corner, not an option: here the solve fails (all four in one place), it is not a usage error
+    code = main(["site", "fit", str(image), "--edges", "4", "3", "--corners", "-12,340", "-12,340", "-12,340",
+                 "-12,340", "--out", str(tmp_path / "flat.json")])
+    assert code == 2 and "no camera fits these corners" in capsys.readouterr().err
+
+
+def test_site_fit_wants_four_corners(tmp_path, capsys):
+    image, _ = floor_image(tmp_path)
+    code = main(["site", "fit", str(image), "--edges", "4", "3", "--corners", "1,2", "3,4", "5,6",
+                 "--out", str(tmp_path / "o.json")])
+    assert code == 2 and "four corners" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("edges", [["nan", "3"], ["inf", "3"], ["-1", "3"], ["0", "3"]])
 def test_site_fit_edges_must_be_finite_and_positive(tmp_path, capsys, edges):
     image, px = floor_image(tmp_path)

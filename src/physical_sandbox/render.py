@@ -31,6 +31,11 @@ from .scene import Scene
 from .sources import Source, camera_for
 
 COLORS = ("#2f7fe0", "#f08c1a")  # record A blue, record B orange
+# The near clipping distance in metres, the same as the in-chat compare screen's (``compare.html``): a machine
+# close to the camera is cut at the same depth in the replay video and on the screen, so the two agree.
+NEAR_M = 0.05
+_EXTENT = 50.0  # MuJoCo's clipping planes are fractions of the model's extent
+CODECS = ("avc1", "mp4v")  # H.264 plays in browsers and chat apps; MPEG-4 Part 2 when this OpenCV has no H.264
 SHOW = {"machine": True, "trail": True, "link": True}
 _SHELL_ALPHA = 0.5
 _VISUAL_GROUP = 1  # with discardvisual="false" MuJoCo's URDF loader puts visuals in group 1 and collisions in group 0
@@ -104,9 +109,9 @@ class _Shells:
                     self._body_names.append((mi, b))
         W, H = cam.width, cam.height
         # extent scales MuJoCo's clipping planes (znear/zfar are fractions of it): a big extent keeps a site
-        # tens of metres deep inside the view whatever the size of the machine
-        xml = (f'<mujoco><statistic extent="50"/>'
-               f'<visual><global offwidth="{W}" offheight="{H}"/><map znear="0.002" zfar="20"/>'
+        # tens of metres deep inside the view whatever the size of the machine; znear makes the near plane NEAR_M
+        xml = (f'<mujoco><statistic extent="{_EXTENT:g}"/>'
+               f'<visual><global offwidth="{W}" offheight="{H}"/><map znear="{NEAR_M / _EXTENT:.9g}" zfar="20"/>'
                f'<headlight ambient="0.6 0.6 0.6" diffuse="0.5 0.5 0.5" specular="0 0 0"/></visual>'
                f'<asset>{"".join(assets)}</asset><worldbody>{_camera_xml(cam)}{"".join(bodies)}</worldbody></mujoco>')
         self.model = mujoco.MjModel.from_xml_string(xml)
@@ -186,6 +191,16 @@ def _polyline(img, pts: np.ndarray, color, dashed: bool, thickness: int = 2):
         run += seg
 
 
+def _open_writer(path: Path, fps: float, size: tuple[int, int]):
+    """A video writer with the first codec of ``CODECS`` this OpenCV can open, or None."""
+    for codec in CODECS:
+        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*codec), fps, size)
+        if writer.isOpened():
+            return writer
+        writer.release()
+    return None
+
+
 def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list[Motion], out: Path, *,
                    colors=COLORS, show=None, fps: float | None = None, start_s: float = 0.0,
                    duration: float | None = None) -> Path:
@@ -228,9 +243,9 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
     shells = _Shells(scene, motions, cam) if show["machine"] else None
     writer = None
     try:
-        writer = cv2.VideoWriter(str(partial), cv2.VideoWriter_fourcc(*"mp4v"), fps, (cam.width, cam.height))
-        if not writer.isOpened():
-            raise RuntimeError(f"cannot write the video {str(out)!r}")
+        writer = _open_writer(partial, fps, (cam.width, cam.height))
+        if writer is None:
+            raise RuntimeError(f"cannot write the video {str(out)!r} (no codec of {', '.join(CODECS)} opened)")
         for k in range(n_frames):
             t = k / fps
             img = np.ascontiguousarray(source.at(start_s + t))

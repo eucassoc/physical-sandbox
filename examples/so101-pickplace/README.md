@@ -3,9 +3,9 @@
 This example runs `psbx` end to end on real data: the LeRobot dataset
 [`lerobot/svla_so101_pickplace`](https://huggingface.co/datasets/lerobot/svla_so101_pickplace), where an SO-101
 arm picks a red brick off a white table and drops it into a transparent tray. It fixes the site from the
-dataset's own `side` camera, places the arm on it, and compares episode 0 (blue) with episode 1 (orange):
-gap numbers, a graph, and a replay video with both machines drawn as see-through shells over episode 0's
-recording.
+dataset's own `side` camera, places the arm on it, and compares episode A (blue, episode 0 by default) with
+episode B (orange, episode 1 by default): gap numbers, a graph, and a replay video with both machines drawn as
+see-through shells over episode A's recording.
 
 Nothing from the dataset is in this folder (its licence was not checked): no frames, no pictures. Only the
 steps and scripts. Every file the script writes goes to `$OUT`.
@@ -14,9 +14,12 @@ steps and scripts. Every file the script writes goes to `$OUT`.
 
 - The dataset, downloaded by LeRobot or `huggingface-cli` (about 50 episodes, `side` and `up` cameras,
   640x480, 30 fps). Set `PS_LEROBOT_DATASET` to its snapshot folder (the one with `meta/info.json`).
-- An SO-101 URDF with its meshes. Set `PS_SO101_URDF`. The numbers below were chosen with the URDF in
-  `physical-sandbox-proto/robots/so101/so101.urdf` (the `so101_new_calib` model); another model may need
-  another base placement.
+- An SO-101 URDF with its meshes. Set `PS_SO101_URDF` to it. The recommended source is the public
+  `so101_new_calib.urdf` in TheRobotStudio's
+  [SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) repository (under `Simulation/SO101/`, with its
+  `assets/` meshes). The script's default is a local copy of that same model,
+  `~/work/physical-sandbox-proto/robots/so101/so101.urdf` (its meshes converted to OBJ), and the numbers below
+  were chosen with it; another model may need another base placement.
 - `physical-sandbox` installed (the core is enough: `pip install -e .`).
 
 ## Run it

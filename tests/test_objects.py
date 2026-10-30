@@ -1,4 +1,6 @@
 import os
+import sys
+import types
 from pathlib import Path
 
 import cv2
@@ -6,7 +8,7 @@ import numpy as np
 import pytest
 
 from physical_sandbox.objects import (
-    camera_moved, fetch_sam_weights, ground_px, looks_present, overlap, sam_segmenter,
+    WEIGHTS_NAME, camera_moved, ground_px, looks_present, overlap, sam_segmenter,
 )
 from physical_sandbox.site import ObjectView, mask_to_rle
 
@@ -57,7 +59,7 @@ def test_camera_moved_names_only_the_things_below_threshold():
     before = {"tray": rect(*s, 0, 0, 10, 10), "box": rect(*s, 20, 20, 30, 30), "shelf": rect(*s, 40, 40, 50, 50)}
     after = {"tray": rect(*s, 0, 0, 10, 10), "box": rect(*s, 20, 20, 30, 30), "shelf": rect(*s, 40, 40, 50, 50)}
     assert camera_moved(before, after) == []
-    # 0.5 overlap: 10x10 shifted so inter = 5*10... union = 150 -> 1/3; use 10x10 vs 10x5 -> inter 50 / union 100
+    # 10x10 against its upper 10x5 half: intersection 50, union 100
     after["box"] = rect(*s, 20, 20, 30, 25)
     assert overlap(before["box"], after["box"]) == 0.5
     assert camera_moved(before, after) == ["box"]
@@ -73,7 +75,7 @@ def test_camera_moved_skips_names_in_only_one_side():
 
 def _scene(seed=0):
     rng = np.random.default_rng(seed)
-    img = np.full((120, 160, 3), 90, np.uint8)
+    img = np.empty((120, 160, 3), np.uint8)
     img[:] = (90, 120, 100)
     img += rng.integers(0, 6, img.shape, dtype=np.uint8)
     # a coloured object: red body with blue stripe
@@ -110,14 +112,91 @@ def test_looks_present_is_clipped_to_unit_interval():
     assert 0.0 <= s <= 1.0
 
 
-def test_fake_segmenter_fits_the_protocol():
-    img = _scene()
+class _FakeData:
+    def __init__(self, masks):
+        self._m = np.stack(masks) if masks else np.zeros((0, 1, 1), bool)
 
-    def fake(image, boxes):
-        return {n: rect(image.shape[0], image.shape[1], *b) for n, b in boxes.items()}
+    def cpu(self):
+        return self
 
-    out = fake(img, {"a": (40, 30, 110, 90)})
-    assert out["a"].dtype == bool and out["a"].shape == img.shape[:2]
+    def numpy(self):
+        return self._m
+
+
+class _FakeResult:
+    def __init__(self, masks):
+        self.masks = types.SimpleNamespace(data=_FakeData(masks)) if masks else None
+
+
+def _install_fake_sam(monkeypatch, tmp_path, answer):
+    """Put a fake ``ultralytics`` in sys.modules; ``answer(boxes)`` returns the masks a call would give.
+    Returns (weights_path, list of the box lists SAM was asked about)."""
+    calls: list[list[list[float]]] = []
+
+    class FakeSAM:
+        def __init__(self, path):
+            self.path = path
+
+        def __call__(self, image, bboxes, verbose=False):
+            calls.append([list(b) for b in bboxes])
+            return [_FakeResult(answer(calls[-1]))]
+
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(SAM=FakeSAM))
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"")
+    return str(weights), calls
+
+
+def _mask_for(box):
+    return rect(40, 50, *[int(v) for v in box])
+
+
+BOXES = {"a": (0, 0, 10, 10), "b": (20, 5, 30, 15), "c": (35, 20, 45, 30)}
+IMG = np.zeros((40, 50, 3), np.uint8)
+
+
+def test_sam_segmenter_maps_masks_by_prompt_order_when_counts_match(monkeypatch, tmp_path):
+    weights, calls = _install_fake_sam(monkeypatch, tmp_path, lambda boxes: [_mask_for(b) for b in boxes])
+    out = sam_segmenter(weights)(IMG, BOXES)
+    assert list(out) == ["a", "b", "c"]
+    for n, b in BOXES.items():
+        assert np.array_equal(out[n], _mask_for(b)) and out[n].dtype == bool
+    assert len(calls) == 1 and calls[0] == [[float(v) for v in b] for b in BOXES.values()]
+
+
+def test_sam_segmenter_falls_back_to_one_box_at_a_time_when_masks_are_fewer(monkeypatch, tmp_path):
+    def answer(boxes):  # a joint call loses one mask; single calls are fine
+        return [_mask_for(b) for b in boxes][:2] if len(boxes) > 1 else [_mask_for(boxes[0])]
+
+    weights, calls = _install_fake_sam(monkeypatch, tmp_path, answer)
+    out = sam_segmenter(weights)(IMG, BOXES)
+    assert len(calls) == 1 + 3 and [len(c) for c in calls] == [3, 1, 1, 1]
+    assert list(out) == ["a", "b", "c"]
+    for n, b in BOXES.items():  # every name got its own box's mask, not a shifted one
+        assert np.array_equal(out[n], _mask_for(b))
+
+
+def test_sam_segmenter_omits_a_name_whose_box_yields_no_mask(monkeypatch, tmp_path):
+    def answer(boxes):
+        kept = [b for b in boxes if b[0] != 20]  # SAM finds nothing in box "b"
+        return [_mask_for(b) for b in kept]
+
+    weights, calls = _install_fake_sam(monkeypatch, tmp_path, answer)
+    out = sam_segmenter(weights)(IMG, BOXES)
+    assert list(out) == ["a", "c"]
+    assert np.array_equal(out["a"], _mask_for(BOXES["a"])) and np.array_equal(out["c"], _mask_for(BOXES["c"]))
+
+
+def test_sam_segmenter_with_no_boxes_asks_nothing(monkeypatch, tmp_path):
+    weights, calls = _install_fake_sam(monkeypatch, tmp_path, lambda boxes: [])
+    assert sam_segmenter(weights)(IMG, {}) == {}
+    assert calls == []
+
+
+def test_sam_segmenter_missing_weights_file_is_named(monkeypatch, tmp_path):
+    _install_fake_sam(monkeypatch, tmp_path, lambda boxes: [])
+    with pytest.raises(FileNotFoundError, match="nope.pt"):
+        sam_segmenter(str(tmp_path / "nope.pt"))
 
 
 def test_sam_segmenter_without_extra_says_how_to_install(monkeypatch):
@@ -157,22 +236,25 @@ def test_real_side_view_tray_and_box_stay_put_between_frame_0_and_6000():
     pytest.importorskip("ultralytics")
     if not SIDE.exists():
         pytest.skip(f"dataset video not found: {SIDE}")
+    cached = (Path(os.environ.get("PS_CACHE_DIR", "~/.cache/physical-sandbox")).expanduser() / WEIGHTS_NAME).exists()
+    if not cached and os.environ.get("PS_FETCH_SAM") != "1":
+        pytest.skip("SAM weights are not cached; set PS_FETCH_SAM=1 to download them (78 MB)")
     seg = sam_segmenter()
     boxes = {"tray": (40, 215, 295, 370), "box": (450, 0, 640, 160)}
     a, b = _frame(SIDE, 0), _frame(SIDE, 6000)
     ma, mb = seg(a, boxes), seg(b, boxes)
     assert set(ma) == set(boxes) == set(mb)
     ov = {n: overlap(ma[n], mb[n]) for n in boxes}
-    print("real-data overlap (frame 0 vs 6000):", ov)
-    assert ov["tray"] >= 0.9
-    assert ov["box"] >= 0.95
+    assert ov["tray"] >= 0.9, f"tray overlap {ov['tray']:.3f} (spike: 0.94)"
+    assert ov["box"] >= 0.95, f"box overlap {ov['box']:.3f} (spike: 1.00)"
     assert camera_moved(ma, mb) == []
+    # looks_present is checked on the box only: the tray is transparent, so its colours say nothing (see its docstring)
     # the box (cardboard) still looks like itself in the later frame (white balance differs a little), and
     # when its area is replaced by bare floor it no longer does
     view = ObjectView(boxes["box"], mask_to_rle(ma["box"]), ground_px(ma["box"]))
     still = looks_present(b, view, a)
     gone = b.copy()
     gone[0:160, 450:640] = cv2.resize(b[330:480, 300:490], (190, 160))
-    print("real-data looks_present: still", still, "gone", looks_present(gone, view, a))
-    assert still > 0.7
-    assert looks_present(gone, view, a) < 0.5
+    gone_score = looks_present(gone, view, a)
+    assert still > 0.7, f"box still present scored {still:.3f}"
+    assert gone_score < 0.5, f"box replaced by floor scored {gone_score:.3f}"

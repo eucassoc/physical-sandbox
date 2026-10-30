@@ -20,7 +20,9 @@ _NEED_SAM = "Choosing objects needs SAM: pip install 'physical-sandbox[sam]'"
 
 class Segmenter(Protocol):
     def __call__(self, image: np.ndarray, boxes: dict[str, tuple[int, int, int, int]]) -> dict[str, np.ndarray]:
-        """image: (H, W, 3) BGR; boxes: name -> (x0, y0, x1, y1). Returns name -> (H, W) bool mask."""
+        """image: (H, W, 3) BGR; boxes: name -> (x0, y0, x1, y1). Returns name -> (H, W) bool mask.
+
+        A name is missing from the result when no mask was found for its box."""
 
 
 def _cache_dir() -> Path:
@@ -123,7 +125,10 @@ def _hs_hist(image: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
 def looks_present(image: np.ndarray, view: ObjectView, reference_image: np.ndarray) -> float:
     """How much the thing still looks like it did, 0..1: the hue-saturation histogram inside the view's box,
     compared with the same box in the reference picture. SAM cuts out something even when the thing has left,
-    so this is the check that it is still there."""
+    so this is the check that it is still there.
+
+    Reliable only for coloured, opaque things. It misses transparent things (their colours are the background's)
+    and can score bare floor high for pale or grey ones, so treat it as a secondary signal to ``camera_moved``."""
     a = _hs_hist(image, view.box)
     b = _hs_hist(reference_image, view.box)
     score = float(cv2.compareHist(a, b, cv2.HISTCMP_CORREL))

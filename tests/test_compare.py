@@ -139,17 +139,56 @@ def test_a_gripper_that_opens_only_a_little_is_still_found_by_the_default_thresh
 def test_no_grasp_in_either_motion_is_said_with_the_threshold_not_shown_as_a_bare_zero(scene):
     n = 31
     slide = np.linspace(0.0, 0.3, n)
-    open_ = np.full(n, 0.5)
-    c = compare(scene, _motion(slide, open_), _motion(slide, open_))
+    opens = np.linspace(0.0, 1.0, n)  # opening only: a range to take the middle of, but no closing through it
+    c = compare(scene, _motion(slide, opens), _motion(slide, opens))
     assert c.grasp_counts == {"a": 0, "b": 0}
     assert "grasps" in c.unknown
     assert c.unknown_reasons["grasps"] == "つかむ瞬間が見つかりませんでした（しきい値 0.5）"
+    # a gripper that never moves has no middle to speak of: it hardly moved, and no threshold was used
+    still = np.full(n, 0.5)
+    c0 = compare(scene, _motion(slide, still), _motion(slide, still))
+    assert c0.grip_threshold is None and "ほとんど動いていません" in c0.unknown_reasons["grasps"]
     # an explicit threshold the closings never cross says so too, with that threshold
     closes = np.where(np.arange(n) < 15, 0.5, 0.2)
     c2 = compare(scene, _motion(slide, closes), _motion(slide, closes), grip_threshold=0.1)
     assert c2.grasp_counts == {"a": 0, "b": 0} and "しきい値 0.1）" in c2.unknown_reasons["grasps"]
     with pytest.raises(ValueError, match="grip_threshold"):
         compare(scene, _motion(slide, closes), _motion(slide, closes), grip_threshold=float("nan"))
+
+
+def test_a_gripper_that_hardly_moves_has_no_grasps_counted_and_says_so(scene):
+    """Sensor noise on a gripper that stays put: the middle of its range is crossed dozens of times, but none
+    is a grasp. Under 5 % of the joint's limit span (the rail's gripper is -1..1, so under 0.1) is 'hardly
+    moved', and grasps are unknown; the noise is never counted."""
+    n = 121
+    slide = np.linspace(0.0, 0.3, n)
+    noise = 0.1 + 0.004 * np.where(np.arange(n) % 2 == 0, 1.0, -1.0)  # 0.096 / 0.104, a 0.008 wide wobble
+    c = compare(scene, _motion(slide, noise), _motion(slide, noise))
+    assert c.grasp_counts == {"a": 0, "b": 0} and c.grasps == []
+    assert "grasps" in c.unknown and c.grip_threshold is None
+    assert "ほとんど動いていません" in c.unknown_reasons["grasps"] and "0.008" in c.unknown_reasons["grasps"]
+    assert c.to_dict()["grip_threshold"] is None
+    # a threshold the person chose is used as given, wobble and all
+    c2 = compare(scene, _motion(slide, noise), _motion(slide, noise), grip_threshold=0.1)
+    assert c2.grasp_counts["a"] > 10 and c2.grip_threshold == pytest.approx(0.1)
+
+
+def test_a_wobble_around_the_threshold_during_one_close_is_one_grasp(scene):
+    """A close that dithers about the middle counts once: a closing is a fall from well above the threshold
+    to well below it (a band a tenth of the gripper's range each side)."""
+    n = 91
+    t = np.arange(n) / FPS
+    slide = np.linspace(0.0, 0.3, n)
+    v = np.where(t < 1.0, 1.0, 0.0)
+    v[30:36] = [0.52, 0.48, 0.53, 0.47, 0.51, 0.49]  # six crossings of 0.5 on the way down
+    c = compare(scene, _motion(slide, v), _motion(slide, v))
+    assert c.grasp_counts == {"a": 1, "b": 1}
+    assert c.grasps[0]["a_s"] == pytest.approx(30 / FPS, abs=0.5 / FPS)  # the first fall through 0.5
+    # a wobble that never leaves the band is not a close at all
+    w = np.where(t < 1.0, 1.0, 0.45)
+    w[40:] = np.resize([0.45, 0.55], n - 40)
+    c2 = compare(scene, _motion(slide, w), _motion(slide, w))
+    assert c2.grasp_counts == {"a": 1, "b": 1}  # the 1.0 -> 0.45 fall is one grasp; the 0.45/0.55 wobble none
 
 
 def test_opening_is_not_a_grasp_and_extra_grasps_are_counted(scene):
@@ -190,8 +229,8 @@ def test_to_dict_is_plain_json_with_unknowns_and_labels(scene):
     assert json.loads(json.dumps(d)) == d
     assert d["labels"] == {"a": "demo", "b": "policy"}
     assert d["step_s"] == 1 / 20
-    assert d["unknown"] == ["clearance", "reach", "world", "grasps"]  # the gripper never closes here
-    assert d["grip_threshold"] == 0.0
+    assert d["unknown"] == ["clearance", "reach", "world", "grasps"]  # the gripper never moves here
+    assert d["grip_threshold"] is None
     assert d["unknown_reasons"]["clearance"] == "奥行きと対象物は段 3"
     for key in ("tool_deviation_m", "shape_deviation_m", "joints", "duration_s", "jerk", "grasps", "series"):
         assert key in d

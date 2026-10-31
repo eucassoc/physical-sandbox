@@ -100,8 +100,10 @@ writes, into `out/`:
 - `gaps.json` and `gaps.csv`: the site's quality first (its residual in pixels, whether its dimensions are
   measured or estimated, whether a person confirmed it), then the gaps: the tool tips' distance at the same
   time (maximum, when, mean), the difference in path shape (time ignored), each joint's gap, the durations, the
-  smoothness (jerk) and the grasps (where the gripper closes; the threshold used is in the files, and
-  `--grip-threshold` sets another). What the numbers cannot tell yet is listed with the reason.
+  smoothness (jerk) and the grasps (where the gripper closes through the middle of the range it went through;
+  the threshold used is in the files, and `--grip-threshold` sets another; a gripper that hardly moved, under
+  5 % of its joint's range, gets no grasps and a note instead, so its wobble is never counted). What the numbers
+  cannot tell yet is listed with the reason.
 - `gaps.png`: the tool gap over time.
 - `replay.mp4`: both machines over the picture as see-through shells, A blue and B orange, with the tool tips'
   paths.

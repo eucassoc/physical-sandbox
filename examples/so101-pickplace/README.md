@@ -72,10 +72,12 @@ so the orange shell covers the blue one; to see blue alone, draw episode 0 by it
 **Grasps.** `compare` counts a grasp where the gripper closes through the middle of the range it actually went
 through in the two motions: 0.086 rad here (`grip_threshold` in `gaps.json` and `gaps.csv`; `--grip-threshold`
 sets another). In this dataset the gripper only opens to about 20-25 of 100 before closing on the brick, so the
-middle of its URDF range (0.785 rad) would find none. It finds two closings in each episode: the grasp (episode
-0 at 5.60 s, episode 1 at 4.17 s, the tool tips 11 mm apart) and the gripper closing again after the drop (7.70 s
-and 6.58 s, 23 mm apart). With these two episodes the tool gap is at most 226 mm (at 5.77 s, while episode 1
-is already lifting), 89 mm on average, and the path shape differs by 27 mm.
+middle of its URDF range (0.785 rad) would find none. A closing counts when the gripper comes down from well
+above the threshold to well below it (a band a tenth of its range each side), so a wobble about the threshold is
+not several grasps. It finds one grasp in each episode: episode 0 at 5.60 s, episode 1 at 4.17 s, the tool tips
+11 mm apart. The gripper closes once more after the drop (7.70 s and 6.58 s), but it had only reopened a little
+to let go, not past the band, so that is not counted. With these two episodes the tool gap is at most 226 mm
+(at 5.77 s, while episode 1 is already lifting), 89 mm on average, and the path shape differs by 27 mm.
 
 ## What was corrected, and why
 

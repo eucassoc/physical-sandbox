@@ -32,7 +32,8 @@ class Comparison:
     series: dict  # {t, tool_gap_m} for plotting
     unknown: list = field(default_factory=lambda: list(_UNKNOWN))
     unknown_reasons: dict = field(default_factory=lambda: {k: _STAGE3 for k in _UNKNOWN})
-    grip_threshold: float | None = None  # the gripper value a grasp closes through (None: no gripper joint)
+    grip_threshold: float | None = None  # the gripper value a grasp closes through (None: no gripper joint, or
+    # it hardly moved, so none was used; ``unknown_reasons["grasps"]`` says which)
 
     def to_dict(self) -> dict:
         """Plain JSON types only (a NaN jerk becomes null)."""
@@ -126,14 +127,42 @@ def _jerk(tips: np.ndarray, step_s: float) -> float:
     return float(np.sqrt((d3 ** 2).sum(axis=1).mean()))
 
 
-def _closings(m: Motion, joint: int, threshold: float) -> list:
-    """Times at which the joint falls through ``threshold`` (decreasing value), linear between samples."""
+def _closings(m: Motion, joint: int, threshold: float, band: float) -> list:
+    """Times at which the joint closes through ``threshold``: it falls from above ``threshold + band`` to below
+    ``threshold - band``, so a wobble about the threshold (sensor noise, a dithering servo) is not several
+    closings. The time is that of its first fall through the threshold itself, linear between samples."""
     v, t = m.q[:, joint], m.t
-    out = []
-    for i in range(len(v) - 1):
-        if v[i] > threshold >= v[i + 1]:
-            out.append(float(t[i] + (t[i + 1] - t[i]) * (v[i] - threshold) / (v[i] - v[i + 1])))
+    out, open_, crossed = [], False, None
+    for i in range(len(v)):
+        if v[i] > threshold + band:
+            open_, crossed = True, None
+            continue
+        if not open_:
+            continue
+        if crossed is None and v[i] <= threshold < v[i - 1]:
+            crossed = float(t[i - 1] + (t[i] - t[i - 1]) * (v[i - 1] - threshold) / (v[i - 1] - v[i]))
+        if v[i] < threshold - band:
+            out.append(float(t[i]) if crossed is None else crossed)
+            open_, crossed = False, None
     return out
+
+
+# A gripper whose values span less than this fraction of its joint's limits has not opened or closed: the
+# middle of such a range is noise, and crossings of it are not grasps.
+MIN_GRIP_FRACTION = 0.05
+# The closing's hysteresis band, a fraction of the range the gripper went through (each side of the threshold).
+GRIP_BAND_FRACTION = 0.1
+
+
+def _gripper_span(scene: Scene, machine_id: str) -> float | None:
+    """The width of the gripper joint's limits in the placed machine, or None when it is not known."""
+    try:
+        machine = scene.machines[machine_id].machine
+        lo, hi = machine.limits[list(machine.joint_names).index("gripper")]
+    except (KeyError, ValueError, AttributeError, IndexError):
+        return None
+    span = float(hi) - float(lo)
+    return span if math.isfinite(span) and span > 0 else None
 
 
 def compare(scene: Scene, a: Motion, b: Motion, *, step_s: float = 1 / 30,
@@ -174,24 +203,34 @@ def compare(scene: Scene, a: Motion, b: Motion, *, step_s: float = 1 / 30,
     # grasps: the gripper joint closing through the threshold, paired in order. The default threshold is the
     # middle of the range the gripper actually went through in the two motions, not of its joint limits: a
     # gripper that only ever opens a little (as in many teleoperated datasets) would never cross the latter.
+    # But a gripper that hardly moved at all has no such middle: its wobble is noise, and no grasp is counted.
     unknown, reasons = list(_UNKNOWN), {k_: _STAGE3 for k_ in _UNKNOWN}
     grasps, counts = [], {"a": 0, "b": 0}
     if "gripper" in names:
         gj = names.index("gripper")
-        if grip_threshold is None:
-            both = np.concatenate([a.q[:, gj], b.q[:, gj]])
-            grip_threshold = float((both.min() + both.max()) / 2)
-        elif not math.isfinite(grip_threshold):
-            raise ValueError(f"grip_threshold must be a finite number, got {grip_threshold}")
-        grip_threshold = float(grip_threshold)
-        ca, cb = _closings(a, gj, grip_threshold), _closings(b, gj, grip_threshold)
-        counts = {"a": len(ca), "b": len(cb)}
-        for ta, tb in zip(ca, cb):
-            gap_g = np.linalg.norm(_tips(scene, a, [ta])[0] - _tips(scene, b, [tb])[0])
-            grasps.append({"a_s": ta, "b_s": tb, "tool_gap_m": float(gap_g)})
-        if not ca and not cb:  # a bare 0 and 0 would read as a fact; say none was found, at which threshold
+        both = np.concatenate([a.q[:, gj], b.q[:, gj]])
+        lo, hi = float(both.min()), float(both.max())
+        span = _gripper_span(scene, a.machine)
+        if grip_threshold is None and span is not None and hi - lo < MIN_GRIP_FRACTION * span:
             unknown.append("grasps")
-            reasons["grasps"] = f"つかむ瞬間が見つかりませんでした（しきい値 {grip_threshold:.3g}）"
+            reasons["grasps"] = (f"グリッパーがほとんど動いていません（開閉の幅 {hi - lo:.3g} rad、関節の範囲 "
+                                 f"{span:.3g} rad の {100 * (hi - lo) / span:.0f}%）")
+            grip_threshold = None
+        else:
+            if grip_threshold is None:
+                grip_threshold = (lo + hi) / 2
+            elif not math.isfinite(grip_threshold):
+                raise ValueError(f"grip_threshold must be a finite number, got {grip_threshold}")
+            grip_threshold = float(grip_threshold)
+            band = max(0.0, min(GRIP_BAND_FRACTION * (hi - lo), grip_threshold - lo, hi - grip_threshold))
+            ca, cb = _closings(a, gj, grip_threshold, band), _closings(b, gj, grip_threshold, band)
+            counts = {"a": len(ca), "b": len(cb)}
+            for ta, tb in zip(ca, cb):
+                gap_g = np.linalg.norm(_tips(scene, a, [ta])[0] - _tips(scene, b, [tb])[0])
+                grasps.append({"a_s": ta, "b_s": tb, "tool_gap_m": float(gap_g)})
+            if not ca and not cb:  # a bare 0 and 0 would read as a fact; say none was found, at which threshold
+                unknown.append("grasps")
+                reasons["grasps"] = f"つかむ瞬間が見つかりませんでした（しきい値 {grip_threshold:.3g}）"
     else:
         unknown.append("grasps")
         reasons["grasps"] = "グリッパーの関節（gripper）がありません"  # the machine has no joint named gripper
@@ -202,4 +241,4 @@ def compare(scene: Scene, a: Motion, b: Motion, *, step_s: float = 1 / 30,
         duration_s={"a": dur_a, "b": dur_b, "diff": dur_b - dur_a},
         jerk=jerk, grasps=grasps, grasp_counts=counts,
         series={"t": [float(x) for x in t], "tool_gap_m": [float(x) for x in gap]},
-        unknown=unknown, unknown_reasons=reasons, grip_threshold=grip_threshold if "gripper" in names else None)
+        unknown=unknown, unknown_reasons=reasons, grip_threshold=grip_threshold)

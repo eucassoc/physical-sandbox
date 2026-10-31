@@ -15,12 +15,26 @@
   .say { flex: 1 1 260px; color: var(--muted); }
   .say.err { color: var(--err); }
   label.measured { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+  .lengths label { display: inline-flex; align-items: center; gap: 4px; }
+  .lengths input { width: 5em; font: inherit; padding: 3px 4px; border: 1px solid var(--muted); border-radius: 4px; background: transparent; color: var(--fg); }
+  .lengths select { font: inherit; padding: 3px 4px; border: 1px solid var(--muted); border-radius: 4px; background: transparent; color: var(--fg); }
   button.decide { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
   button.decide:disabled { opacity: .5; cursor: default; }
 </style>
 <div class="wrap">
   <canvas id="view" width="1280" height="720"></canvas>
   <div class="objects" id="objects"></div>
+  <div class="bar lengths">
+    <select id="preset" title="床に置いた物の大きさ">
+      <option value="">長さを入力</option>
+      <option value="21,29.7">A4 の紙（21 × 29.7 cm）</option>
+      <option value="29.7,42">A3 の紙（29.7 × 42 cm）</option>
+      <option value="110,110">パレット（110 × 110 cm）</option>
+    </select>
+    <label>辺 1→2 <input type="number" id="edgeA" min="0" step="any" /> cm</label>
+    <label>辺 2→3 <input type="number" id="edgeB" min="0" step="any" /> cm</label>
+    <button class="chip" id="swap" title="2 辺の長さを入れ替える">入れ替え</button>
+  </div>
   <div class="bar">
     <span class="say" id="say">写真を読み込んでいます…</span>
     <label class="measured"><input type="checkbox" id="measured" /> 長さは実測した値</label>
@@ -42,6 +56,10 @@ window.addEventListener('unhandledrejection', (e) => fail('画面でエラーが
 const decideButton = document.getElementById('decide');
 const measuredBox = document.getElementById('measured');
 const objectsEl = document.getElementById('objects');
+const presetEl = document.getElementById('preset');
+const edgeA = document.getElementById('edgeA');
+const edgeB = document.getElementById('edgeB');
+const swapButton = document.getElementById('swap');
 
 const COLORS = ['#3ddc97', '#4cc9f0', '#f72585', '#ffd166', '#b388ff', '#ff7b54', '#80ed99', '#64dfdf'];
 
@@ -178,7 +196,41 @@ function changed(why) {
   if (decidedOnce) say(`${why}。もう一度「決定」すると、場所のファイルを上書きします`);
 }
 
-const FLOOR_OK = '床（薄い格子、1 m ごと）が地面に合っていれば「決定」を、ずれていれば橙の角をつかんで指定し直してください';
+// The two edge lengths, shown in centimetres; the preset menu shows which known object they are, if any
+const cm = (m) => Math.round(m * 1000) / 10;
+function showEdges() {
+  [edgeA.value, edgeB.value] = state.edgesM.map(cm);
+  const key = `${cm(state.edgesM[0])},${cm(state.edgesM[1])}`;
+  presetEl.value = [...presetEl.options].some((o) => o.value === key) ? key : '';
+}
+// Read the lengths the person typed; a length that is not a positive number keeps 決定 off and says so
+function readEdges(why) {
+  const a = Number(edgeA.value), b = Number(edgeB.value);
+  if (!(a > 0 && b > 0 && Number.isFinite(a) && Number.isFinite(b))) {
+    solvedOk = false;
+    updateDecide();
+    say('辺の長さは cm の正の数で入力してください', true);
+    return;
+  }
+  state.edgesM = [a / 100, b / 100];
+  showEdges();
+  changed(why);
+  solve();
+}
+edgeA.addEventListener('change', () => readEdges('長さを変えました'));
+edgeB.addEventListener('change', () => readEdges('長さを変えました'));
+presetEl.addEventListener('change', () => {
+  if (!presetEl.value) return;
+  [edgeA.value, edgeB.value] = presetEl.value.split(',');
+  readEdges('長さを変えました');
+});
+swapButton.addEventListener('click', () => {
+  [edgeA.value, edgeB.value] = [edgeB.value, edgeA.value];
+  readEdges('長さを入れ替えました');
+});
+
+const stepLabel = (m) => (m >= 1 ? `${m} m` : `${cm(m)} cm`);
+const floorOk = (stepM) => `床（薄い格子、${stepLabel(stepM)} ごと）が地面に合っていれば「決定」を、ずれていれば橙の角をつかんで指定し直してください`;
 
 // Solve on the server, at most one call in flight
 async function solve() {
@@ -194,7 +246,7 @@ async function solve() {
       const note = (out.mirrored ? '。角が逆回りなので、床を鏡に映して解きました' : '')
         + (decidedOnce && dirty ? '。もう一度「決定」すると、場所のファイルを上書きします' : '');
       const names = (state.objects ?? []).length ? `。物体 ${(state.objects ?? []).length} 個` : '';
-      say(`${FLOOR_OK}（画角 ${out.fovDeg}°、ずれ ${out.residualPx} 画素${names}）${note}`);
+      say(`${floorOk(out.stepM)}（画角 ${out.fovDeg}°、ずれ ${out.residualPx} 画素${names}）${note}`);
     } else {
       say(`この角の位置では床が決まりません（${out.reason}）。角を動かしてください`, true);
     }
@@ -258,10 +310,15 @@ decideButton.addEventListener('click', async () => {
   dirty = false;
   updateDecide();
   say(`決定しました。場所のファイルを書きました: ${out.sitePath}`);
+  if (app.kind === 'local') { // the browser screen: nobody to tell, the terminal shows the file
+    say(`決定しました。場所のファイルを書きました: ${out.sitePath}。直すなら角や長さを変えてもう一度「決定」を、終わりなら端末で Ctrl-C を押してください`);
+    return;
+  }
+  const lengths = `辺 1→2 ${cm(state.edgesM[0])} cm、辺 2→3 ${cm(state.edgesM[1])} cm（${measuredBox.checked ? '実測' : '推定'}）`;
   try {
     await app.sendMessage({
       role: 'user',
-      content: [{ type: 'text', text: `場所を決定しました。場所のファイル: ${out.sitePath}、ずれ ${out.residualPx} 画素、物体: ${out.names.length ? out.names.join('、') : 'なし'}、長さ: ${measuredBox.checked ? '実測' : '推定'}` }],
+      content: [{ type: 'text', text: `場所を決定しました。場所のファイル: ${out.sitePath}、ずれ ${out.residualPx} 画素、物体: ${out.names.length ? out.names.join('、') : 'なし'}、長さ: ${lengths}` }],
     });
     say('決定しました。チャットに結果を返しました');
   } catch (err) {
@@ -283,6 +340,8 @@ app.ontoolresult = async ({ content, isError }) => {
     decidedOnce = false;
     dirty = true;
     keep = new Set((next.objects ?? []).map((o) => o.name));
+    if (typeof next.measured === 'boolean') measuredBox.checked = next.measured;
+    showEdges();
     updateDecide();
     canvas.width = 1280;
     canvas.height = Math.round(1280 * next.height / next.width);

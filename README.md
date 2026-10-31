@@ -24,20 +24,40 @@ offscreen: on macOS that works as it is; on a Linux machine without a display se
 
 A site is a JSON file with the camera that took the picture (its lens and where it stands) and the floor, in
 metres: x forward, y left, z up, the floor at z = 0. The first site comes from four corners of a rectangle on
-the ground in one picture (a lane, a marked area, tape on a table) and the lengths of two of its edges. Further
-cameras can then be tied to that site through fixed objects both pictures show
-(`physical_sandbox.site.add_camera` in Python).
+the ground in one picture and the lengths of two of its edges. Further cameras can then be tied to that site
+through fixed objects both pictures show (`physical_sandbox.site.add_camera` in Python).
 
-### From the command line
+The rectangle needs real lengths, and a picture cannot give them. The easy way is to put something of a known
+size on the floor before taking the picture: a sheet of A4 paper on a table (21 × 29.7 cm), a pallet on a
+factory floor (110 × 110 cm). Tape on the table and a ruler work too. A lane width or a desk width guessed by eye
+works as well, but then every report says the dimensions are estimated.
+
+### In the browser
+
+```sh
+psbx site fit photo.jpg --out site.json
+```
+
+opens the photo in your browser. Drag the four orange corners onto the rectangle's corners, going round, 1 to
+4; pick the object's size from the menu, or type the lengths of edge 1→2 and edge 2→3 in centimetres (入れ替え
+swaps them). The floor is drawn as a faint grid, 1 m apart, or 10 cm on a floor smaller than 2 m: when it sits on
+the ground, press 決定 (Decide), and `site.json` is written. Tick 長さは実測した値 when you measured the lengths.
+Press 決定 again after a change to overwrite the file; Ctrl-C in the terminal when done. `--camera side` names the
+camera in the site (default `camera`); `--edges 0.6 0.4` sets the lengths to start from, in metres;
+`--no-browser` only prints the address, for a machine you reach over SSH (forward the port, `--port 8797`).
+
+The screen is served on 127.0.0.1 only, at an address with a random token. The photo stays on your machine.
+
+### From a script
 
 ```sh
 psbx site fit photo.jpg --corners 42,330 120,360 290,272 219.6,257.3 --edges 0.061 0.129 --out site.json
 ```
 
-The corners are pixels `u,v`, going round the rectangle (a corner outside the picture, with a negative `u`, is
-fine); `--edges` are the lengths of edge 1-2 and edge 2-3 in metres. Add `--measured` when you measured them
-(otherwise every report says the dimensions are estimated) and `--camera side` to name the camera (default
-`camera`). Nobody has confirmed a site made this way, and the file says so.
+fits the site without the screen, from corners already known in pixels `u,v` (going round; a corner outside
+the picture, with a negative `u`, is fine) and `--edges`, the lengths of edge 1-2 and edge 2-3 in metres. Add
+`--measured` when you measured them. Nobody has confirmed a site made this way, and the file says so. This is
+what [`examples/so101-pickplace`](examples/so101-pickplace) uses, with corners read off a frame of the dataset.
 
 ### From Claude Desktop
 

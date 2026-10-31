@@ -18,7 +18,6 @@ Desktop hid tools with those).
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import math
@@ -38,6 +37,9 @@ except ImportError as e:  # pragma: no cover
     raise ImportError("The MCP server needs the [mcp] extra: pip install 'physical-sandbox[mcp]'") from e
 
 from ..camera import Camera
+from ..fit_screen import (BUNDLE_MARKER, CHUNK, MAX_SIDE, THREE_MARKER, cache_dir, check_corners, check_edges,  # noqa: F401
+                          default_corners, ext_apps_bundle, floor_grid, photo, photo_part, widget_html,
+                          write_atomic)
 from ..floor import solve_floor
 from ..objects import ground_px, sam_segmenter
 from ..site import Floor, ObjectView, Site, SiteObject, load_site, locate_objects, mask_to_rle, save_site
@@ -46,15 +48,11 @@ from .pack import is_key, model_part, pack_model
 
 URI = "ui://physical-sandbox/fit-floor.html"
 COMPARE_URI = "ui://physical-sandbox/compare.html"
-CHUNK = 20_000  # characters of base64 per photo part: each result stays under the host's size cap
-MAX_SIDE = 1280  # the display copy's longer side
 MAX_OUTLINE_POINTS = 200
 CAMERA = "camera"
 KINDS = ("fixed", "target")
 
 _HERE = Path(__file__).parent
-BUNDLE_MARKER = "/*__EXT_APPS_BUNDLE__*/"
-THREE_MARKER = "/*__THREE__*/"
 POSES_BUDGET = 1_600_000  # characters of JSON for all the poses; a longer motion is sampled every n-th frame
 MAX_TRAIL_POINTS = 600
 
@@ -64,54 +62,12 @@ def make_segmenter():
     return sam_segmenter()
 
 
-# ---- the photo's display copy, on disk ----
-
-def _cache_dir() -> Path:
-    d = Path(os.environ.get("PS_CACHE_DIR", "~/.cache/physical-sandbox")).expanduser() / "photos"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _write_atomic(path: Path, data: bytes) -> None:
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # two starts of the server may race
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+_write_atomic = write_atomic  # the proposal and model caches are written the same way
 
 
 def _resolved(image_path: str) -> str:
     """The picture's resolved path: proposals and the floor state are matched on it, not on the raw string."""
     return str(Path(image_path).expanduser().resolve())
-
-
-def photo(image_path: str, frame: np.ndarray | None = None, make: bool = True) -> dict:
-    """The photo's size and a JPEG display copy as base64: ``{width, height, b64}``. The copy is made once and
-    kept in the cache directory, so a different start of the server finds it. The size is that of the frame the
-    calculations use (EXIF rotation applied, as ``open_source`` reads it). ``frame`` is that frame when the
-    caller has already decoded it (so it is not decoded twice); with ``make=False`` an image that has no copy
-    yet is refused instead of decoded (the screen's own calls only fetch what a tool already opened)."""
-    p = Path(image_path).expanduser()
-    if not p.is_file():
-        raise ValueError(f"cannot find the picture {image_path!r}")
-    st = p.stat()
-    key = hashlib.sha1(f"{p.resolve()}:{st.st_mtime_ns}:{st.st_size}".encode()).hexdigest()
-    cache = _cache_dir()
-    jpg, meta = cache / f"{key}.jpg", cache / f"{key}.json"
-    if not (jpg.exists() and meta.exists()):
-        if not make:
-            raise ValueError(f"{image_path!r} has not been opened: use ps_fit_floor on it first")
-        if frame is None:
-            with open_source(p) as src:
-                frame = src.frame(0)
-        img = frame
-        h, w = img.shape[:2]
-        k = min(1.0, MAX_SIDE / max(w, h))
-        small = cv2.resize(img, (max(1, round(w * k)), max(1, round(h * k))), interpolation=cv2.INTER_AREA)
-        ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        if not ok:
-            raise ValueError(f"cannot make a display copy of {image_path!r}")
-        _write_atomic(jpg, buf.tobytes())
-        _write_atomic(meta, json.dumps({"width": w, "height": h}).encode())  # the meta last: it marks "complete"
-    return {**json.loads(meta.read_text()), "b64": base64.b64encode(jpg.read_bytes()).decode()}
 
 
 # ---- working files under the site directory ----
@@ -183,31 +139,7 @@ def _with_objects(state: dict, objects: list[dict]) -> dict:
     return state
 
 
-# ---- checking what comes in ----
-
-def _corners(value) -> list[tuple[float, float]]:
-    try:
-        pts = [(float(c["u"]), float(c["v"])) for c in value]
-    except (TypeError, KeyError, ValueError) as e:
-        raise ValueError("corners must be four {u, v} pixels") from e
-    if len(pts) != 4 or not all(math.isfinite(x) for p in pts for x in p):
-        raise ValueError("corners must be four {u, v} pixels")
-    return pts
-
-
-def _edges(value) -> tuple[float, float]:
-    try:
-        a, b = (float(x) for x in value)
-    except (TypeError, ValueError) as e:
-        raise ValueError("edgesM must be two lengths in metres") from e
-    if not (math.isfinite(a) and math.isfinite(b) and a > 0 and b > 0):
-        raise ValueError("edgesM must be two positive lengths in metres")
-    return a, b
-
-
-def _default_corners(w: int, h: int) -> list[dict]:
-    return [{"u": w * 0.1, "v": h * 0.9}, {"u": w * 0.9, "v": h * 0.9}, {"u": w * 0.7, "v": h * 0.6},
-            {"u": w * 0.3, "v": h * 0.6}]
+_corners, _edges, _default_corners = check_corners, check_edges, default_corners
 
 
 def _json(d: dict) -> str:
@@ -259,37 +191,13 @@ def ps_fit_floor(imagePath: str, edgesM: list[float], siteDir: str, corners: lis
 
 @apps.tool(resource_uri=URI, visibility=["app"], description="One part of the photo (screen only).")
 def ps_spike_image(imagePath: str, part: int) -> str:
-    if part < 0:
-        raise ValueError("part must be >= 0")
-    b64 = photo(imagePath, make=False)["b64"]
-    return _json({"part": part, "data": b64[part * CHUNK:(part + 1) * CHUNK]})
+    return _json(photo_part(imagePath, part))
 
 
 @apps.tool(resource_uri=URI, visibility=["app"], description=(
     "Solve the camera from four floor corners and give a 1 m grid in the photo's pixels (screen only)."))
 def ps_floor_solve(width: float, height: float, corners: list[dict], edgesM: list[float]) -> str:
-    try:
-        px, edges = _corners(corners), _edges(edgesM)
-        w, h = int(round(width)), int(round(height))
-        if w <= 0 or h <= 0:
-            raise ValueError("width and height must be positive")
-    except ValueError as e:
-        return _json({"ok": False, "reason": f"bad-input: {e}"})
-    sol = solve_floor(w, h, px, edges)
-    if sol.camera is None:
-        return _json({"ok": False, "reason": sol.reason})
-    a = float(sol.corners_m[1][0])
-    b = float(sol.corners_m[2][1])  # negative when the floor was mirrored
-    ts = (0, 0.25, 0.5, 0.75, 1)
-    lines = [[[m, t * b, 0.0] for t in ts] for m in np.arange(0, abs(a) + 1e-9, 1.0)]
-    lines += [[[t * a, m * math.copysign(1.0, b), 0.0] for t in ts] for m in np.arange(0, abs(b) + 1e-9, 1.0)]
-    out = []
-    for line in lines:
-        pix = sol.camera.project(np.array(line, float))
-        out.append([None if not np.isfinite(p).all() else [round(float(p[0]), 1), round(float(p[1]), 1)] for p in pix])
-    fov = 2 * math.degrees(math.atan(w / 2 / float(sol.camera.K[0, 0])))
-    return _json({"ok": True, "lines": out, "residualPx": round(sol.residual_px, 2), "fovDeg": round(fov),
-                  "mirrored": bool(sol.mirrored)})
+    return _json(floor_grid(width, height, corners, edgesM))
 
 
 @apps.tool(resource_uri=URI, description=(
@@ -475,7 +383,7 @@ def _write_still(frame: np.ndarray, spec, start_s: float, cam: Camera) -> Path:
     stamp = f"{p.resolve()}:{p.stat().st_mtime_ns}:{p.stat().st_size}" if p.is_file() else f"{spec}:{time.time_ns()}"
     lens = f"{np.asarray(cam.K, float).tobytes().hex()}:{np.asarray(cam.dist, float).tobytes().hex()}"
     key = hashlib.sha1(f"{stamp}:{start_s}:{lens}:{frame.shape}".encode()).hexdigest()
-    d = _cache_dir().parent / "frames"
+    d = cache_dir().parent / "frames"
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"{key}.png"
     if not path.exists():
@@ -603,7 +511,7 @@ def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA
 
 def _compare_dir() -> Path:
     """Where the screens' data waits for the part tools (the comparison's poses, the proposal's outlines)."""
-    d = _cache_dir().parent / "compare"
+    d = cache_dir().parent / "compare"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -655,11 +563,7 @@ def ps_model_part(key: str, part: int) -> str:
 
 
 def _widget(name: str, three: bool = False) -> str:
-    bundle = (_HERE / "widgets/vendor/ext-apps-app-with-deps.js").read_text()
-    html = (_HERE / "widgets" / name).read_text().replace(BUNDLE_MARKER, bundle)
-    if three:
-        html = html.replace(THREE_MARKER, (_HERE / "widgets/vendor/three.iife.js").read_text())
-    return html
+    return widget_html(name, ext_apps_bundle(), three)
 
 
 apps.add_html_resource(URI, _widget("fit-floor.html"))

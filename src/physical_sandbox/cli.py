@@ -220,15 +220,27 @@ def _glue_corners(argv: list[str]) -> list[str]:
     return out
 
 
+def _edges_m(args) -> tuple[float, float] | None:
+    if args.edges is None:
+        return None
+    edges = (float(args.edges[0]), float(args.edges[1]))
+    if not (math.isfinite(edges[0]) and math.isfinite(edges[1]) and edges[0] > 0 and edges[1] > 0):
+        raise InputError(f"--edges must be finite, positive lengths in metres, got {edges[0]} {edges[1]}")
+    return edges
+
+
 def _cmd_site_fit(args) -> int:
+    if args.corners is None:
+        return _fit_in_browser(args)
+    if args.edges is None:
+        raise InputError("--corners needs --edges too (the lengths of edge 1-2 and edge 2-3 in metres); "
+                         "without --corners the floor is fitted in the browser")
     from .floor import solve_floor
     from .site import Floor, Site, save_site
     from .sources import open_source
 
     corners = _corners(args.corners)
-    edges = (float(args.edges[0]), float(args.edges[1]))
-    if not (math.isfinite(edges[0]) and math.isfinite(edges[1]) and edges[0] > 0 and edges[1] > 0):
-        raise InputError(f"--edges must be finite, positive lengths in metres, got {edges[0]} {edges[1]}")
+    edges = _edges_m(args)
     with _reading(f"image {args.image!r}", open_source, args.image) as source:
         if source.kind != "still":
             raise InputError(f"{args.image!r} is not a still image (.jpg .jpeg .png)")
@@ -250,6 +262,32 @@ def _cmd_site_fit(args) -> int:
     save_site(site, out)
     print(f"wrote {out}: camera {args.camera!r}, residual {sol.residual_px:.2f} px, "
           f"dimensions {site.dimensions}, not confirmed by a person")
+    return 0
+
+
+def _fit_in_browser(args) -> int:
+    """The screen in the person's own browser: they drag the four corners and type the lengths there, and 決定
+    writes the site file; the command runs until Ctrl-C."""
+    import webbrowser
+    from .fit_screen import FitServer
+
+    def wrote(site, path):
+        print(f"wrote {path}: camera {args.camera!r}, residual {site.residual_px[args.camera]:.2f} px, "
+              f"dimensions {site.dimensions}, confirmed by a person (決定 again overwrites it; Ctrl-C to finish)",
+              flush=True)
+
+    server = _reading(f"image {args.image!r}", FitServer, args.image, args.out, args.camera, _edges_m(args),
+                      args.measured, args.port, wrote)
+    print(f"Fit the floor at {server.url}: drag the four corners onto a rectangle on the ground, type its "
+          f"two edge lengths, press 決定. Ctrl-C here when done.", flush=True)  # flushed: the command then waits
+    if not args.no_browser:
+        webbrowser.open(server.url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        server.close()
     return 0
 
 
@@ -292,16 +330,20 @@ def _parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("site", help="site tools")
     ssub = s.add_subparsers(dest="site_command", required=True)
-    f = ssub.add_parser("fit", help="fix a site from four floor corners in a still (no person confirms it)")
+    f = ssub.add_parser("fit", help="fix a site from four floor corners in a still: in the browser, or from "
+                                    "--corners and --edges given here (then no person confirms it)")
     f.add_argument("image")
-    f.add_argument("--edges", nargs=2, type=float, required=True, metavar=("A", "B"),
-                   help="lengths in metres of edge 1-2 and edge 2-3")
-    f.add_argument("--corners", required=True, metavar="u,v",
+    f.add_argument("--edges", nargs=2, type=float, metavar=("A", "B"),
+                   help="lengths in metres of edge 1-2 and edge 2-3 (in the browser: the lengths to start from, "
+                        "default an A4 sheet)")
+    f.add_argument("--corners", metavar="u,v",
                    help="the four corners in pixels, going round: four words u,v (a negative u is fine), or one "
-                        "u,v;u,v;u,v;u,v")
-    f.add_argument("--out", required=True, help="the site file to write")
+                        "u,v;u,v;u,v;u,v; without it the screen opens in the browser")
+    f.add_argument("--out", default="site.json", help="the site file to write (default: site.json)")
     f.add_argument("--camera", default="camera", help="the camera's name in the site (default: camera)")
     f.add_argument("--measured", action="store_true", help="the edge lengths were measured, not estimated")
+    f.add_argument("--port", type=int, default=0, help="the browser screen's port on 127.0.0.1 (default: any free)")
+    f.add_argument("--no-browser", action="store_true", help="print the screen's address instead of opening it")
     f.set_defaults(run=_cmd_site_fit)
 
     w = sub.add_parser("fetch-sam", help="download the SAM weights ahead of time")

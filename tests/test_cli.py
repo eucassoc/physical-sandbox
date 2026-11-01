@@ -16,26 +16,8 @@ from physical_sandbox.compare import compare
 from physical_sandbox.scene import PlacedMachine, Scene, save_scene
 from physical_sandbox.site import Site, load_site, save_site
 
-URDF = """<?xml version="1.0"?>
-<robot name="blocks">
-  <link name="base">
-    <inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
-    <visual><origin xyz="0 0 0.15"/><geometry><box size="0.3 0.3 0.3"/></geometry></visual>
-  </link>
-  <link name="arm">
-    <inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
-    <visual><origin xyz="0.2 0 0"/><geometry><box size="0.4 0.1 0.1"/></geometry></visual>
-  </link>
-  <joint name="turn" type="revolute">
-    <parent link="base"/><child link="arm"/><origin xyz="0 0 0.4"/><axis xyz="0 0 1"/>
-    <limit lower="-3" upper="3" effort="1" velocity="1"/>
-  </joint>
-  <link name="tip">
-    <inertial><mass value="0.1"/><inertia ixx="0.01" iyy="0.01" izz="0.01" ixy="0" ixz="0" iyz="0"/></inertial>
-  </link>
-  <joint name="tip_fixed" type="fixed"><parent link="arm"/><child link="tip"/><origin xyz="0.4 0 0"/></joint>
-</robot>
-"""
+from conftest import URDF
+
 W, H = 320, 240
 
 
@@ -621,3 +603,22 @@ def test_grip_threshold_must_be_a_finite_number(pincer, bad):
     tmp_path, still = pincer
     code, _, _ = run_pincer(tmp_path, still, ["--grip-threshold", bad])
     assert code == 2
+
+
+def test_pull_prints_the_cache_folder(catalog_server, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PS_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr("physical_sandbox.catalog.BASE", catalog_server.url)
+    assert main(["pull", "t/mini:1"]) == 0
+    assert capsys.readouterr().out.strip() == str(tmp_path / "catalog" / "t" / "mini" / "1")
+
+
+def test_pull_with_a_bad_ref_exits_2(capsys):
+    assert main(["pull", "mini"]) == 2
+
+
+def test_catalog_search_json_and_table(catalog_server, monkeypatch, capsys):
+    monkeypatch.setattr("physical_sandbox.catalog.BASE", catalog_server.url)
+    assert main(["catalog", "search", "arm", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["items"][0]["name"] == "mini"
+    assert main(["catalog", "search", "arm"]) == 0
+    assert capsys.readouterr().out.split() == ["t/mini", "1", "arm", "Mini", "arm"]

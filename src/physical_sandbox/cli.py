@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import sys
@@ -298,6 +299,26 @@ def _cmd_fetch_sam(args) -> int:
     return 0
 
 
+def _cmd_pull(args) -> int:
+    from . import catalog
+
+    print(catalog.pull(args.ref, force=args.force))
+    return 0
+
+
+def _cmd_catalog_search(args) -> int:
+    from . import catalog
+
+    items = catalog.search(args.q, category=args.category, tag=args.tag, kind=args.kind)
+    if args.json:
+        print(json.dumps({"items": items}, ensure_ascii=False))
+        return 0
+    for i in items:
+        print(f"{i['handle']}/{i['name']}  {i.get('latest_version') or '-'}  {i.get('category') or '-'}  "
+              f"{(i.get('display') or {}).get('en', '')}")
+    return 0
+
+
 def _cmd_mcp(args) -> int:
     try:
         from .mcp.server import main as serve
@@ -349,6 +370,21 @@ def _parser() -> argparse.ArgumentParser:
     w = sub.add_parser("fetch-sam", help="download the SAM weights ahead of time")
     w.add_argument("--dest", help="where to put the weights file")
     w.set_defaults(run=_cmd_fetch_sam)
+
+    pl = sub.add_parser("pull", help="download a catalog item (handle/name[:version]) into the cache")
+    pl.add_argument("ref")
+    pl.add_argument("--force", action="store_true", help="download again even if it is cached")
+    pl.set_defaults(run=_cmd_pull)
+
+    cg = sub.add_parser("catalog", help="catalog tools")
+    csub = cg.add_subparsers(dest="catalog_command", required=True)
+    cs = csub.add_parser("search", help="search the PS.com catalog")
+    cs.add_argument("q", nargs="?", default="")
+    cs.add_argument("--category")
+    cs.add_argument("--tag")
+    cs.add_argument("--kind")
+    cs.add_argument("--json", action="store_true", help="print the items as received")
+    cs.set_defaults(run=_cmd_catalog_search)
 
     m = sub.add_parser("mcp", help="serve the MCP tools on stdio")
     m.set_defaults(run=_cmd_mcp)

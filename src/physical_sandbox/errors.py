@@ -15,3 +15,7 @@ class InputKeyError(InputError, KeyError):
 
 class InputIndexError(InputError, IndexError):
     """A number out of range (an episode)."""
+
+
+class CatalogError(Exception):
+    """The catalog server or the network failed (not a wrong input): ``psbx`` exits 1."""

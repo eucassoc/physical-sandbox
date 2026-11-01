@@ -171,6 +171,19 @@ def _outline(mask: np.ndarray) -> list[list[float]]:
 apps = Apps()
 
 
+def ps_catalog_search(q: str = "", category: str | None = None, kind: str | None = None) -> str:
+    from .. import catalog
+
+    return _json({"items": catalog.search(q, category=category, kind=kind)})
+
+
+def ps_catalog_pull(ref: str) -> str:
+    from .. import catalog
+
+    d = catalog.pull(ref)
+    return _json({"dir": str(d), "urdf": str(catalog.urdf_path(d))})
+
+
 @apps.tool(resource_uri=URI, description=(
     "Open a screen inside the chat to fix the floor on a photo: the photo with four orange corners the person "
     "can drag, and the floor solved from them drawn as a 1 m grid. imagePath is a photo file; edgesM the floor's "
@@ -569,6 +582,10 @@ def _widget(name: str, three: bool = False) -> str:
 apps.add_html_resource(URI, _widget("fit-floor.html"))
 apps.add_html_resource(COMPARE_URI, _widget("compare.html", three=True))
 server = MCPServer("physical-sandbox", extensions=[apps])
+server.tool(description="Search the PS.com catalog of machines and other items by text, category or kind.")(
+    ps_catalog_search)
+server.tool(description="Download a catalog item (handle/name[:version]) into the local cache; gives its folder "
+                        "and its URDF file.")(ps_catalog_pull)
 server.tool(description="Whether the site in siteDir is decided (confirmed by the person), with its residual in "
                         "pixels, its object names and whether its lengths are measured or estimated.")(ps_site_status)
 

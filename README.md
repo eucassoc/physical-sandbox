@@ -88,6 +88,24 @@ network is used. To work offline, fetch them ahead of time with `psbx fetch-sam`
 `~/.cache/physical-sandbox/`, or `$PS_CACHE_DIR`; `--dest` puts the file elsewhere, for
 `physical_sandbox.objects.sam_segmenter(weights=...)`).
 
+## Take a machine from the catalog
+
+```sh
+psbx catalog search arm          # name  version  category  display
+psbx pull physical-sandbox/so101 # prints the cache folder
+```
+
+```python
+from physical_sandbox import catalog
+from physical_sandbox.machine import load_machine
+
+machine = load_machine(catalog.urdf_path(catalog.pull("physical-sandbox/so101")))
+```
+
+Files are checked against the manifest's sha256 and cached under `~/.cache/physical-sandbox/catalog/`
+(`$PS_CACHE_DIR`); a second `pull` of the same version does not touch the network. `$PS_CATALOG_URL` points
+at another catalog server.
+
 ## Compare two motions
 
 ```sh

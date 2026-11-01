@@ -34,12 +34,16 @@ What the bundle does with the meshes:
   without it those visuals are skipped with a warning, and `machine check` says so.
 - A `<mesh scale="...">` is baked into the vertices (a mirror reverses the winding). One mesh used at two
   scales becomes two files.
-- A mesh with more than 20,000 triangles is thinned by vertex clustering (64 cells along each side of its
-  bounding box, coarser if that is still too many), and a warning says how far. Keep display meshes under
-  20,000 triangles if the detail matters to you.
+- A mesh at or under 20,000 triangles is left untouched. One with more is thinned by vertex clustering:
+  vertices are snapped to a grid of cubes and those in one cube merge. The grid starts at 1024 cubes along
+  the mesh's longest side and halves while the mesh still has more than 20,000 triangles, stopping at 64
+  cubes, so the finest grid that fits is used. A warning says how far it was thinned; a mesh still over the
+  limit at 64 cubes is kept as it came out, with the warning "still over 20000 at the coarsest grid". Keep
+  display meshes under 20,000 triangles if the detail matters to you.
 - Only visual meshes are carried; `<box>`, `<cylinder>` and `<sphere>` visuals are not drawn (a warning
   names them).
-- `dimensions` is measured from the meshes with every joint at 0. A footprint in `profile.json`'s
+- `dimensions` is measured from the meshes with every joint at 0 (not in a home pose, so an arm is measured
+  as it stands stretched out at its zeros). A footprint in `profile.json`'s
   `motion.footprint` wins for length and width.
 
 Mesh references are found as written relative to the URDF, then with `.obj` for `.stl`, then under

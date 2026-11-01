@@ -123,16 +123,16 @@ Desktop the same check is the `ps_machine_check` tool.
 ## Push to the catalog
 
 ```sh
-psbx push <handle>/my-arm:1 my-arm/ --private    # a machine folder: checked, bundled, uploaded
-psbx push <handle>/statue statue.stl --private   # an object (beside its object.json); version 1, then 2, ...
-psbx push <handle>/run-1:1 record.json           # a record (schemaVersion 3), public
+psbx push <handle>/my-arm:1 my-arm/              # a machine folder: checked, bundled, uploaded
+psbx push <handle>/statue statue.stl             # an object (beside its object.json); version 1, then 2, ...
+psbx push <handle>/run-1:1 record.json --public  # a record (schemaVersion 3), published
 ```
 
 The first push signs in: it prints a 6-digit code to enter at `<PS.com>/vr`, and keeps the token in
 `~/.config/physical-sandbox/ps-com-token.json` (mode 0600) until it expires (`psbx login` does only this
-step). You push under your own handle, decided once on PS.com at `/catalog/me`. Without `--private` the item
-is public. A version that is already there is refused (`taken`); without a version, push takes 1, or one
-more than the highest number there.
+step). You push under your own handle, decided once on PS.com at `/catalog/me`. Everything is private (only
+you see it) unless you add `--public`. A version that is already there is refused (`taken`); without a
+version, push takes 1, or one more than the highest number there.
 
 A record whose devices name a local machine (`"product": "so101"`) takes that machine along: when
 `<handle>/so101` is not in the catalog, it goes up **privately** as `<handle>/so101:1` from

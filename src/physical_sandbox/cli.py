@@ -311,7 +311,7 @@ def _cmd_push(args) -> int:
     from .push import push
 
     try:
-        result = push(args.ref, Path(args.path), private=args.private, category=args.category, tags=args.tag or [],
+        result = push(args.ref, Path(args.path), private=not args.public, category=args.category, tags=args.tag or [],
                       machine_dir=Path(args.machine_dir) if args.machine_dir else None, log=print)
     except CatalogError as e:
         if getattr(e, "code", None) == "taken":
@@ -319,7 +319,7 @@ def _cmd_push(args) -> int:
         raise
     for ref in result.companions:
         print(f"uploaded {ref} (private)")
-    print(f"uploaded {result.ref} ({'private' if args.private else 'public'}, {result.bytes} bytes)")
+    print(f"uploaded {result.ref} ({'public' if args.public else 'private'}, {result.bytes} bytes)")
     return 0
 
 
@@ -427,7 +427,8 @@ def _parser() -> argparse.ArgumentParser:
                                      "catalog as handle/name[:version]")
     pu.add_argument("ref", help="handle/name[:version]; without a version: 1, or one more than the highest")
     pu.add_argument("path", help="the machine folder (or its URDF), the object's folder or mesh, or a record .json")
-    pu.add_argument("--private", action="store_true", help="only you can see it (default: public)")
+    pu.add_argument("--public", action="store_true", help="publish it: anyone can see it (default: private, only you)")
+    pu.add_argument("--private", action="store_true", help=argparse.SUPPRESS)  # the default; kept as a no-op
     pu.add_argument("--category", help="arm, mobile, humanoid, quadruped, drone, end-effector, vehicle, fixture or "
                                        "figure (default: the one in product.json / object.json)")
     pu.add_argument("--tag", nargs="+", action="extend", metavar="T", help="tags to add")

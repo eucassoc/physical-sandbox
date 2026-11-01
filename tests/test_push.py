@@ -101,9 +101,19 @@ def test_taken_is_a_catalog_error_with_the_code(mini, catalog_server):
 
 def test_the_cli_says_to_change_the_version_on_taken(mini, catalog_server, monkeypatch, capsys):
     monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
-    assert main(["push", "ada/mini:1", str(mini), "--private"]) == 0
-    assert main(["push", "ada/mini:1", str(mini), "--private"]) == 1
+    assert main(["push", "ada/mini:1", str(mini)]) == 0
+    assert main(["push", "ada/mini:1", str(mini)]) == 1
     assert "その版はあります。版を変えてください" in capsys.readouterr().err
+
+
+def test_the_cli_pushes_privately_unless_public(mini, catalog_server, monkeypatch):
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
+    assert main(["push", "ada/mini:1", str(mini)]) == 0
+    assert catalog_server.items[("ada", "mini")]["visibility"] == "private"
+    assert ("POST", "/api/catalog/ada/mini/1?visibility=private") in catalog_server.calls
+    assert main(["push", "ada/mini:2", str(mini), "--private"]) == 0  # accepted, the default anyway
+    assert main(["push", "ada/pub:1", str(mini), "--public"]) == 0
+    assert ("POST", "/api/catalog/ada/pub/1?visibility=public") in catalog_server.calls
 
 
 def test_pushing_under_another_handle_is_refused(mini, catalog_server):

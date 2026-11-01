@@ -19,10 +19,11 @@ from pathlib import Path
 
 from .errors import CatalogError, InputError
 
-BASE = os.environ.get("PS_CATALOG_URL", "https://physicalsandbox.com").rstrip("/")
-_SLUG = r"[a-z0-9](?:[a-z0-9-]{1,37}[a-z0-9])?"
+_DEFAULT_BASE = "https://physicalsandbox.com"
+_HANDLE = r"[a-z0-9](?:[a-z0-9-]{1,37}[a-z0-9])?"  # a handle: 1 or 3-39 characters (as before)
+_NAME = r"[a-z0-9][a-z0-9-]{0,37}[a-z0-9]"  # a name: 2-39 characters, as the server allows
 _VERSION = r"[a-z0-9][a-z0-9.-]{0,31}"
-_REF = re.compile(rf"^({_SLUG})/({_SLUG})(?::({_VERSION}))?$")
+_REF = re.compile(rf"^({_HANDLE})/({_NAME})(?::({_VERSION}))?$")
 _TIMEOUT = 30
 
 
@@ -45,9 +46,22 @@ def _name_dir(handle: str, name: str) -> Path:
     return cache_root() / "catalog" / handle / name
 
 
+def _base() -> str:
+    return os.environ.get("PS_CATALOG_URL", _DEFAULT_BASE).rstrip("/")
+
+
+def _user_agent() -> str:
+    try:
+        from . import __version__
+    except ImportError:
+        __version__ = "dev"
+    return f"psbx/{__version__}"
+
+
 def _get(url: str) -> bytes:
     try:
-        with urllib.request.urlopen(url, timeout=_TIMEOUT) as r:
+        req = urllib.request.Request(url, headers={"User-Agent": _user_agent()})
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
             return r.read()
     except urllib.error.HTTPError as e:
         code = ""
@@ -68,7 +82,7 @@ def _get_json(url: str):
 
 
 def search(q: str = "", *, category=None, tag=None, kind=None, base: str | None = None) -> list[dict]:
-    base = (base or BASE).rstrip("/")
+    base = (base or _base()).rstrip("/")
     params = {k: v for k, v in (("q", q), ("category", category), ("tag", tag), ("kind", kind)) if v}
     url = f"{base}/api/catalog/search?{urllib.parse.urlencode(params)}"
     try:
@@ -128,7 +142,7 @@ def _resolve_latest(handle: str, name: str, base: str) -> str:
 
 
 def pull(ref: str, *, base: str | None = None, force: bool = False) -> Path:
-    base = (base or BASE).rstrip("/")  # read at call time so PS_CATALOG_URL-style overrides and tests can change it
+    base = (base or _base()).rstrip("/")  # PS_CATALOG_URL is read at call time, so it can change after import
     handle, name, version = parse_ref(ref)
     parent = _name_dir(handle, name)
     if version == "latest":

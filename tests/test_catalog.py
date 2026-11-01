@@ -19,6 +19,25 @@ def test_parse_ref_splits_handle_name_and_version():
             catalog.parse_ref(bad)
 
 
+def test_parse_ref_accepts_two_character_names_but_not_one_or_short_handles():
+    assert catalog.parse_ref("physical-sandbox/g1") == ("physical-sandbox", "g1", "latest")
+    for bad in ("physical-sandbox/g", "ab/g1"):
+        with pytest.raises(InputError):
+            catalog.parse_ref(bad)
+
+
+def test_requests_send_a_psbx_user_agent(catalog_server):
+    from physical_sandbox import __version__
+    catalog.search("arm", base=catalog_server.url)
+    assert catalog_server.headers[-1]["User-Agent"] == f"psbx/{__version__}"
+
+
+def test_base_url_is_read_at_call_time(catalog_server, monkeypatch):
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url + "/")
+    assert [i["name"] for i in catalog.search("arm")] == ["mini"]
+    assert catalog_server.paths[-1].startswith("/api/catalog/search")
+
+
 def test_search_returns_the_items(catalog_server):
     items = catalog.search("arm", base=catalog_server.url)
     assert [i["name"] for i in items] == ["mini"]

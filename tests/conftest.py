@@ -41,6 +41,8 @@ class FakeCatalog:
         self.bad = bad
         self.port = 0
         self.hits = 0
+        self.headers = []
+        self.paths = []
         self.server = None
 
     def manifest(self):
@@ -79,6 +81,8 @@ class FakeCatalog:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 outer.hits += 1
+                outer.headers.append(dict(self.headers))
+                outer.paths.append(self.path)
                 code, ctype, body = outer.route(self.path)
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)

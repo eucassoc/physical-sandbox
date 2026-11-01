@@ -607,7 +607,7 @@ def test_grip_threshold_must_be_a_finite_number(pincer, bad):
 
 def test_pull_prints_the_cache_folder(catalog_server, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("PS_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr("physical_sandbox.catalog.BASE", catalog_server.url)
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
     assert main(["pull", "t/mini:1"]) == 0
     assert capsys.readouterr().out.strip() == str(tmp_path / "catalog" / "t" / "mini" / "1")
 
@@ -617,7 +617,7 @@ def test_pull_with_a_bad_ref_exits_2(capsys):
 
 
 def test_catalog_search_json_and_table(catalog_server, monkeypatch, capsys):
-    monkeypatch.setattr("physical_sandbox.catalog.BASE", catalog_server.url)
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
     assert main(["catalog", "search", "arm", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["items"][0]["name"] == "mini"
     assert main(["catalog", "search", "arm"]) == 0

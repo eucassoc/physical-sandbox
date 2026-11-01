@@ -47,9 +47,18 @@ class PushResult:
 class PushError(CatalogError):
     """The server said no: ``code`` is the API's ``error`` (``taken``, ``bad-manifest``, ...), ``status`` the HTTP code."""
 
-    def __init__(self, code: str, status: int = 0, problems=()):
-        self.code, self.status, self.problems = code, status, list(problems)
-        super().__init__(code + (": " + "; ".join(self.problems) if self.problems else ""))
+    def __init__(self, code: str, status: int = 0, problems=(), note: str = ""):
+        self.code, self.status, self.problems, self.note = code, status, list(problems), note
+        super().__init__(code + (": " + "; ".join(self.problems) if self.problems else "")
+                         + (f" ({note})" if note else ""))
+
+
+def _noted(e: CatalogError, note: str) -> CatalogError:
+    """The same failure with a sentence added on what was left behind."""
+    if isinstance(e, PushError):
+        both = f"{e.note}; {note}" if e.note else note
+        return PushError(e.code, e.status, e.problems, both)
+    return CatalogError(f"{e} ({note})")
 
 
 # ---- HTTP ----
@@ -160,16 +169,27 @@ def login(base: str, *, log=print) -> str:
     raise CatalogError("gave up waiting for approval after 10 minutes; run again")
 
 
-def _signed_in(base: str, log) -> tuple[str, str]:
-    """(token, the account's handle). A kept token the server rejects is dropped and the login runs again."""
+_SIGNIN = "not signed in to PS.com: run `psbx login` in a terminal"
+
+
+def _signed_in(base: str, log, interactive: bool = True) -> tuple[str, str]:
+    """(token, the account's handle). A kept token the server rejects is dropped and the login runs again;
+    when not ``interactive`` (no one would see the code) it is PushError("signin") instead of a login."""
     for attempt in (0, 1):
-        token = login(base, log=log)
+        if interactive:
+            token = login(base, log=log)
+        else:
+            token = kept_token(base)
+            if token is None:
+                raise PushError("signin", 401, note=_SIGNIN)
         try:
             handle = _call("GET", f"{base}/api/handle", token=token).get("handle")
         except PushError as e:
-            if e.status == 401 and attempt == 0:
+            if e.status == 401:
                 _forget(base)
-                continue
+                if attempt == 0 and interactive:
+                    continue
+                raise PushError("signin", 401, note=_SIGNIN) from e
             raise
         if not handle:
             raise InputError("decide your handle on PS.com first (/catalog/me)")
@@ -227,13 +247,19 @@ def _file_entry(path: str, source: Path) -> dict:
     return {"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
-def _walk(folder: Path) -> dict:
-    """Every file under ``folder`` by its POSIX path, leaving out hidden files and folders."""
+def _walk(folder: Path, log=print) -> dict:
+    """Every file under ``folder`` by its POSIX path, leaving out hidden files and folders, and links that lead
+    outside the folder (with a warning: they would upload a file the person did not put there)."""
     out = {}
+    inside = folder.resolve()
     for p in sorted(folder.rglob("*")):
         rel = p.relative_to(folder)
-        if p.is_file() and not any(part.startswith(".") or part == "__pycache__" for part in rel.parts):
-            out[rel.as_posix()] = p
+        if not p.is_file() or any(part.startswith(".") or part == "__pycache__" for part in rel.parts):
+            continue
+        if not p.resolve().is_relative_to(inside):
+            log(f"warning: {rel.as_posix()} links outside {folder}; left out")
+            continue
+        out[rel.as_posix()] = p
     return out
 
 
@@ -311,7 +337,7 @@ def _machine_upload(path: Path, handle: str, name: str, version: str, *, categor
     for w in result.warnings:
         log(f"warning: {w}")
     sources = _bundle_files(result, out)
-    _add(sources, _walk(folder))
+    _add(sources, _walk(folder, log))
     manifest = {
         "format": FORMAT, "name": f"{handle}/{name}", "version": version, "kind": "machine",
         "category": category, "license": product.get("licenseId") or "unknown",
@@ -348,7 +374,7 @@ def _object_upload(path: Path, handle: str, name: str, version: str, *, category
     for w in result.warnings:
         log(f"warning: {w}")
     sources = _bundle_files(result, out)
-    _add(sources, _walk(src))
+    _add(sources, _walk(src, log))
     _add(sources, {"object.json": folder / "object.json"})
     manifest = {
         "format": FORMAT, "name": f"{handle}/{name}", "version": version, "kind": "object",
@@ -369,12 +395,19 @@ def _send(base: str, token: str, upload: _Upload, *, private: bool) -> None:
     answer = _call("POST", f"{root}?visibility={visibility}", token=token,
                    body=json.dumps(upload.manifest, ensure_ascii=False).encode(), content_type="application/json")
     wanted = answer.get("upload") if isinstance(answer, dict) else None
-    for path in (wanted if isinstance(wanted, list) else list(upload.sources)):
-        if path not in upload.sources:
-            raise CatalogError(f"the server asked for {path!r}, which the manifest does not list")
-        _call("PUT", f"{root}/files/{urllib.parse.quote(path)}", token=token,
-              body=upload.sources[path].read_bytes(), content_type="application/octet-stream")
-    _call("POST", f"{root}/finish", token=token)
+    try:
+        for path in (wanted if isinstance(wanted, list) else list(upload.sources)):
+            if path not in upload.sources:
+                raise CatalogError(f"the server asked for {path!r}, which the manifest does not list")
+            try:
+                _call("PUT", f"{root}/files/{urllib.parse.quote(path)}", token=token,
+                      body=upload.sources[path].read_bytes(), content_type="application/octet-stream")
+            except PushError as e:
+                raise _noted(e, f"at {path}") from e
+        _call("POST", f"{root}/finish", token=token)
+    except CatalogError as e:
+        raise _noted(e, f"version {upload.manifest['version']} of {handle}/{name} is left unfinished; push again "
+                        f"with the next version (or finish it later)") from e
 
 
 # ---- records ----
@@ -435,7 +468,13 @@ def _push_record(base, token, handle, name, version, path: Path, *, private, mac
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,37}[a-z0-9]", product):
             raise InputError(f"the machine {product!r} cannot be a catalog name (a-z 0-9 -, 2 to 39 characters)")
         folder = _machine_folder(product, machine_dir, len(local) == 1)
-        names[product], uploaded = _companion(base, token, handle, product, folder, work=work / f"m{i}", log=log)
+        try:
+            names[product], uploaded = _companion(base, token, handle, product, folder, work=work / f"m{i}",
+                                                  log=log)
+        except CatalogError as e:
+            done = ", ".join(companions) or "none"
+            raise _noted(e, f"the machine {handle}/{product} failed; companions finished: {done}; "
+                            f"the record was not uploaded") from e
         if uploaded:
             companions.append(names[product])
     for d in devices:
@@ -451,10 +490,12 @@ def _push_record(base, token, handle, name, version, path: Path, *, private, mac
 # ---- push ----
 
 def push(ref: str, path: Path, *, private: bool = True, category: str | None = None, tags=(),
-         machine_dir: Path | None = None, base: str | None = None, log=print) -> PushResult:
+         machine_dir: Path | None = None, base: str | None = None, log=print,
+         interactive: bool = True) -> PushResult:
     """Upload a machine folder, an object (mesh + object.json) or a record to ``ref`` (handle/name[:version]).
 
-    Without a version it is ``1``, or one more than the highest number already there.
+    Without a version it is ``1``, or one more than the highest number already there. ``interactive=False``
+    (the MCP tool) never starts a login: without a usable kept token it raises PushError("signin").
     """
     base = (base or catalog._base()).rstrip("/")
     path = Path(path).expanduser()
@@ -464,7 +505,7 @@ def push(ref: str, path: Path, *, private: bool = True, category: str | None = N
     kind = _kind_of(path)
     if kind != "record":
         _checked(path)  # before signing in: a folder that cannot go up should not ask for a code
-    token, mine = _signed_in(base, log)
+    token, mine = _signed_in(base, log, interactive)
     if handle != mine:
         raise InputError(f"you can push only under your handle {mine!r}, not {handle!r}")
     if version == "latest":

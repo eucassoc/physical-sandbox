@@ -273,3 +273,63 @@ def test_the_mcp_tool_asks_for_psbx_login_first_then_pushes_privately(mini, cata
     out = json.loads(ps_catalog_push("ada/mini:1", str(mini)))
     assert out["ref"] == "ada/mini:1" and out["companions"] == [] and out["private"] is True
     assert catalog_server.items[("ada", "mini")]["visibility"] == "private"
+
+
+def _keep_token(home, base, token):
+    kept = home / ".config" / "physical-sandbox" / "ps-com-token.json"
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    kept.write_text(json.dumps({"base": base, "token": token, "expiresAt": future}))
+    return kept
+
+
+def test_the_mcp_tool_answers_signin_when_the_kept_token_is_rejected(home, mini, catalog_server, monkeypatch):
+    from physical_sandbox.mcp.server import ps_catalog_push
+
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
+    kept = _keep_token(home, catalog_server.url, "revoked")
+    out = json.loads(ps_catalog_push("ada/mini:1", str(mini)))
+    assert out["error"] == "signin" and "psbx login" in out["message"]
+    assert catalog_server.vr_starts == 0
+    assert not any(p.startswith("/api/vr/") for _, p in catalog_server.calls)
+    assert not kept.exists()  # the rejected token is dropped
+
+
+def test_a_failed_file_says_the_version_is_left_unfinished(mini, catalog_server):
+    catalog_server.fail_put = "bad-hash"
+    with pytest.raises(CatalogError) as e:
+        push("ada/mini:3", mini, base=catalog_server.url, log=quiet)
+    assert e.value.code == "bad-hash"
+    assert "version 3 of ada/mini is left unfinished; push again with the next version" in str(e.value)
+
+
+def test_a_failed_companion_says_what_finished_and_that_the_record_did_not_go_up(tmp_path, catalog_server):
+    machines = tmp_path / "machines"
+    _machine_dir(machines, "aaa")
+    _machine_dir(machines, "bbb")
+    rec = _record(tmp_path / "run.json", ["aaa", "bbb"])
+    real = catalog_server.write
+
+    def failing(method, raw_path, body):  # the second machine's files fail
+        if method == "PUT" and "/bbb/" in raw_path and "/files/" in raw_path:
+            return catalog_server.reply(400, {"error": "bad-size"})
+        return real(method, raw_path, body)
+
+    catalog_server.write = failing
+    with pytest.raises(CatalogError) as e:
+        push("ada/run:1", rec, machine_dir=machines, base=catalog_server.url, log=quiet)
+    text = str(e.value)
+    assert "ada/bbb failed" in text and "companions finished: ada/aaa:1" in text
+    assert "the record was not uploaded" in text and ("ada", "run") not in catalog_server.items
+
+
+def test_a_link_to_a_file_outside_the_folder_is_left_out(tmp_path, mini, catalog_server):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not for the catalog\n")
+    (mini / "secret.txt").symlink_to(secret)
+    (mini / "notes-link.txt").symlink_to(mini / "product.json")  # a link inside the folder stays
+    said = []
+    push("ada/mini:1", mini, base=catalog_server.url, log=said.append)
+    paths = {f["path"] for f in catalog_server.items[("ada", "mini")]["versions"]["1"]["manifest"]["files"]}
+    assert "secret.txt" not in paths and "notes-link.txt" in paths
+    assert any("secret.txt" in s and "outside" in s for s in said)

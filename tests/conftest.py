@@ -58,6 +58,7 @@ class FakeCatalog:
         self.vr_starts = 0
         self.items = {}  # (handle, name) -> {kind, visibility, versions: {version: {...}}}
         self.calls = []
+        self.fail_put = None  # an error code every PUT of a file answers with (400)
 
     def manifest(self):
         files = [{"path": p, "bytes": len(b), "sha256": hashlib.sha256(b).hexdigest()} for p, b in FILES.items()]
@@ -166,6 +167,8 @@ class FakeCatalog:
         if upload is None:
             return self.reply(404, {"error": "not-found"})
         if method == "PUT" and rest[:1] == ["files"]:
+            if self.fail_put:
+                return self.reply(400, {"error": self.fail_put})
             from urllib.parse import unquote
             rel = unquote("/".join(rest[1:]))
             want = {f["path"]: f for f in upload["manifest"]["files"]}.get(rel)

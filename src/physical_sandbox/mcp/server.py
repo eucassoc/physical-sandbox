@@ -190,14 +190,17 @@ def ps_catalog_pull(ref: str) -> str:
 
 
 def ps_catalog_push(ref: str, path: str, private: bool = True) -> str:
-    from .. import catalog
-    from ..push import kept_token, push
+    from ..push import PushError, push
 
-    if kept_token(catalog._base()) is None:  # the code to sign in would not reach the person from here
+    said: list[str] = []
+    try:
+        # never a login from here: the code to enter would not reach the person
+        result = push(ref, Path(path).expanduser(), private=private, log=said.append, interactive=False)
+    except PushError as e:
+        if e.code != "signin":
+            raise
         return _json({"error": "signin", "message": "not signed in to PS.com: run `psbx login` in a terminal once, "
                                                     "then ask again"})
-    said: list[str] = []
-    result = push(ref, Path(path).expanduser(), private=private, log=said.append)
     return _json({"ref": result.ref, "bytes": result.bytes, "companions": result.companions,
                   "private": private, "log": said})
 

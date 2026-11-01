@@ -202,7 +202,8 @@ def ps_catalog_push(ref: str, path: str, private: bool = True) -> str:
         return _json({"error": "signin", "message": "not signed in to PS.com: run `psbx login` in a terminal once, "
                                                     "then ask again"})
     return _json({"ref": result.ref, "bytes": result.bytes, "companions": result.companions,
-                  "private": private, "log": said})
+                  "private": result.visibility == "private", "visibility": result.visibility,
+                  "log": said})
 
 
 def ps_machine_check(path: str) -> str:

@@ -42,6 +42,8 @@ class PushResult:
     ref: str  # handle/name:version as uploaded
     bytes: int
     companions: list[str] = field(default_factory=list)  # machines uploaded along with a record
+    visibility: str = "private"  # what the item really is: a new version inherits an existing item's
+    companion_visibility: dict = field(default_factory=dict)  # companion ref -> its real visibility
 
 
 class PushError(CatalogError):
@@ -206,6 +208,18 @@ def _item(base: str, token: str, handle: str, name: str) -> dict | None:
         if e.status == 404:
             return None
         raise
+
+
+def _real_visibility(item: dict | None, private: bool, what: str, log) -> str:
+    """The visibility the upload will really have: an existing item keeps its own (the server applies
+    ``?visibility`` only when it creates the item). Warns when that is not what was asked for."""
+    asked = "private" if private else "public"
+    has = ((item or {}).get("item") or {}).get("visibility")
+    if has not in ("private", "public") or has == asked:
+        return asked
+    log(f"warning: {what} is already {has}; the new version is {has} too (asked for {asked}). "
+        f"Change it on /catalog/me")
+    return has
 
 
 def _numbers(item: dict | None) -> list[int]:
@@ -428,8 +442,8 @@ def _machine_folder(product: str, machine_dir: Path | None, only_one: bool) -> P
                      f"--machine-dir で機体の URDF の場所を指定してください")
 
 
-def _companion(base, token, handle, product, folder, *, work: Path, log) -> tuple[str, bool]:
-    """(the catalog name for ``product``, whether it was uploaded now)."""
+def _companion(base, token, handle, product, folder, *, work: Path, log) -> tuple[str, bool, str]:
+    """(the catalog name for ``product``, whether it was uploaded now, its real visibility)."""
     item = _item(base, token, handle, product)
     if item is not None:
         latest = _latest(item)
@@ -439,14 +453,15 @@ def _companion(base, token, handle, product, folder, *, work: Path, log) -> tupl
             theirs = {(f.get("path"), str(f.get("sha256", "")).lower()) for f in there.get("files") or []
                       if f.get("path") != there.get("bundle", _BUNDLE)}
             if theirs == mine.content():
-                return f"{handle}/{product}:{latest}", False
+                return f"{handle}/{product}:{latest}", False, _real_visibility(item, True, "", lambda _: None)
             work = work / "next"
     version = _next_version(item)
     ref = f"{handle}/{product}:{version}"
     log(f"{ref} として非公開で一緒に上げます")
     upload = _machine_upload(folder, handle, product, version, category=None, tags=(), work=work, log=log)
+    shown = _real_visibility(item, True, f"{handle}/{product}", log)
     _send(base, token, upload, private=True)
-    return ref, True
+    return ref, True, shown
 
 
 def _push_record(base, token, handle, name, version, path: Path, *, private, machine_dir, work, log):
@@ -463,13 +478,13 @@ def _push_record(base, token, handle, name, version, path: Path, *, private, mac
     local = list(dict.fromkeys(d["product"] for d in devices
                                if isinstance(d, dict) and isinstance(d.get("product"), str)
                                and d["product"] and "/" not in d["product"]))
-    names, companions = {}, []
+    names, companions, seen = {}, [], {}
     for i, product in enumerate(local):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,37}[a-z0-9]", product):
             raise InputError(f"the machine {product!r} cannot be a catalog name (a-z 0-9 -, 2 to 39 characters)")
         folder = _machine_folder(product, machine_dir, len(local) == 1)
         try:
-            names[product], uploaded = _companion(base, token, handle, product, folder, work=work / f"m{i}",
+            names[product], uploaded, how = _companion(base, token, handle, product, folder, work=work / f"m{i}",
                                                   log=log)
         except CatalogError as e:
             done = ", ".join(companions) or "none"
@@ -477,6 +492,7 @@ def _push_record(base, token, handle, name, version, path: Path, *, private, mac
                             f"the record was not uploaded") from e
         if uploaded:
             companions.append(names[product])
+            seen[names[product]] = how
     for d in devices:
         if isinstance(d, dict) and d.get("product") in names:
             d["product"] = names[d["product"]]
@@ -484,7 +500,7 @@ def _push_record(base, token, handle, name, version, path: Path, *, private, mac
     visibility = "private" if private else "public"
     _call("PUT", f"{base}/api/catalog/{handle}/{name}/{version}/record?visibility={visibility}", token=token,
           body=body, content_type="application/json")
-    return len(body), companions
+    return len(body), companions, seen
 
 
 # ---- push ----
@@ -508,18 +524,20 @@ def push(ref: str, path: Path, *, private: bool = True, category: str | None = N
     token, mine = _signed_in(base, log, interactive)
     if handle != mine:
         raise InputError(f"you can push only under your handle {mine!r}, not {handle!r}")
+    existing = _item(base, token, handle, name)
     if version == "latest":
-        version = _next_version(_item(base, token, handle, name))
+        version = _next_version(existing)
+    shown = _real_visibility(existing, private, f"{handle}/{name}", log)
     tags = list(tags or ())
     with tempfile.TemporaryDirectory(prefix="psbx-push-") as tmp:
         work = Path(tmp)
         if kind == "record":
-            size, companions = _push_record(base, token, handle, name, version, path, private=private,
+            size, companions, seen = _push_record(base, token, handle, name, version, path, private=private,
                                             machine_dir=Path(machine_dir).expanduser() if machine_dir else None,
                                             work=work, log=log)
-            return PushResult(f"{handle}/{name}:{version}", size, companions)
+            return PushResult(f"{handle}/{name}:{version}", size, companions, shown, seen)
         build = _object_upload if kind == "object" else _machine_upload
         upload = build(path, handle, name, version, category=category, tags=tags, work=work, log=log,
                        checked=True)
         _send(base, token, upload, private=private)
-        return PushResult(f"{handle}/{name}:{version}", upload.bytes, [])
+        return PushResult(f"{handle}/{name}:{version}", upload.bytes, [], shown)

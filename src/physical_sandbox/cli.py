@@ -318,8 +318,8 @@ def _cmd_push(args) -> int:
             raise CatalogError("taken: その版はあります。版を変えてください") from e
         raise
     for ref in result.companions:
-        print(f"uploaded {ref} (private)")
-    print(f"uploaded {result.ref} ({'public' if args.public else 'private'}, {result.bytes} bytes)")
+        print(f"uploaded {ref} ({result.companion_visibility.get(ref, 'private')})")
+    print(f"uploaded {result.ref} ({result.visibility}, {result.bytes} bytes)")
     return 0
 
 

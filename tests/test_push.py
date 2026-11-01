@@ -333,3 +333,34 @@ def test_a_link_to_a_file_outside_the_folder_is_left_out(tmp_path, mini, catalog
     paths = {f["path"] for f in catalog_server.items[("ada", "mini")]["versions"]["1"]["manifest"]["files"]}
     assert "secret.txt" not in paths and "notes-link.txt" in paths
     assert any("secret.txt" in s and "outside" in s for s in said)
+
+
+def test_a_new_version_of_a_public_item_says_public_and_warns(mini, catalog_server, capsys, monkeypatch):
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
+    login(catalog_server.url, log=quiet)
+    push("ada/mini:1", mini, private=False, base=catalog_server.url, log=quiet)
+    said = []
+    result = push("ada/mini:2", mini, base=catalog_server.url, log=said.append)  # the private default
+    assert result.visibility == "public"
+    assert any("already public" in s for s in said)
+    assert main(["push", "ada/mini:3", str(mini)]) == 0
+    out = capsys.readouterr().out
+    assert "already public" in out and "(public," in out and "(private," not in out
+
+
+def test_a_new_item_keeps_the_flag_without_a_warning(mini, catalog_server):
+    said = []
+    result = push("ada/fresh:1", mini, base=catalog_server.url, log=said.append)
+    assert result.visibility == "private" and not any("already" in s for s in said)
+    assert push("ada/fresh2:1", mini, private=False, base=catalog_server.url, log=quiet).visibility == "public"
+
+
+def test_a_record_version_of_a_public_item_reports_public(tmp_path, catalog_server):
+    machines = tmp_path / "machines"
+    _machine_dir(machines, "mini")
+    rec = _record(tmp_path / "run.json", ["mini"])
+    push("ada/run:1", rec, private=False, machine_dir=machines, base=catalog_server.url, log=quiet)
+    said = []
+    result = push("ada/run:2", rec, machine_dir=machines, base=catalog_server.url, log=said.append)
+    assert result.visibility == "public" and any("already public" in s for s in said)
+    assert result.companion_visibility == {}

@@ -120,6 +120,27 @@ and binary meshes, large meshes thinned to 20,000 triangles. The fields of `prod
 `object.json`, and how the SO-101's grasp was measured, are in [docs/machines.md](docs/machines.md). In Claude
 Desktop the same check is the `ps_machine_check` tool.
 
+## Push to the catalog
+
+```sh
+psbx push <handle>/my-arm:1 my-arm/ --private    # a machine folder: checked, bundled, uploaded
+psbx push <handle>/statue statue.stl --private   # an object (beside its object.json); version 1, then 2, ...
+psbx push <handle>/run-1:1 record.json           # a record (schemaVersion 3), public
+```
+
+The first push signs in: it prints a 6-digit code to enter at `<PS.com>/vr`, and keeps the token in
+`~/.config/physical-sandbox/ps-com-token.json` (mode 0600) until it expires (`psbx login` does only this
+step). You push under your own handle, decided once on PS.com at `/catalog/me`. Without `--private` the item
+is public. A version that is already there is refused (`taken`); without a version, push takes 1, or one
+more than the highest number there.
+
+A record whose devices name a local machine (`"product": "so101"`) takes that machine along: when
+`<handle>/so101` is not in the catalog, it goes up **privately** as `<handle>/so101:1` from
+`~/.cache/physical-sandbox/machines/so101/` or `--machine-dir DIR` (`DIR/so101/`). When it is there and the
+files are the same it is used as it is; when they differ, it goes up as the next version. The uploaded record
+names `<handle>/so101:<version>`; your file is left as it was. In Claude Desktop, `ps_catalog_push` does the
+same (private by default) once `psbx login` has been run in a terminal.
+
 ## Compare two motions
 
 ```sh

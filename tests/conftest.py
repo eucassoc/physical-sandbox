@@ -28,11 +28,20 @@ URDF = """<?xml version="1.0"?>
 """
 
 
+def _version_key(v):
+    return (0, int(v), "") if v.isdigit() else (1, 0, v)
+
+
 FILES = {"mini.urdf": URDF.encode(), "notes.txt": b"two links, one joint\n"}
 
 
 class FakeCatalog:
-    """Serves the catalog API for ``t/mini`` (version 1). ``bad`` corrupts one sha256 in the manifest."""
+    """Serves the catalog API for ``t/mini`` (version 1). ``bad`` corrupts one sha256 in the manifest.
+
+    It also takes uploads: the device-code login (``/api/vr/*``, approved at the first poll), ``/api/handle``,
+    machine/object versions (POST manifest, PUT files, POST finish) and records (PUT .../record), kept in
+    ``items``. Every request is logged in ``calls`` as (method, path with query).
+    """
 
     def __init__(self, bad=False):
         self.latest = "1"
@@ -44,6 +53,11 @@ class FakeCatalog:
         self.headers = []
         self.paths = []
         self.server = None
+        self.handle = "ada"
+        self.token = "tok-1"
+        self.vr_starts = 0
+        self.items = {}  # (handle, name) -> {kind, visibility, versions: {version: {...}}}
+        self.calls = []
 
     def manifest(self):
         files = [{"path": p, "bytes": len(b), "sha256": hashlib.sha256(b).hexdigest()} for p, b in FILES.items()]
@@ -62,6 +76,11 @@ class FakeCatalog:
                 "visibility": "public", "display": {"ja": "ミニ", "en": "Mini arm"}, "tags": ["arm"],
                 "license": "Apache-2.0", "maker": None, "latest_version": self.latest, "updated_at": "2026-11-01"}
         path = path.split("?")[0]
+        parts = path.split("/")
+        if path == "/api/handle":
+            return self.need_auth() or self.reply(200, {"handle": self.handle})
+        if len(parts) >= 5 and parts[:3] == ["", "api", "catalog"] and (parts[3], parts[4]) in self.items:
+            return self.stored_get(parts[3], parts[4], parts[5:])
         if path == "/api/catalog/search":
             return 200, "application/json", json.dumps({"items": [item]}).encode()
         if path == "/api/catalog/t/mini":
@@ -75,24 +94,130 @@ class FakeCatalog:
             return 200, "application/octet-stream", FILES[path[len(prefix):]]
         return 404, "application/json", b'{"error": "not-found"}'
 
+    # ---- the write side ----
+
+    @staticmethod
+    def reply(code, body):
+        return code, "application/json", json.dumps(body).encode()
+
+    def need_auth(self):
+        if self.auth != f"Bearer {self.token}":
+            return self.reply(401, {"error": "signin"})
+        return None
+
+    def stored_get(self, handle, name, rest):
+        item = self.items[(handle, name)]
+        finished = {v: x for v, x in item["versions"].items() if x["finished"]}
+        if not rest:
+            body = {"item": {"handle": handle, "name": name, "kind": item["kind"], "visibility": item["visibility"],
+                             "latest_version": max(finished, key=_version_key) if finished else None},
+                    "versions": [{"version": v, "bytes": x["bytes"], "finished_at": "2026-11-01"}
+                                 for v, x in finished.items()]}
+            return self.reply(200, body)
+        if len(rest) == 2 and rest[1] == "manifest" and rest[0] in finished:
+            return self.reply(200, finished[rest[0]]["manifest"])
+        return self.reply(404, {"error": "not-found"})
+
+    def write(self, method, raw_path, body):
+        path, _, query = raw_path.partition("?")
+        if path == "/api/vr/start" and method == "POST":
+            self.vr_starts += 1
+            return self.reply(200, {"deviceCode": "dev-1", "userCode": "123456"})
+        if path == "/api/vr/poll" and method == "POST":
+            ok = json.loads(body or b"{}").get("deviceCode") == "dev-1"
+            return self.reply(200, {"status": "approved", "token": self.token, "expiresIn": 3600} if ok
+                              else {"status": "expired"})
+        denied = self.need_auth()
+        if denied:
+            return denied
+        parts = path.split("/")
+        if len(parts) < 6 or parts[:3] != ["", "api", "catalog"]:
+            return self.reply(404, {"error": "not-found"})
+        handle, name, version, rest = parts[3], parts[4], parts[5], parts[6:]
+        if handle != self.handle:
+            return self.reply(404, {"error": "not-found"})
+        visibility = "public" if "visibility=public" in query else "private"
+        item = self.items.get((handle, name))
+        if method == "POST" and not rest:
+            manifest = json.loads(body)
+            if item is not None and item["kind"] != manifest["kind"]:
+                return self.reply(409, {"error": "taken"})
+            if item is not None and item["versions"].get(version, {}).get("finished"):
+                return self.reply(409, {"error": "taken"})
+            item = self.items.setdefault((handle, name), {"kind": manifest["kind"], "visibility": visibility,
+                                                          "versions": {}})
+            item["versions"][version] = {"manifest": manifest, "files": {}, "finished": False,
+                                         "bytes": sum(f["bytes"] for f in manifest["files"])}
+            return self.reply(201, {"name": manifest["name"], "version": version,
+                                    "upload": [f["path"] for f in manifest["files"]]})
+        if method == "PUT" and rest == ["record"]:
+            if item is not None and item["kind"] != "record":
+                return self.reply(409, {"error": "not-a-record"})
+            try:
+                record = json.loads(body)
+            except ValueError:
+                return self.reply(400, {"error": "bad-record"})
+            item = self.items.setdefault((handle, name), {"kind": "record", "visibility": visibility,
+                                                          "versions": {}})
+            item["versions"][version] = {"record": record, "finished": True, "bytes": len(body),
+                                         "manifest": {"files": []}}
+            return self.reply(200, {"name": f"{handle}/{name}", "version": version})
+        upload = (item or {}).get("versions", {}).get(version)
+        if upload is None:
+            return self.reply(404, {"error": "not-found"})
+        if method == "PUT" and rest[:1] == ["files"]:
+            from urllib.parse import unquote
+            rel = unquote("/".join(rest[1:]))
+            want = {f["path"]: f for f in upload["manifest"]["files"]}.get(rel)
+            if want is None:
+                return self.reply(400, {"error": "bad-path"})
+            if hashlib.sha256(body).hexdigest() != want["sha256"]:
+                return self.reply(400, {"error": "bad-hash"})
+            upload["files"][rel] = body
+            return self.reply(200, {"ok": True})
+        if method == "POST" and rest == ["finish"]:
+            if set(upload["files"]) != {f["path"] for f in upload["manifest"]["files"]}:
+                return self.reply(400, {"error": "incomplete"})
+            upload["finished"] = True
+            return self.reply(200, {"ok": True})
+        return self.reply(404, {"error": "not-found"})
+
     def start(self):
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                outer.hits += 1
-                outer.headers.append(dict(self.headers))
-                outer.paths.append(self.path)
-                code, ctype, body = outer.route(self.path)
+            def answer(self, code, ctype, body):
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
 
+            def do_GET(self):
+                outer.hits += 1
+                outer.headers.append(dict(self.headers))
+                outer.paths.append(self.path)
+                outer.calls.append(("GET", self.path))
+                outer.auth = self.headers.get("Authorization")
+                self.answer(*outer.route(self.path))
+
+            def _write(self, method):
+                outer.headers.append(dict(self.headers))
+                outer.calls.append((method, self.path))
+                outer.auth = self.headers.get("Authorization")
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.answer(*outer.write(method, self.path, body))
+
+            def do_POST(self):
+                self._write("POST")
+
+            def do_PUT(self):
+                self._write("PUT")
+
             def log_message(self, *a):
                 pass
 
+        self.auth = None
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self.server.server_address[1]
         threading.Thread(target=self.server.serve_forever, daemon=True).start()

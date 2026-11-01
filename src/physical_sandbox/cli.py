@@ -306,6 +306,32 @@ def _cmd_pull(args) -> int:
     return 0
 
 
+def _cmd_push(args) -> int:
+    from .errors import CatalogError
+    from .push import push
+
+    try:
+        result = push(args.ref, Path(args.path), private=args.private, category=args.category, tags=args.tag or [],
+                      machine_dir=Path(args.machine_dir) if args.machine_dir else None, log=print)
+    except CatalogError as e:
+        if getattr(e, "code", None) == "taken":
+            raise CatalogError("taken: その版はあります。版を変えてください") from e
+        raise
+    for ref in result.companions:
+        print(f"uploaded {ref} (private)")
+    print(f"uploaded {result.ref} ({'private' if args.private else 'public'}, {result.bytes} bytes)")
+    return 0
+
+
+def _cmd_login(args) -> int:
+    from . import catalog
+    from .push import login, token_file
+
+    login(catalog._base(), log=print)
+    print(f"signed in; the token is kept in {token_file()}")
+    return 0
+
+
 def _cmd_catalog_search(args) -> int:
     from . import catalog
 
@@ -396,6 +422,22 @@ def _parser() -> argparse.ArgumentParser:
     pl.add_argument("ref")
     pl.add_argument("--force", action="store_true", help="download again even if it is cached")
     pl.set_defaults(run=_cmd_pull)
+
+    pu = sub.add_parser("push", help="upload a machine folder, an object (mesh + object.json) or a record to the "
+                                     "catalog as handle/name[:version]")
+    pu.add_argument("ref", help="handle/name[:version]; without a version: 1, or one more than the highest")
+    pu.add_argument("path", help="the machine folder (or its URDF), the object's folder or mesh, or a record .json")
+    pu.add_argument("--private", action="store_true", help="only you can see it (default: public)")
+    pu.add_argument("--category", help="arm, mobile, humanoid, quadruped, drone, end-effector, vehicle, fixture or "
+                                       "figure (default: the one in product.json / object.json)")
+    pu.add_argument("--tag", nargs="+", action="extend", metavar="T", help="tags to add")
+    pu.add_argument("--machine-dir", help="for a record: where the machines it names are (DIR/<product>/), when "
+                                          "the catalog does not have them (default: "
+                                          "~/.cache/physical-sandbox/machines/)")
+    pu.set_defaults(run=_cmd_push)
+
+    lg = sub.add_parser("login", help="sign in to PS.com with a code entered at /vr (push does this when needed)")
+    lg.set_defaults(run=_cmd_login)
 
     cg = sub.add_parser("catalog", help="catalog tools")
     csub = cg.add_subparsers(dest="catalog_command", required=True)

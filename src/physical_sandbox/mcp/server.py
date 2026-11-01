@@ -189,6 +189,19 @@ def ps_catalog_pull(ref: str) -> str:
     return _json({"dir": str(d), "urdf": urdf})
 
 
+def ps_catalog_push(ref: str, path: str, private: bool = True) -> str:
+    from .. import catalog
+    from ..push import kept_token, push
+
+    if kept_token(catalog._base()) is None:  # the code to sign in would not reach the person from here
+        return _json({"error": "signin", "message": "not signed in to PS.com: run `psbx login` in a terminal once, "
+                                                    "then ask again"})
+    said: list[str] = []
+    result = push(ref, Path(path).expanduser(), private=private, log=said.append)
+    return _json({"ref": result.ref, "bytes": result.bytes, "companions": result.companions,
+                  "private": private, "log": said})
+
+
 def ps_machine_check(path: str) -> str:
     from ..machine_tools import check
 
@@ -598,6 +611,9 @@ server.tool(description="Search the PS.com catalog of machines and other items b
     ps_catalog_search)
 server.tool(description="Download a catalog item (handle/name[:version]) into the local cache; gives its folder "
                         "and its URDF file.")(ps_catalog_pull)
+server.tool(description="Upload a machine folder, an object (one mesh and object.json) or a record (.json) to the "
+                        "PS.com catalog as handle/name[:version], private unless private is false. A record's "
+                        "machines that the catalog does not have go up with it, privately.")(ps_catalog_push)
 server.tool(description="Check a machine folder (URDF, meshes, product.json, profile.json) or an object (one mesh "
                         "and object.json) before pushing it to the catalog: ok, and one line per check.")(
     ps_machine_check)

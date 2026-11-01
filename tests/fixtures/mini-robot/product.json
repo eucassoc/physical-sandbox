@@ -1,0 +1,10 @@
+{
+  "id": "mini",
+  "displayName": {"ja": "小さな腕", "en": "Mini arm"},
+  "licenseId": "Apache-2.0",
+  "maker": "physical-sandbox tests",
+  "generic": true,
+  "class": "mover",
+  "category": "arm",
+  "mover": {"robotId": "mini", "speedMps": 0.1}
+}

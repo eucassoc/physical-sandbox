@@ -106,6 +106,20 @@ Files are checked against the manifest's sha256 and cached under `~/.cache/physi
 (`$PS_CACHE_DIR`); a second `pull` of the same version does not touch the network. `$PS_CATALOG_URL` points
 at another catalog server.
 
+## Get your own machine ready for the catalog
+
+```sh
+psbx machine init my-arm/     # product.json and profile.json templates beside the URDF
+psbx machine check my-arm/    # one line per check: the URDF reads, the meshes are there, the names and
+                              # licence are filled in, wheels are continuous joints
+psbx machine init statue.glb  # a mesh-only object: object.json (with its unit, m or mm)
+```
+
+The browser draws a display bundle made from the URDF (`physical_sandbox.bundle.make_bundle`): `bundle.json`
+and binary meshes, large meshes thinned to 20,000 triangles. The fields of `product.json`, `profile.json` and
+`object.json`, and how the SO-101's grasp was measured, are in [docs/machines.md](docs/machines.md). In Claude
+Desktop the same check is the `ps_machine_check` tool.
+
 ## Compare two motions
 
 ```sh

@@ -319,6 +319,27 @@ def _cmd_catalog_search(args) -> int:
     return 0
 
 
+def _cmd_machine_check(args) -> int:
+    from .machine_tools import check
+
+    result = check(Path(args.path))
+    for ok, text in result.items:
+        print(f"{'ok ' if ok else 'NG '} {text}")
+    print("ready to push" if result.ok else "not ready: fix the NG lines")
+    return 0 if result.ok else 1
+
+
+def _cmd_machine_init(args) -> int:
+    from .machine_tools import init
+
+    written = init(Path(args.path))
+    for path in written:
+        print(f"wrote {path}: fill in every \"<fill>\"")
+    if not written:
+        print("nothing written: the templates are there already")
+    return 0
+
+
 def _cmd_mcp(args) -> int:
     try:
         from .mcp.server import main as serve
@@ -385,6 +406,15 @@ def _parser() -> argparse.ArgumentParser:
     cs.add_argument("--kind")
     cs.add_argument("--json", action="store_true", help="print the items as received")
     cs.set_defaults(run=_cmd_catalog_search)
+
+    mc = sub.add_parser("machine", help="get a machine (URDF folder) or an object (one mesh) ready for the catalog")
+    msub = mc.add_subparsers(dest="machine_command", required=True)
+    mk = msub.add_parser("check", help="say line by line whether the folder can be pushed (exit 1 when not)")
+    mk.add_argument("path", help="the machine folder (or its URDF), or an object's folder or mesh file")
+    mk.set_defaults(run=_cmd_machine_check)
+    mi = msub.add_parser("init", help="write product.json and profile.json (or object.json) templates")
+    mi.add_argument("path", help="the machine folder (or its URDF), or an object's mesh file")
+    mi.set_defaults(run=_cmd_machine_init)
 
     m = sub.add_parser("mcp", help="serve the MCP tools on stdio")
     m.set_defaults(run=_cmd_mcp)

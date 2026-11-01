@@ -1,0 +1,9 @@
+{
+  "vendor": "physical-sandbox tests",
+  "licenseId": "Apache-2.0",
+  "urdfSourceUrl": "",
+  "totalMassKg": 0.6,
+  "locomotion": "Static",
+  "chains": [{"name": "arm", "baseLink": "base_link", "tipLink": "arm_link", "jointNames": ["pan"]}],
+  "motion": {"_velSource": "made up for the tests", "maxJointVel": [2.0], "maxJointAcc": [5.0]}
+}

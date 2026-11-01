@@ -189,6 +189,13 @@ def ps_catalog_pull(ref: str) -> str:
     return _json({"dir": str(d), "urdf": urdf})
 
 
+def ps_machine_check(path: str) -> str:
+    from ..machine_tools import check
+
+    result = check(Path(path).expanduser())
+    return _json({"ok": result.ok, "items": [{"ok": ok, "text": text} for ok, text in result.items]})
+
+
 @apps.tool(resource_uri=URI, description=(
     "Open a screen inside the chat to fix the floor on a photo: the photo with four orange corners the person "
     "can drag, and the floor solved from them drawn as a 1 m grid. imagePath is a photo file; edgesM the floor's "
@@ -591,6 +598,9 @@ server.tool(description="Search the PS.com catalog of machines and other items b
     ps_catalog_search)
 server.tool(description="Download a catalog item (handle/name[:version]) into the local cache; gives its folder "
                         "and its URDF file.")(ps_catalog_pull)
+server.tool(description="Check a machine folder (URDF, meshes, product.json, profile.json) or an object (one mesh "
+                        "and object.json) before pushing it to the catalog: ok, and one line per check.")(
+    ps_machine_check)
 server.tool(description="Whether the site in siteDir is decided (confirmed by the person), with its residual in "
                         "pixels, its object names and whether its lengths are measured or estimated.")(ps_site_status)
 

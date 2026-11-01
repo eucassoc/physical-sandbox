@@ -97,7 +97,7 @@ def test_tool_list_marks_the_screen_and_hides_the_screen_only_tools(env):
     tools = {t["name"]: t for t in run(go())}
     assert set(tools) == {"ps_fit_floor", "ps_spike_image", "ps_floor_solve", "ps_objects_propose",
                           "ps_site_decide", "ps_site_status", "ps_compare", "ps_model_part", "ps_compare_part",
-                          "ps_objects_part", "ps_catalog_search", "ps_catalog_pull"}
+                          "ps_objects_part", "ps_catalog_search", "ps_catalog_pull", "ps_machine_check"}
     for name in ("ps_fit_floor", "ps_spike_image", "ps_floor_solve", "ps_objects_propose", "ps_site_decide",
                  "ps_objects_part"):
         assert tools[name]["_meta"]["ui"]["resourceUri"] == "ui://physical-sandbox/fit-floor.html"
@@ -106,6 +106,25 @@ def test_tool_list_marks_the_screen_and_hides_the_screen_only_tools(env):
     for name in ("ps_fit_floor", "ps_objects_propose"):
         assert "model" in (tools[name]["_meta"]["ui"].get("visibility") or ["model"])  # the agent can call it
     assert "ui" not in (tools["ps_site_status"].get("_meta") or {})
+
+
+def test_machine_check_over_stdio_says_what_is_missing(env, tmp_path):
+    import shutil
+    from pathlib import Path
+
+    mini = tmp_path / "mini"
+    shutil.copytree(Path(__file__).parent / "fixtures" / "mini-robot", mini)
+
+    async def go():
+        async with started(env) as client:
+            green = json.loads(text(await client.call_tool("ps_machine_check", {"path": str(mini)})))
+            (mini / "product.json").unlink()
+            red = json.loads(text(await client.call_tool("ps_machine_check", {"path": str(mini)})))
+            return green, red
+    green, red = run(go())
+    assert green["ok"] is True and all(i["ok"] for i in green["items"])
+    assert red["ok"] is False
+    assert any(not i["ok"] and "product.json" in i["text"] for i in red["items"])
 
 
 def test_no_tool_input_schema_has_ref_or_prefix_items(env):

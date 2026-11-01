@@ -103,15 +103,58 @@ def test_dimensions_are_measured_from_the_meshes_at_rest(tmp_path):
     assert data["dimensions"] == {"lengthM": 0.1, "widthM": 0.04, "heightM": 0.06}
 
 
-def test_a_30000_face_mesh_is_thinned_to_at_most_20000(tmp_path):
-    n = sphere_stl(tmp_path / "ball.stl")
-    assert n == 30000
-    result = make_bundle(one_link_urdf(tmp_path, "ball.stl"), product={}, profile=None, name="ball",
+def plate_stl(path, n=123, size=0.1):
+    """A flat binary STL plate, an n x n grid of squares split in two (30,258 triangles by default)."""
+    xs = np.linspace(0, size, n + 1)
+    tris = []
+    for i in range(n):
+        for j in range(n):
+            a, b, c, d = ([xs[i + di], xs[j + dj], 0.0] for di, dj in ((0, 0), (1, 0), (1, 1), (0, 1)))
+            tris += [(a, b, c), (a, c, d)]
+    rec = np.zeros(len(tris), [("n", "<f4", 3), ("v", "<f4", (3, 3)), ("a", "<u2")])
+    rec["v"] = np.array(tris, "<f4")
+    path.write_bytes(bytes(80) + len(tris).to_bytes(4, "little") + rec.tobytes())
+    return len(tris)
+
+
+def _bundle_one(tmp_path, stl_name):
+    result = make_bundle(one_link_urdf(tmp_path, stl_name), product={}, profile=None, name="one",
                          out_dir=tmp_path / "out")
     _, _, pos, idx = _rbm1(result.mesh_paths[0])
-    assert 0 < len(idx) // 3 <= MAX_FACES
-    assert np.allclose(np.linalg.norm(pos, axis=1).max(), 0.1, atol=0.01)  # still the same ball
+    return result, pos, len(idx) // 3
+
+
+def test_a_30000_face_mesh_is_thinned_to_at_most_20000(tmp_path):
+    assert plate_stl(tmp_path / "plate.stl") > 30000
+    result, pos, faces = _bundle_one(tmp_path, "plate.stl")
+    assert 0 < faces <= MAX_FACES
+    assert np.allclose(pos.max(0), [0.1, 0.1, 0.0], atol=0.003)  # still the same plate
     assert any("thinned" in w for w in result.warnings)
+
+
+def test_a_mesh_just_over_the_limit_keeps_most_of_its_faces(tmp_path):
+    assert sphere_stl(tmp_path / "ball.stl", stacks=71) == 21000
+    _, pos, faces = _bundle_one(tmp_path, "ball.stl")
+    assert 15000 < faces <= MAX_FACES
+    assert np.allclose(np.linalg.norm(pos, axis=1).max(), 0.1, atol=0.001)
+
+
+def test_thinning_stops_at_64_cubes_even_when_still_over(tmp_path):
+    # a 30,000-face sphere spreads its vertices evenly: at 64 cubes along its side it still has over 20,000
+    assert sphere_stl(tmp_path / "ball.stl") == 30000
+    result, _, faces = _bundle_one(tmp_path, "ball.stl")
+    assert MAX_FACES < faces < 30000
+    assert any("still over" in w for w in result.warnings)
+
+
+def test_a_mesh_at_the_limit_is_left_untouched(tmp_path):
+    from physical_sandbox.bundle import Mesh, to_binary
+
+    n = sphere_stl(tmp_path / "ball.stl", slices=100, stacks=101)
+    assert n == MAX_FACES
+    result, _, faces = _bundle_one(tmp_path, "ball.stl")
+    assert faces == MAX_FACES and not result.warnings
+    assert result.mesh_paths[0].read_bytes() == to_binary(Mesh(*read_stl(tmp_path / "ball.stl")))
 
 
 def test_decimate_drops_faces_that_collapse():

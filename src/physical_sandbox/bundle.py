@@ -20,8 +20,10 @@ RBM1, little-endian throughout::
 Every array starts on a multiple of 4, so the browser maps typed arrays straight onto the buffer.
 
 A mesh with more than ``MAX_FACES`` triangles is thinned by vertex clustering: vertices are snapped to a grid of
-cells 1/64 of the mesh's bounding box along each side, those in one cell merge into their mean, and triangles
-that collapse are dropped. If that is still too many the grid is halved until it is not.
+cubes, those in one cube merge into their mean, and triangles that collapse are dropped. The finest grid that
+gets the mesh under ``MAX_FACES`` is used: it starts at 1024 cubes along the mesh's longest side and halves
+while the result is still over, but never goes coarser than 64 (a mesh still over then stays over). A mesh at or
+under ``MAX_FACES`` is left exactly as it is.
 """
 from __future__ import annotations
 
@@ -44,7 +46,8 @@ MAGIC = b"RBM1"
 HAS_UV = 1
 HAS_NORMAL = 2
 MAX_FACES = 20_000
-GRID = 64
+GRID_FINEST = 1024  # cubes along the longest side the thinning starts from
+GRID_COARSEST = 64  # and never goes below
 
 COLLADA = "http://www.collada.org/2005/11/COLLADASchema"
 _NS = {"c": COLLADA}
@@ -311,22 +314,21 @@ def bake_scale(mesh: Mesh, scale) -> Mesh:
 def decimate(positions, faces, *, max_faces: int = MAX_FACES, uvs=None, normals=None):
     """Thin a mesh to at most ``max_faces`` triangles by vertex clustering.
 
-    Returns (positions, faces, (uvs, normals)). The grid starts at 1/64 of the bounding box (64 cells along each
-    side) and halves until the triangles fit. With UVs, vertices merge only when their UVs fall in the same 1/64
-    square too, so a texture seam stays a seam.
+    Returns (positions, faces, (uvs, normals)). The grid starts at 1024 cubes along the longest side and halves
+    while the result is over ``max_faces``, stopping at 64 even if it is still over. With UVs, vertices merge only
+    when their UVs also fall in the same square of the same grid, so a texture seam stays a seam.
     """
     positions = np.asarray(positions, float)
     faces = np.asarray(faces, np.int64)
     if len(faces) <= max_faces:
         return positions, faces, (uvs, normals)
     lo = positions.min(0)
-    extent = positions.max(0) - lo
-    extent = np.where(extent > 0, extent, 1.0)  # a flat mesh: one cell across its thin axis
-    divisions = GRID
+    extent = float((positions.max(0) - lo).max()) or 1.0
+    divisions = GRID_FINEST
     while True:
-        key = np.minimum(np.floor((positions - lo) / extent * divisions), divisions - 1).astype(np.int64)
+        key = np.floor((positions - lo) / extent * divisions).astype(np.int64)
         if uvs is not None:
-            key = np.hstack([key, np.floor(np.asarray(uvs) * GRID).astype(np.int64)])
+            key = np.hstack([key, np.floor(np.asarray(uvs) * divisions).astype(np.int64)])
         _, inverse = np.unique(key, axis=0, return_inverse=True)
         inverse = inverse.reshape(-1)
         f = inverse[faces]
@@ -334,7 +336,7 @@ def decimate(positions, faces, *, max_faces: int = MAX_FACES, uvs=None, normals=
         if len(f):
             _, keep = np.unique(np.sort(f, axis=1), axis=0, return_index=True)
             f = f[np.sort(keep)]
-        if len(f) <= max_faces or divisions <= 1:
+        if len(f) <= max_faces or divisions <= GRID_COARSEST:
             break
         divisions //= 2
     n = int(inverse.max()) + 1
@@ -571,7 +573,8 @@ def make_bundle(urdf_path: Path, *, product: dict, profile: dict | None, name: s
                     before = len(mesh.faces)
                     p, f, (uv, nr) = decimate(mesh.positions, mesh.faces, uvs=mesh.uvs, normals=mesh.normals)
                     mesh = Mesh(p, f, uv, nr, mesh.texture)
-                    warnings.append(f"{source.name}: thinned from {before} to {len(f)} triangles")
+                    note = "" if len(f) <= MAX_FACES else f" (still over {MAX_FACES} at the coarsest grid)"
+                    warnings.append(f"{source.name}: thinned from {before} to {len(f)} triangles{note}")
                 base = "assets/" + _mesh_key(ref) + _scale_suffix(scale)
                 label, n = base, 1
                 while label in taken:

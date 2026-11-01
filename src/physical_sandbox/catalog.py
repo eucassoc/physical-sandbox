@@ -7,6 +7,7 @@ cache never holds a half-written version. Standard library only.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -18,11 +19,15 @@ from pathlib import Path
 
 from .errors import CatalogError, InputError
 
-BASE = os.environ.get("PS_CATALOG_URL", "https://physicalsandbox.com")
+BASE = os.environ.get("PS_CATALOG_URL", "https://physicalsandbox.com").rstrip("/")
 _SLUG = r"[a-z0-9](?:[a-z0-9-]{1,37}[a-z0-9])?"
 _VERSION = r"[a-z0-9][a-z0-9.-]{0,31}"
 _REF = re.compile(rf"^({_SLUG})/({_SLUG})(?::({_VERSION}))?$")
 _TIMEOUT = 30
+
+
+class _Offline(CatalogError):
+    """The server could not be reached or the transfer broke (as opposed to the server saying no)."""
 
 
 def cache_root() -> Path:
@@ -51,6 +56,8 @@ def _get(url: str) -> bytes:
         except Exception:  # noqa: BLE001 - the body is only a hint
             pass
         raise CatalogError(f"{url}: HTTP {e.code} {code}".strip()) from e
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+        raise _Offline(f"{url}: {getattr(e, 'reason', None) or e}") from e
 
 
 def _get_json(url: str):
@@ -61,13 +68,11 @@ def _get_json(url: str):
 
 
 def search(q: str = "", *, category=None, tag=None, kind=None, base: str | None = None) -> list[dict]:
-    base = base or BASE
+    base = (base or BASE).rstrip("/")
     params = {k: v for k, v in (("q", q), ("category", category), ("tag", tag), ("kind", kind)) if v}
     url = f"{base}/api/catalog/search?{urllib.parse.urlencode(params)}"
     try:
         return _get_json(url)["items"]
-    except urllib.error.URLError as e:
-        raise CatalogError(f"{base}: {e.reason}") from e
     except (KeyError, TypeError) as e:
         raise CatalogError(f"{url}: no items in the answer") from e
 
@@ -78,8 +83,8 @@ def _complete(d: Path) -> bool:
         return False
     try:
         files = json.loads(mf.read_text())["files"]
-        return all((d / f["path"]).is_file() for f in files)
-    except (ValueError, KeyError, TypeError, OSError):
+        return all((d / _safe_rel(f["path"])).is_file() for f in files)
+    except (ValueError, KeyError, TypeError, OSError, CatalogError):
         return False
 
 
@@ -91,6 +96,8 @@ def cached(ref: str) -> Path | None:
         try:
             version = (base / "latest").read_text().strip()
         except OSError:
+            return None
+        if not re.fullmatch(_VERSION, version):
             return None
     d = base / version
     return d if _complete(d) else None
@@ -106,20 +113,22 @@ def _safe_rel(path: str) -> str:
 def _resolve_latest(handle: str, name: str, base: str) -> str:
     try:
         v = _get_json(f"{base}/api/catalog/{handle}/{name}")["item"]["latest_version"]
-    except urllib.error.URLError as e:
+    except _Offline as e:
         c = cached(f"{handle}/{name}")
         if c is not None:
             return c.name
-        raise CatalogError(f"{base}: {e.reason}, and nothing is cached for {handle}/{name}") from e
+        raise CatalogError(f"{e}; nothing is cached for {handle}/{name}") from e
     except (KeyError, TypeError) as e:
         raise CatalogError(f"{handle}/{name}: unexpected answer") from e
     if not v:
         raise CatalogError(f"{handle}/{name}: no finished version")
+    if not isinstance(v, str) or not re.fullmatch(_VERSION, v):
+        raise CatalogError(f"{handle}/{name}: the server gave an invalid version {v!r}")
     return v
 
 
 def pull(ref: str, *, base: str | None = None, force: bool = False) -> Path:
-    base = base or BASE  # read at call time so PS_CATALOG_URL-style overrides and tests can change it
+    base = (base or BASE).rstrip("/")  # read at call time so PS_CATALOG_URL-style overrides and tests can change it
     handle, name, version = parse_ref(ref)
     parent = _name_dir(handle, name)
     if version == "latest":
@@ -146,7 +155,7 @@ def pull(ref: str, *, base: str | None = None, force: bool = False) -> Path:
         for f in files:
             rel = _safe_rel(f["path"])
             data = _get(f"{root}/files/{urllib.parse.quote(rel)}")
-            if hashlib.sha256(data).hexdigest() != f["sha256"]:
+            if hashlib.sha256(data).hexdigest() != str(f["sha256"]).lower():
                 raise CatalogError(f"{handle}/{name}:{version}: sha256 of {rel} does not match the manifest")
             out = partial / rel
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -155,8 +164,6 @@ def pull(ref: str, *, base: str | None = None, force: bool = False) -> Path:
         if dest.exists():
             shutil.rmtree(dest)
         os.replace(partial, dest)
-    except urllib.error.URLError as e:
-        raise CatalogError(f"{base}: {e.reason}") from e
     except CatalogError:
         raise
     except (OSError, KeyError, TypeError) as e:

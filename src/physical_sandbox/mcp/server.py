@@ -179,9 +179,14 @@ def ps_catalog_search(q: str = "", category: str | None = None, kind: str | None
 
 def ps_catalog_pull(ref: str) -> str:
     from .. import catalog
+    from ..errors import CatalogError
 
     d = catalog.pull(ref)
-    return _json({"dir": str(d), "urdf": str(catalog.urdf_path(d))})
+    try:
+        urdf = str(catalog.urdf_path(d))
+    except CatalogError:  # an item without a machine (a recording, say)
+        urdf = None
+    return _json({"dir": str(d), "urdf": urdf})
 
 
 @apps.tool(resource_uri=URI, description=(

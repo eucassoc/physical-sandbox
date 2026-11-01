@@ -58,3 +58,39 @@ def test_urdf_path_points_at_the_urdf_and_it_loads(catalog_server):
     d = catalog.pull("t/mini:1", base=catalog_server.url)
     assert catalog.urdf_path(d).name == "mini.urdf"
     assert load_machine(catalog.urdf_path(d)).joint_names == ["turn"]
+
+
+@pytest.mark.parametrize("hostile", ["../../../x", 7, "A/b"])
+def test_pull_rejects_a_hostile_latest_version(catalog_server, cache, hostile):
+    catalog_server.latest = hostile
+    with pytest.raises(CatalogError):
+        catalog.pull("t/mini", base=catalog_server.url)
+    assert not [p for p in cache.rglob("*") if p.is_file()]
+    assert not (cache.parent / "x").exists()
+
+
+def test_a_hostile_latest_marker_is_ignored(cache):
+    (cache / "catalog" / "t" / "mini").mkdir(parents=True)
+    (cache / "catalog" / "t" / "mini" / "latest").write_text("../../x\n")
+    assert catalog.cached("t/mini") is None
+
+
+@pytest.mark.parametrize("path", ["../evil.txt", "/etc/evil.txt"])
+def test_pull_rejects_unsafe_manifest_paths(catalog_server, cache, path):
+    catalog_server.extra_files = [{"path": path, "bytes": 1, "sha256": "0" * 64}]
+    with pytest.raises(CatalogError):
+        catalog.pull("t/mini:1", base=catalog_server.url)
+    parent = cache / "catalog" / "t" / "mini"
+    assert not (parent / "1").exists()
+    assert not parent.exists() or not list(parent.iterdir())
+
+
+def test_an_uppercase_sha256_in_the_manifest_still_verifies(catalog_server):
+    catalog_server.upper = True
+    assert catalog.pull("t/mini:1", base=catalog_server.url).is_dir()
+
+
+def test_a_broken_transfer_is_a_catalog_error(catalog_server):
+    catalog_server.stop()
+    with pytest.raises(CatalogError):
+        catalog.search("arm", base=catalog_server.url)

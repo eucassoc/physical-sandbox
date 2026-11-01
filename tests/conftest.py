@@ -35,6 +35,9 @@ class FakeCatalog:
     """Serves the catalog API for ``t/mini`` (version 1). ``bad`` corrupts one sha256 in the manifest."""
 
     def __init__(self, bad=False):
+        self.latest = "1"
+        self.extra_files = None
+        self.upper = False
         self.bad = bad
         self.port = 0
         self.hits = 0
@@ -42,6 +45,10 @@ class FakeCatalog:
 
     def manifest(self):
         files = [{"path": p, "bytes": len(b), "sha256": hashlib.sha256(b).hexdigest()} for p, b in FILES.items()]
+        if self.extra_files is not None:
+            files = self.extra_files
+        if self.upper:
+            files[0]["sha256"] = files[0]["sha256"].upper()
         if self.bad:
             files[1]["sha256"] = "0" * 64
         return {"format": "physical-sandbox-catalog/1", "name": "t/mini", "version": "1", "kind": "machine",
@@ -51,7 +58,7 @@ class FakeCatalog:
     def route(self, path):
         item = {"id": "i1", "handle": "t", "name": "mini", "kind": "machine", "category": "arm",
                 "visibility": "public", "display": {"ja": "ミニ", "en": "Mini arm"}, "tags": ["arm"],
-                "license": "Apache-2.0", "maker": None, "latest_version": "1", "updated_at": "2026-11-01"}
+                "license": "Apache-2.0", "maker": None, "latest_version": self.latest, "updated_at": "2026-11-01"}
         path = path.split("?")[0]
         if path == "/api/catalog/search":
             return 200, "application/json", json.dumps({"items": [item]}).encode()

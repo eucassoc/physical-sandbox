@@ -1,52 +1,101 @@
 # physical-sandbox
 
 Overlay robots on photos and videos of a real site, at real scale. Fix a site from a single picture (the
-floor's four corners), then draw robot motions through that camera and compare two motions with numbers and a
-replay video. The command is `psbx`.
+floor's four corners), put a machine on it, play a robot motion over the picture, and compare two motions with
+numbers and a replay video. The command is `psbx`; `psbx stage` does all of it on one page.
 
 Everything runs on your machine: photos, videos and cut-outs never leave it.
+
+## Try it
+
+Five minutes, one photo of your own desk:
+
+1. Download a motion to play: `huggingface-cli download lerobot/svla_so101_pickplace --repo-type dataset`
+2. Put an A4 sheet on a desk and take a photo of it, `desk.jpg`.
+3. `psbx stage desk.jpg`. Drag the four corners onto the sheet's corners, pick A4, press 決定 (Decide). The work
+   folder is `desk/`, next to the photo.
+4. In the robot step pick `physical-sandbox/so101` (it is pulled from the public catalog), drag it beside the
+   sheet, press 決定 (Decide).
+5. In the motion step pick `svla_so101_pickplace`, episode 0, press 読み込む (Load) and 再生 (Play): the arm
+   moves on your desk. 動画に書き出す (Export video) writes the replay.
+6. In the compare step pick the same dataset, episode 1, as the second motion and press 比べる (Compare): the
+   table of gaps and two shells. 書き出す (Export) writes the report.
+
+The steps are described under [Stage](#stage).
 
 ## Install
 
 ```sh
 python3.12 -m venv .venv
-.venv/bin/pip install -e .                  # the core: psbx site fit, psbx compare
+.venv/bin/pip install -e .                  # the core: psbx stage, psbx site fit, psbx compare
 .venv/bin/pip install -e '.[sam,mcp]'       # plus SAM 2.1 (cut out objects) and the MCP server (screens in the chat)
 .venv/bin/pip install -e '.[sam,mcp,dev]'   # plus what the tests need
 ```
 
-Python 3.10 or newer, macOS or Linux. The extras: `[sam]` cuts out fixed objects with SAM 2.1 (ultralytics),
-`[mcp]` serves the in-chat screens (`psbx mcp`), `[dev]` runs the tests. The replay video is drawn with MuJoCo
-offscreen: on macOS that works as it is; on a Linux machine without a display set `MUJOCO_GL=egl` (or
-`osmesa`).
+Python 3.10 or newer, macOS or Linux. The core includes everything the stage needs, mesh thinning
+(`fast-simplification`) among it. The extras: `[sam]` cuts out fixed objects with SAM 2.1 (ultralytics), `[mcp]`
+is the MCP SDK that serves the in-chat screens (`psbx mcp`), `[dev]` runs the tests. The replay video is drawn
+with MuJoCo offscreen: on macOS that works as it is; on a Linux machine without a display set `MUJOCO_GL=egl`
+(or `osmesa`).
+
+## Stage
+
+```sh
+psbx stage desk.jpg
+```
+
+opens one page in your browser with four steps, in this order. A step opens when the one before it is done:
+the robot step after the floor is decided, the motion and compare steps after a machine is placed.
+
+1. **床 (Floor).** Drag the four corners onto a rectangle on the ground, going round, 1 to 4. Pick the object's
+   size from the menu, or type the lengths of edge 1→2 and edge 2→3 in centimetres. Tick 長さは実測した値
+   when you measured them. 決定 writes `site.json`.
+2. **ロボット (Robot).** Pick a machine: the ones in `~/.cache/physical-sandbox/machines`, the ones already
+   pulled from the catalog, and the folders you gave with `--machine`. The public catalog can be searched and
+   pulled from the page, no account needed; you can also type the path of a URDF. Drag the machine's shell on the
+   floor and set its yaw. 決定 writes `scene.json`.
+3. **動き (Motion).** Pick a motion: a record file (`*.record.json`) in the work folder, or a LeRobot dataset
+   found under `$HF_HOME/hub` and `$HF_HOME/lerobot/hub` (`~/.cache/huggingface` unless `HF_HOME` is set) or
+   given with `--lerobot`, with its episode number; or type a record's path or `lerobot:<folder>#<episode>`.
+   読み込む (Load) reads it, 再生 (Play) draws it over the photo; you can drag the robot while it plays.
+   動画に書き出す (Export video) writes `replay-<label>.mp4` in the work folder. A record with one device
+   drives the placed machine, and the page says so.
+4. **比べる (Compare).** The motion of the step before is A. Pick a second motion B the same way (and, if you
+   like, the しきい値 (threshold) of the grasp, in radians). 比べる (Compare) shows both shells, the tool-tip trails, the line between the two tips and the
+   table of figures; 書き出す (Export) writes `compare/<A>-vs-<B>/gaps.json`, `gaps.csv`, `gaps.png` and
+   `replay.mp4`, the same files as [`psbx compare`](#compare-two-motions).
+
+The options: `--dir DIR` is the work folder (default: next to the picture, named after it), `--camera side`
+names the camera in the site (default `camera`), `--machine DIR` and `--lerobot DIR` offer a machine folder or a
+dataset folder (both repeatable), `--port` fixes the port, `--no-browser` only prints the address, for a machine
+you reach over SSH (forward the port).
+
+One folder is one site: a folder fixed on another picture is refused. `stage.json` in the folder keeps what the
+page had (the picture, the machine, motions A and B, the grasp threshold), so `psbx stage desk/` reopens where
+you left off.
+
+The page is served on 127.0.0.1 only, at an address with a random token. The photo and the videos never leave
+your machine; the only network use is the catalog search and pull you ask for. The line at the bottom of the page
+shows whether `psbx login` has been run (it only looks at the token file). Searching and pulling the public
+catalog needs no account, and a kept token also lets you pull your own private items; pushing is
+[`psbx push`](#push-to-the-catalog) in a terminal. Ctrl-C in the terminal when done.
 
 ## Fix a site
 
 A site is a JSON file with the camera that took the picture (its lens and where it stands) and the floor, in
 metres: x forward, y left, z up, the floor at z = 0. The first site comes from four corners of a rectangle on
 the ground in one picture and the lengths of two of its edges. Further cameras can then be tied to that site
-through fixed objects both pictures show (`physical_sandbox.site.add_camera` in Python).
+through fixed objects both pictures show (`physical_sandbox.site.add_camera` in Python). The stage's first step
+writes it; the rest of this section is for when you want only the floor, or no browser.
 
 The rectangle needs real lengths, and a picture cannot give them. The easy way is to put something of a known
 size on the floor before taking the picture: a sheet of A4 paper on a table (21 × 29.7 cm), a pallet on a
 factory floor (110 × 110 cm). Tape on the table and a ruler work too. A lane width or a desk width guessed by eye
 works as well, but then every report says the dimensions are estimated.
 
-### In the browser
-
-```sh
-psbx site fit photo.jpg --out site.json
-```
-
-opens the photo in your browser. Drag the four orange corners onto the rectangle's corners, going round, 1 to
-4; pick the object's size from the menu, or type the lengths of edge 1→2 and edge 2→3 in centimetres (入れ替え
-swaps them). The floor is drawn as a faint grid, 1 m apart, or 10 cm on a floor smaller than 2 m: when it sits on
-the ground, press 決定 (Decide), and `site.json` is written. Tick 長さは実測した値 when you measured the lengths.
-Press 決定 again after a change to overwrite the file; Ctrl-C in the terminal when done. `--camera side` names the
-camera in the site (default `camera`); `--edges 0.6 0.4` sets the lengths to start from, in metres;
-`--no-browser` only prints the address, for a machine you reach over SSH (forward the port, `--port 8797`).
-
-The screen is served on 127.0.0.1 only, at an address with a random token. The photo stays on your machine.
+`psbx site fit photo.jpg --out site.json` is the floor step alone: a page with only the floor, and
+`site.json` written where you say (press 決定 again after a change to overwrite it; Ctrl-C when done). `--camera`, `--edges 0.6 0.4` (the lengths to start from, in metres),
+`--no-browser` and `--port 8797` work as on the stage.
 
 ### From a script
 
@@ -203,7 +252,14 @@ the site from one frame, the arm placed on it, two episodes compared.
 The `ps_compare` tool opens the same comparison as a screen in the chat: the site's picture with both machines
 as see-through shells, the tool-tip paths, a slider and a play button, and the table of numbers (click a time to
 jump there). Its arguments are those of `psbx compare` (`videoCamera` for `--lerobot-camera`, `gripThreshold` for
-`--grip-threshold`); from the chat it opens only local files, `rtsp://` cameras and camera numbers.
+`--grip-threshold`); from the chat it opens only local files, `rtsp://` cameras and camera numbers. Leave `b`
+out to look at one motion alone: the same screen without the gaps between two (it shows the duration and the
+grasps).
+
+`ps_scene_place(siteDir, machine, x, y, yaw, scenePath=None, urdf=None)` writes the scene file the screen
+needs: it puts `machine` (a catalog ref such as `physical-sandbox/so101`, pulled if it is not cached, or, with
+`urdf`, the id to give that URDF file) at `x`, `y` metres and `yaw` radians on the site in `siteDir`, into
+`siteDir/scene.json` unless `scenePath` says another file.
 
 ## License
 

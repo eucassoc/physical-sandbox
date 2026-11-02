@@ -1,11 +1,15 @@
 # SO-101 pick-and-place: two episodes compared on the real recording
 
-This example runs `psbx` end to end on real data: the LeRobot dataset
+This example is the check that, seen through the dataset's own `side` camera, the shell lies on the real arm.
+It runs `psbx` end to end on real data: the LeRobot dataset
 [`lerobot/svla_so101_pickplace`](https://huggingface.co/datasets/lerobot/svla_so101_pickplace), where an SO-101
 arm picks a red brick off a white table and drops it into a transparent tray. It fixes the site from the
 dataset's own `side` camera, places the arm on it, and compares episode A (blue, episode 0 by default) with
 episode B (orange, episode 1 by default): gap numbers, a graph, and a replay video with both machines drawn as
 see-through shells over episode A's recording.
+
+The first thing to try is the stage on a photo of your own desk: see "Try it" in the
+[README](../../README.md). This example is the check behind it.
 
 Nothing from the dataset is in this folder (its licence was not checked): no frames, no pictures. Only the
 steps and scripts. Every file the script writes goes to `$OUT`.

@@ -31,7 +31,7 @@ psbx = "physical_sandbox.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"physical_sandbox.mcp" = ["widgets/*.html", "widgets/vendor/*.js", "widgets/vendor/*.txt"]
+"physical_sandbox.mcp" = ["widgets/*.html", "widgets/lib/*.js", "widgets/vendor/*.js", "widgets/vendor/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -43,6 +43,7 @@
 </div>
 <script type="module">
 /*__EXT_APPS_BUNDLE__*/
+/*__LIB:floor__*/
 const { App } = globalThis.ExtApps;
 const canvas = document.getElementById('view');
 const ctx = canvas.getContext('2d');
@@ -132,39 +133,10 @@ function draw() {
   const k = canvas.width / state.width;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (photo) ctx.drawImage(photo, 0, 0, canvas.width, canvas.height);
-  // The faint floor and its 1 m grid
-  if (grid) {
-    ctx.strokeStyle = 'rgba(155, 231, 242, 0.75)';
-    ctx.lineWidth = 1.5;
-    for (const line of grid) {
-      const pts = line.filter(Boolean);
-      if (pts.length < 2) continue;
-      ctx.beginPath();
-      pts.forEach(([u, v], i) => (i ? ctx.lineTo(u * k, v * k) : ctx.moveTo(u * k, v * k)));
-      ctx.stroke();
-    }
-  }
+  drawGrid(ctx, k, grid); // the faint floor and its 1 m grid
   // The objects the person keeps, each in its own colour
   (state.objects ?? []).forEach((o, i) => { if (keep.has(o.name)) drawObject(o, i, k); });
-  ctx.fillStyle = 'rgba(255, 180, 84, 0.18)';
-  ctx.beginPath();
-  state.corners.forEach((c, i) => (i ? ctx.lineTo(c.u * k, c.v * k) : ctx.moveTo(c.u * k, c.v * k)));
-  ctx.closePath();
-  ctx.fill();
-  // The corners: orange squares, numbered 1-4
-  state.corners.forEach((c, i) => {
-    const x = c.u * k, y = c.v * k, s = 13;
-    ctx.fillStyle = 'rgba(214, 118, 20, 0.85)';
-    ctx.strokeStyle = '#ffb454';
-    ctx.lineWidth = 2;
-    ctx.fillRect(x - s, y - s, 2 * s, 2 * s);
-    ctx.strokeRect(x - s, y - s, 2 * s, 2 * s);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 15px system-ui';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(String(i + 1), x, y + 1);
-  });
+  drawCorners(ctx, k, state.corners);
 }
 
 // The chips under the picture: press one to keep or drop that object
@@ -197,10 +169,9 @@ function changed(why) {
 }
 
 // The two edge lengths, shown in centimetres; the preset menu shows which known object they are, if any
-const cm = (m) => Math.round(m * 1000) / 10;
 function showEdges() {
-  [edgeA.value, edgeB.value] = state.edgesM.map(cm);
-  const key = `${cm(state.edgesM[0])},${cm(state.edgesM[1])}`;
+  [edgeA.value, edgeB.value] = state.edgesM.map(cmOf);
+  const key = `${cmOf(state.edgesM[0])},${cmOf(state.edgesM[1])}`;
   presetEl.value = [...presetEl.options].some((o) => o.value === key) ? key : '';
 }
 // Read the lengths the person typed; a length that is not a positive number keeps 決定 off and says so
@@ -229,7 +200,6 @@ swapButton.addEventListener('click', () => {
   readEdges('長さを入れ替えました');
 });
 
-const stepLabel = (m) => (m >= 1 ? `${m} m` : `${cm(m)} cm`);
 const floorOk = (stepM) => `床（薄い格子、${stepLabel(stepM)} ごと）が地面に合っていれば「決定」を、ずれていれば橙の角をつかんで指定し直してください`;
 
 // Solve on the server, at most one call in flight
@@ -266,7 +236,7 @@ canvas.addEventListener('pointerdown', (e) => {
   if (!state) return;
   const p = toPhoto(e);
   const reach = 22 / (canvas.getBoundingClientRect().width / state.width);
-  dragging = state.corners.findIndex((c) => Math.hypot(c.u - p.u, c.v - p.v) < reach);
+  dragging = hitCorner(state.corners, p, reach);
   if (dragging >= 0) canvas.setPointerCapture(e.pointerId);
 });
 canvas.addEventListener('pointermove', (e) => {
@@ -314,7 +284,7 @@ decideButton.addEventListener('click', async () => {
     say(`決定しました。場所のファイルを書きました: ${out.sitePath}。直すなら角や長さを変えてもう一度「決定」を、終わりなら端末で Ctrl-C を押してください`);
     return;
   }
-  const lengths = `辺 1→2 ${cm(state.edgesM[0])} cm、辺 2→3 ${cm(state.edgesM[1])} cm（${measuredBox.checked ? '実測' : '推定'}）`;
+  const lengths = `辺 1→2 ${cmOf(state.edgesM[0])} cm、辺 2→3 ${cmOf(state.edgesM[1])} cm（${measuredBox.checked ? '実測' : '推定'}）`;
   try {
     await app.sendMessage({
       role: 'user',

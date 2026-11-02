@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +33,7 @@ A4_M = (0.21, 0.297)  # the lengths the browser screen starts with: a sheet of A
 WIDGETS = Path(__file__).parent / "mcp" / "widgets"
 BUNDLE_MARKER = "/*__EXT_APPS_BUNDLE__*/"
 THREE_MARKER = "/*__THREE__*/"
+LIB_MARKER = re.compile(r"/\*__LIB:([a-z]+)__\*/")
 
 
 # ---- the photo's display copy, on disk ----
@@ -148,11 +150,13 @@ def floor_grid(width: float, height: float, corners: list[dict], edges_m) -> dic
 # ---- the widget ----
 
 def widget_html(name: str, bridge: str, three: bool = False) -> str:
-    """A widget's HTML with ``bridge`` (JavaScript defining ``globalThis.ExtApps``) in place of the bundle marker."""
+    """A widget's HTML with ``bridge`` (JavaScript defining ``globalThis.ExtApps``) in place of the bundle marker,
+    and every ``/*__LIB:<name>__*/`` marker replaced by ``widgets/lib/<name>.js`` (a missing lib raises
+    ``FileNotFoundError``)."""
     html = (WIDGETS / name).read_text().replace(BUNDLE_MARKER, bridge)
     if three:
         html = html.replace(THREE_MARKER, (WIDGETS / "vendor/three.iife.js").read_text())
-    return html
+    return LIB_MARKER.sub(lambda m: (WIDGETS / "lib" / f"{m.group(1)}.js").read_text(), html)
 
 
 def ext_apps_bundle() -> str:

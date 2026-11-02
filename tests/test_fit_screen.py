@@ -207,3 +207,21 @@ def test_site_fit_prints_what_was_written_on_each_decide(still, tmp_path, monkey
 def test_site_fit_with_corners_needs_edges(still, tmp_path, capsys):
     code = main(["site", "fit", str(still), "--corners", "1,2", "3,4", "5,6", "7,8", "--out", str(tmp_path / "o.json")])
     assert code == 2 and "--edges" in capsys.readouterr().err and not (tmp_path / "o.json").exists()
+
+
+def test_widget_html_inlines_the_libs_it_names(tmp_path, monkeypatch):
+    monkeypatch.setattr(fit_screen, "WIDGETS", tmp_path)
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "one.js").write_text("function one() { return 1; }\n")
+    (tmp_path / "w.html").write_text("<script type=\"module\">/*__EXT_APPS_BUNDLE__*/\n/*__LIB:one__*/\n</script>")
+    html = fit_screen.widget_html("w.html", "/*bridge*/")
+    assert "function one()" in html and "__LIB:one__" not in html
+    (tmp_path / "w.html").write_text("/*__LIB:none__*/")
+    with pytest.raises(FileNotFoundError):
+        fit_screen.widget_html("w.html", "")
+
+
+def test_the_served_screens_carry_no_marker():
+    for name, three in (("fit-floor.html", False), ("compare.html", True)):
+        html = fit_screen.widget_html(name, "", three)
+        assert "/*__LIB:" not in html and "/*__THREE__*/" not in html

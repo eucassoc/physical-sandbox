@@ -58,6 +58,8 @@
 <script>/*__THREE__*/</script>
 <script type="module">
 /*__EXT_APPS_BUNDLE__*/
+/*__LIB:shells__*/
+/*__LIB:figures__*/
 const { App } = globalThis.ExtApps;
 const THREE = globalThis.THREE;
 const photoCanvas = document.getElementById('photo');
@@ -81,34 +83,11 @@ let frame = 0;
 let timer = null;
 let three = null;       // { renderer, scene, camera, records, geometries, materials }
 let ready = false;      // the poses, times and pixel paths have arrived
-let baseM = null;       // the machine's base transform of this result, a THREE.Matrix4 made on first draw
 let generation = 0;     // counts the tool results: an older one's loads must not touch the newer
 
 const app = new App({ name: 'PsCompare', version: '0.1.0' }, {}, { autoResize: true });
 const recShown = (r) => (r ? show.recB : show.recA);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-// ---- The 3D machines, drawn through the site's camera ----
-
-/** The site frame (x forward, y left, z up) as three's world (y up): (x, y, z) -> (x, z, -y) */
-const toThree = (x, y, z) => new THREE.Vector3(x, z, -y);
-
-/** The page camera where the real one is (as PS's video view does it): the picture's frustum from K, at -R^T t.
- *  The camera is given in the site frame (p_cam = R p + t, x right, y down, z forward): its position and axes are
- *  carried into three's world; three looks down -z with y up. */
-function placeCamera(camera, { intr, extr }) {
-  const r = extr.R;
-  const t = extr.t;
-  const fullWidth = 2 * Math.max(intr.cx, intr.width - intr.cx);
-  const fullHeight = 2 * Math.max(intr.cy, intr.height - intr.cy);
-  camera.fov = (2 * Math.atan(fullHeight / 2 / intr.fy)) * 180 / Math.PI;
-  camera.setViewOffset(fullWidth, fullHeight, fullWidth / 2 - intr.cx, fullHeight / 2 - intr.cy, intr.width, intr.height);
-  camera.aspect = (fullWidth / fullHeight) * (intr.fy / intr.fx);
-  camera.position.copy(toThree(-(r[0] * t[0] + r[3] * t[1] + r[6] * t[2]), -(r[1] * t[0] + r[4] * t[1] + r[7] * t[2]), -(r[2] * t[0] + r[5] * t[1] + r[8] * t[2])));
-  camera.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(
-    toThree(r[0], r[1], r[2]), toThree(-r[3], -r[4], -r[5]), toThree(-r[6], -r[7], -r[8])));
-  camera.updateProjectionMatrix();
-}
 
 // One call to the server: the JSON it answers, or an Error saying what went wrong
 async function call(name, args) {
@@ -132,113 +111,31 @@ async function fetchParts(name, args, count) {
   return out.join('');
 }
 
-function bytesOf(b64) {
-  const s = atob(b64);
-  const u = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i += 1) u[i] = s.charCodeAt(i);
-  return u.buffer;
-}
+// ---- The 3D machines, drawn through the site's camera ----
 
 async function buildMachines(mine) {
   const m = data.model;
   const buffer = bytesOf(await fetchParts('ps_model_part', { key: m.key }, m.binParts));
   if (mine !== generation) return;
-  // The links' shapes, each in its own link's frame: positions, then triangle indices
-  const geometries = m.links.map((l) => {
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(buffer, l.offset, l.vCount * 3), 3));
-    g.setIndex(new THREE.BufferAttribute(new Uint32Array(buffer, l.offset + l.vCount * 12, l.iCount), 1));
-    g.computeVertexNormals();
-    return g;
-  });
-  const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, alpha: true, antialias: true });
-  renderer.setPixelRatio(1);
-  renderer.setSize(glCanvas.width, glCanvas.height, false);
-  const scene = new THREE.Scene();
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x707070, 2.4));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
-  sun.position.set(5, 10, 3);
-  scene.add(sun);
-  // The site frame (x forward, y left, z up) inside, three's world (y up) outside: (x, y, z) -> (x, z, -y)
-  const site = new THREE.Group();
-  site.matrixAutoUpdate = false;
-  site.matrix.makeBasis(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 1, 0));
-  scene.add(site);
-  // Each record in its own colour only (none of the machine's own), see-through. A machine first writes its
-  // depth without colour, then its colour over only its front faces: it reads as one tinted shell rather
-  // than a tangle of its own insides
-  const depthOnly = new THREE.MeshBasicMaterial({ colorWrite: false });
-  const materials = COLORS.map((c) => new THREE.MeshLambertMaterial({ color: c, transparent: true, opacity: 0.5, depthWrite: false, depthFunc: THREE.LessEqualDepth }));
-  const records = data.records.map((rec, r) => {
-    const group = new THREE.Group();
-    const meshes = [];
-    m.links.forEach((l, i) => {
-      for (const material of [depthOnly, materials[r]]) {
-        const mesh = new THREE.Mesh(geometries[i], material);
-        mesh.matrixAutoUpdate = false;   // the pose comes from the server as it is
-        mesh.frustumCulled = false;
-        group.add(mesh);
-        meshes.push({ mesh, link: i });
-      }
-    });
-    site.add(group);
-    return { group, meshes };
-  });
+  const built = buildShells(glCanvas, m, buffer, COLORS);
   // near 0.05 m: the same near clip as the replay video (render.NEAR_M), so both cut a close machine alike
-  const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 600);
-  placeCamera(camera, data.camera);
-  three = { renderer, scene, camera, records, geometries, materials: [depthOnly, ...materials] };
+  built.camera = new THREE.PerspectiveCamera(50, 1, 0.05, 600);
+  placeCamera(built.camera, data.camera);
+  three = built;
 }
 
 /** Frees the previous result's GPU memory (shapes, materials, the renderer's own buffers). */
 function release() {
-  if (!three) return;
-  three.geometries.forEach((g) => g.dispose());
-  three.materials.forEach((m) => m.dispose());
-  three.renderer.dispose();
+  releaseShells(three);
   three = null;
 }
 
 function drawMachines() {
   if (!three || !ready) return;
-  const { renderer, scene, camera, records } = three;
-  const shown = [];
-  const local = new THREE.Matrix4();
-  // Each link's pose is in the machine's own frame; the machine's base transform (where it stands) comes apart
-  baseM ??= new THREE.Matrix4().set(...data.base);
-  records.forEach((rec, r) => {
-    const poses = data.poses[r][frame];
-    rec.group.visible = false;
-    if (!(show.machine && recShown(r) && poses)) return;
-    for (const { mesh, link } of rec.meshes) {
-      mesh.matrix.copy(baseM).multiply(local.set(...poses[link]));   // base x pose; 16 numbers each, row by row
-      mesh.matrixWorldNeedsUpdate = true;
-    }
-    shown.push(rec);
-  });
-  // One machine at a time with the depth cleared between them: no machine hides another, they all show through
-  renderer.autoClear = false;
-  renderer.clear();
-  for (const rec of shown) {
-    rec.group.visible = true;
-    renderer.clearDepth();
-    renderer.render(scene, camera);
-    rec.group.visible = false;
-  }
+  drawShells(three, data.poses.map((p) => p[frame]), data.base, data.records.map((_, r) => show.machine && recShown(r)));
 }
 
 // ---- Floor box, trails, tool tips and the A-B line on top ----
-
-/** Draws the points as lines; a null (a point behind the camera) breaks the line. */
-function strokePath(points, close) {
-  let open = false;
-  ctx.beginPath();
-  for (const p of points) {
-    if (!p) { open = false; continue; }
-    if (open) ctx.lineTo(p[0], p[1]); else { ctx.moveTo(p[0], p[1]); open = true; }
-  }
-  if (close) ctx.closePath();
-}
 
 function draw() {
   if (!data || !ready) return;
@@ -247,7 +144,7 @@ function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(k, 0, 0, k, 0, 0);
   if (show.box && data.floor) {
-    strokePath(data.floor, true);
+    strokePath(ctx, data.floor, true);
     ctx.fillStyle = 'rgba(255,255,255,0.10)';
     ctx.fill();
     ctx.strokeStyle = 'rgba(255,255,255,0.9)';
@@ -264,7 +161,7 @@ function draw() {
         ctx.setLineDash(r ? [14 / k, 10 / k] : []);
         ctx.strokeStyle = COLORS[r];
         ctx.lineWidth = 4 / k;
-        strokePath(dev.tool_trail, false);
+        strokePath(ctx, dev.tool_trail, false);
         ctx.stroke();
         ctx.setLineDash([]);
       }
@@ -324,48 +221,16 @@ function stop() {
 
 // ---- The numbers ----
 
-const mm = (m) => `${(m * 1000).toFixed(1)} mm`;
-const deg = (r) => `${(r * 180 / Math.PI).toFixed(1)}°`;
-const sec = (s) => `${s.toFixed(2)} s`;
-const dash = (v, f) => (v === null || v === undefined ? '—' : f(v));
-// What the numbers cannot tell yet, in words a person reads (the server's names otherwise)
-const UNKNOWN_NAMES = { clearance: '周りとのすき間', reach: '届いたか', world: '世界の食い違い', grasps: 'つかむ瞬間' };
 const when = (t) => `<span class="go" data-t="${t}">${sec(t)}</span>`;   // a time that jumps the slider there
 
 function figures() {
-  const f = data.figures;
-  const site = data.site;
-  const rows = [];
-  const row = (name, value) => rows.push(`<tr><th>${esc(name)}</th><td>${value}</td></tr>`);
-  row('手先のずれ（同じ時刻）', `最大 ${mm(f.tool_deviation_m.max)}（${when(f.tool_deviation_m.at_s)}）、平均 ${mm(f.tool_deviation_m.mean)}`);
-  row('通り道の形のずれ', mm(f.shape_deviation_m));
-  const d = f.duration_s;
-  row('動いた時間', `A ${sec(d.a)}、B ${sec(d.b)}（B − A = ${d.diff >= 0 ? '+' : ''}${d.diff.toFixed(2)} s）`);
-  row('なめらかさ（ジャーク）', `A ${dash(f.jerk.a, (v) => `${v.toPrecision(3)} m/s³`)}、B ${dash(f.jerk.b, (v) => `${v.toPrecision(3)} m/s³`)}`);
-  for (const [name, j] of Object.entries(f.joints)) {
-    row(`関節 ${name} のずれ`, `最大 ${deg(j.max_rad)}（${when(j.at_s)}）、平均 ${deg(j.mean_rad)}`);
-  }
-  const n = f.grasp_counts;
-  if (!f.unknown.includes('grasps')) {
-    const at = f.grip_threshold === null || f.grip_threshold === undefined ? '' : `（しきい値 ${Number(f.grip_threshold).toPrecision(3)}）`;
-    row('つかんだ回数', `A ${n.a} 回、B ${n.b} 回${at}`);
-    f.grasps.forEach((g, i) => row(`${i + 1} 回目につかんだとき`, `手先のずれ ${mm(g.tool_gap_m)}（A の ${when(g.a_s)}、B の ${sec(g.b_s)}）`));
-  }
-  for (const name of f.unknown) {
-    row(`${UNKNOWN_NAMES[name] ?? name}（まだ分かりません）`, `<span class="why">${esc(f.unknown_reasons[name] ?? '')}</span>`);
-  }
-  document.getElementById('figures').innerHTML = rows.join('');
+  document.getElementById('figures').innerHTML = figureRows(data.figures, when, esc);
   document.getElementById('figures').querySelectorAll('.go').forEach((el) => el.addEventListener('click', () => {
     if (!ready) return;
     stop();
     setFrame(nearestFrame(Number(el.dataset.t)));
   }));
-  const px = Object.entries(site.residualPx).map(([cam, v]) => `${esc(cam)} ${v.toFixed(1)} px`).join('、');
-  document.getElementById('site').innerHTML =
-    `場所 ${esc(site.site)}　ずれ ${px || '—'}　寸法 ${site.dimensions === 'measured' ? '実測' : '推定'}　` +
-    `${site.confirmedByPerson ? '人が確認済み' : '人の確認はまだ'}` +
-    (site.dimensionsNote ? `　<span class="note">${esc(site.dimensionsNote)}</span>` : '') +
-    (data.stride > 1 ? `　<span class="why">コマは ${data.stride} 個おきに送っています</span>` : '');
+  document.getElementById('site').innerHTML = siteLine(data.site, data.stride, esc);
   document.getElementById('labelA').textContent = `A: ${data.records[0].label}`;
   document.getElementById('labelB').textContent = `B: ${data.records[1].label}`;
 }
@@ -396,7 +261,6 @@ app.ontoolresult = async (result) => {
   stop();
   release();
   ready = false;
-  baseM = null;
   const body = result?.content?.[0]?.text;
   if (result?.isError) { say(`比較できませんでした: ${String(body).slice(0, 400)}`, true); return; }
   try {

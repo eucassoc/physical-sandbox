@@ -18,7 +18,8 @@ from pathlib import Path
 
 import numpy as np
 
-from . import catalog, fit_screen, push, screens
+from . import catalog, fit_screen, push, report, screens
+from .compare import compare
 from .errors import CatalogError, InputError
 from .fit_screen import A4_M, CHUNK, LOCAL_BRIDGE, decide_floor, default_corners, floor_grid, photo, photo_part
 from .machine import load_machine
@@ -117,6 +118,7 @@ class Stage:
         self._opened: set[Path] = set()  # machine files the page opened (a typed path may be placed after it)
         self._jobs: dict[str, dict] = {}  # exports by job id; one runs at a time
         self._jobs_lock = threading.Lock()
+        self._stage_lock = threading.Lock()  # stage.json is read, changed and written back: one call at a time
         if picture is None:
             self.work = Path(work)
             found = _picture_named_in(self.work)
@@ -188,7 +190,7 @@ class Stage:
             "parts": -(-len(self._photo["b64"]) // CHUNK), "camera": self.camera,
             "floor": {"corners": corners, "edgesM": edges, "measured": measured,
                       "decided": floor is not None and site.confirmed_by_person},
-            "machine": self._placed_machine(), "motionA": self._kept("a"), "motionB": self._kept("b"), "gripThreshold": None,
+            "machine": self._placed_machine(), "motionA": self._kept("a"), "motionB": self._kept("b"), "gripThreshold": self._kept_grip(),
             "login": push.login_status(catalog._base()),  # the token file only: no request
             "workDir": str(self.work),
         }
@@ -215,6 +217,8 @@ class Stage:
             return json.dumps(self._motions_list())
         if name == "ps_motion_open":
             return json.dumps(self._motion_open(args))
+        if name == "ps_compare":
+            return json.dumps(self._compare(args))
         if name == "ps_compare_part":
             return screens.data_part(str(args["key"]), int(args["part"]), "ps_motion_open")
         if name == "ps_export":
@@ -237,15 +241,16 @@ class Stage:
 
     def _update_stage_json(self, **keys) -> None:
         """Add ``keys`` to ``stage.json``, keeping every other key it has (it is made when it is not there)."""
-        try:
-            d = json.loads(self.stage_path.read_text())
-        except (OSError, ValueError):
-            d = None
-        if not isinstance(d, dict):
-            d = {"format": STAGE_FORMAT, "picture": str(self.picture)}
-        d.update(keys)
-        self.work.mkdir(parents=True, exist_ok=True)
-        fit_screen.write_atomic(self.stage_path, json.dumps(d, indent=2).encode())
+        with self._stage_lock:
+            try:
+                d = json.loads(self.stage_path.read_text())
+            except (OSError, ValueError):
+                d = None
+            if not isinstance(d, dict):
+                d = {"format": STAGE_FORMAT, "picture": str(self.picture)}
+            d.update(keys)
+            self.work.mkdir(parents=True, exist_ok=True)
+            fit_screen.write_atomic(self.stage_path, json.dumps(d, indent=2).encode())
 
     def _kept(self, key: str) -> str | None:
         """A text ``stage.json`` keeps under ``key`` (the motion spec of slot ``a`` or ``b``), or None."""
@@ -255,6 +260,15 @@ class Stage:
             return None
         value = d.get(key) if isinstance(d, dict) else None
         return value if isinstance(value, str) and value else None
+
+    def _kept_grip(self) -> float | None:
+        """The grip threshold ``stage.json`` keeps (a finite number >= 0), or None for the automatic one."""
+        try:
+            value = json.loads(self.stage_path.read_text()).get("gripThreshold")
+        except (OSError, ValueError, AttributeError):
+            return None
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+        return float(value) if ok else None
 
     def _scene_machines(self) -> dict:
         """The ``machines`` of ``scene.json`` as the file has them (none when it is not there or not readable)."""
@@ -466,15 +480,69 @@ class Stage:
         self._update_stage_json(**{slot: spec})
         return out
 
+    def _grip(self, args: dict) -> float | None:
+        """``args["gripThreshold"]``: None (or absent) for the automatic threshold, else a finite number >= 0 (rad)."""
+        if args.get("gripThreshold") is None:
+            return None
+        value = _number(args, "gripThreshold")
+        if value < 0:
+            raise ValueError("gripThreshold must be a finite number >= 0")
+        return value
+
+    def _two_motions(self, args: dict):
+        """``(scene, a, b, notes)`` for the compare calls' ``a`` and ``b`` specs: both load on the placed machine and
+        fit each other (an ``InputError`` or ``ValueError`` says why not)."""
+        from .cli import _check_motions
+
+        specs = []
+        for key in ("a", "b"):
+            spec = args.get(key)
+            if not isinstance(spec, str) or not spec.strip():
+                raise ValueError(f"{key} must be a record file or lerobot:<dir>#<episode>")
+            specs.append(spec.strip())
+        scene, a, notes_a = self._load_motion(specs[0])
+        _, b, notes_b = self._load_motion(specs[1])
+        _check_motions(scene, a, b)
+        return scene, a, b, specs, notes_a + notes_b
+
+    def _compare(self, args: dict) -> dict:
+        """Two motions side by side on the placed machine: the compare screen's data plus the read-over notes."""
+        grip = self._grip(args)
+        scene, a, b, specs, notes = self._two_motions(args)
+        with open_source(self.picture) as source:
+            out = screens.screen_data(scene.site, scene, self.camera, [a, b], source, grip_threshold=grip)
+        out["notes"] = notes
+        self._update_stage_json(a=specs[0], b=specs[1], gripThreshold=grip)
+        return out
+
     def _export(self, args: dict) -> dict:
-        """Start writing the motion over the photo as an mp4 in the work folder (one at a time); answers the job id."""
-        if args.get("what") != "replay":
-            raise ValueError("what must be 'replay'")
-        spec = args.get("spec")
-        if not isinstance(spec, str) or not spec.strip():
-            raise ValueError("spec must be a record file or lerobot:<dir>#<episode>")
-        scene, motion, _ = self._load_motion(spec.strip())
-        out = self.work / f"replay-{_safe_name(motion.label)}.mp4"
+        """Start writing a file set in the work folder (one export at a time); answers the job id. ``replay``: one
+        motion over the photo as an mp4. ``compare``: the four report files of two motions, in their own folder."""
+        what = args.get("what")
+        if what not in ("replay", "compare"):
+            raise ValueError("what must be 'replay' or 'compare'")
+        if what == "replay":
+            spec = args.get("spec")
+            if not isinstance(spec, str) or not spec.strip():
+                raise ValueError("spec must be a record file or lerobot:<dir>#<episode>")
+            scene, motion, _ = self._load_motion(spec.strip())
+            out = self.work / f"replay-{_safe_name(motion.label)}.mp4"
+
+            def produce(progress) -> list[Path]:
+                with open_source(self.picture) as source:
+                    render_overlay(scene, self.camera, source, [motion], out, progress=progress)
+                return [out]
+        else:
+            grip = self._grip(args)
+            scene, a, b, _, _ = self._two_motions(args)
+            site = self._decided_site()
+            folder = self.work / "compare" / f"{_safe_name(a.label)}-vs-{_safe_name(b.label)}"
+
+            def produce(progress) -> list[Path]:
+                written = report.write_report(compare(scene, a, b, grip_threshold=grip), folder, site=site)
+                with open_source(self.picture) as source:
+                    video = render_overlay(scene, self.camera, source, [a, b], folder / "replay.mp4", progress=progress)
+                return [Path(p) for p in (*written.values(), video)]
         job = secrets.token_hex(4)
         with self._jobs_lock:
             if any(not j["done"] for j in self._jobs.values()):
@@ -488,9 +556,7 @@ class Stage:
         def run() -> None:
             error, paths = None, []
             try:
-                with open_source(self.picture) as source:
-                    render_overlay(scene, self.camera, source, [motion], out, progress=progress)
-                paths = [str(out)]
+                paths = [str(p) for p in produce(progress)]
             except Exception as e:  # the page shows one line; the thread must not die silently
                 text = str(e).strip()
                 error = text.splitlines()[0] if text else type(e).__name__

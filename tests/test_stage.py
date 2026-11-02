@@ -4,6 +4,7 @@ import shutil
 import threading
 import time
 import urllib.request
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -529,6 +530,120 @@ def test_an_export_that_fails_reports_one_line_and_an_unknown_job_is_an_error(pl
     assert st["done"] and st["error"] == "no codec" and st["paths"] == []
     assert "error" in call(placed, "ps_export_status", {"job": "nosuchjob"})
     assert "error" in call(placed, "ps_export", {"what": "gif", "spec": "x"})
+
+
+@pytest.fixture
+def two_records(placed, tmp_path):
+    a = str(_record(tmp_path / "w" / "demo.record.json", label="demo"))
+    b = str(_record(tmp_path / "w" / "policy.record.json", label="policy"))
+    return a, b
+
+
+def _export_compare(server, a, b, grip=None):
+    args = {"what": "compare", "a": a, "b": b}
+    if grip is not None:
+        args["gripThreshold"] = grip
+    job = call(server, "ps_export", args)["job"]
+    st = {}
+    for _ in range(400):
+        st = call(server, "ps_export_status", {"job": job})
+        if st["done"]:
+            break
+        time.sleep(0.05)
+    return job, st
+
+
+def test_compare_in_the_stage_gives_two_records_and_keeps_the_choice(placed, two_records, tmp_path):
+    spec_a, spec_b = two_records
+    out = call(placed, "ps_compare", {"a": spec_a, "b": spec_b, "gripThreshold": None})
+    assert len(out["records"]) == 2 and "tool_deviation_m" in out["figures"] and out["notes"] == []
+    assert [r["label"] for r in out["records"]] == ["demo", "policy"] and out["dataParts"] >= 1
+    kept = json.loads((tmp_path / "w" / "stage.json").read_text())
+    assert kept["a"] == spec_a and kept["b"] == spec_b and kept["gripThreshold"] is None
+    assert kept["machine"]["id"] == "mini"
+    data = json.loads("".join(call(placed, "ps_compare_part", {"key": out["dataKey"], "part": i})["data"]
+                              for i in range(out["dataParts"])))
+    assert len(data["poses"]) == 2 and len(data["t"]) == out["frames"]
+
+
+def test_compare_keeps_the_grip_threshold_and_first_carries_it(placed, two_records, tmp_path):
+    spec_a, spec_b = two_records
+    out = call(placed, "ps_compare", {"a": spec_a, "b": spec_b, "gripThreshold": 0.25})
+    assert out["figures"]["grip_threshold"] == 0.25
+    first = json.loads(StageServer(Stage(work=tmp_path / "w")).first())
+    assert first["motionA"] == spec_a and first["motionB"] == spec_b and first["gripThreshold"] == 0.25
+    call(placed, "ps_compare", {"a": spec_a, "b": spec_b, "gripThreshold": None})
+    assert json.loads(StageServer(Stage(work=tmp_path / "w")).first())["gripThreshold"] is None
+
+
+def test_compare_refuses_a_bad_threshold_and_bad_specs_and_keeps_nothing(placed, two_records, tmp_path):
+    spec_a, spec_b = two_records
+    for bad in (-0.1, float("nan"), float("inf"), True, "0.2"):
+        out = call(placed, "ps_compare", {"a": spec_a, "b": spec_b, "gripThreshold": bad})
+        assert "gripThreshold" in out["error"], bad
+    assert "error" in call(placed, "ps_compare", {"a": spec_a, "b": str(tmp_path / "w" / "none.record.json"), "gripThreshold": None})
+    assert "error" in call(placed, "ps_compare", {"a": "", "b": spec_b, "gripThreshold": None})
+    assert "a" not in json.loads((tmp_path / "w" / "stage.json").read_text())
+
+
+def test_compare_refuses_motions_that_do_not_fit_each_other(placed, two_records, tmp_path):
+    spec_a, _ = two_records
+    q = np.linspace(0, 1, 6).reshape(-1, 2)
+    save_record([motion_from_numpy(q, fps=10, joint_names=["turn", "lift"], machine="mini", label="wide")],
+                "site", tmp_path / "w" / "wide.record.json")
+    out = call(placed, "ps_compare", {"a": spec_a, "b": str(tmp_path / "w" / "wide.record.json"), "gripThreshold": None})
+    assert "記録の関節がロボットと合いません" in out["error"]
+    assert "error" in call(placed, "ps_export", {"what": "compare", "a": spec_a, "b": str(tmp_path / "w" / "wide.record.json")})
+
+
+def test_export_compare_writes_the_four_files_in_their_own_folder(placed, two_records, tmp_path):
+    spec_a, spec_b = two_records
+    job, st = _export_compare(placed, spec_a, spec_b)
+    assert len(job) == 8 and st["error"] is None and st["done"] and st["progress"] == 1
+    folder = tmp_path / "w" / "compare" / "demo-vs-policy"
+    assert {p.name for p in folder.iterdir()} >= {"gaps.json", "gaps.csv", "gaps.png", "replay.mp4"}
+    assert sorted(Path(p).name for p in st["paths"]) == ["gaps.csv", "gaps.json", "gaps.png", "replay.mp4"]
+    assert all(Path(p).parent == folder and Path(p).stat().st_size > 0 for p in st["paths"])
+
+
+def test_export_compare_takes_the_grip_threshold(placed, two_records, tmp_path):
+    spec_a, spec_b = two_records
+    _, st = _export_compare(placed, spec_a, spec_b, grip=0.3)
+    assert st["error"] is None
+    report = json.loads((tmp_path / "w" / "compare" / "demo-vs-policy" / "gaps.json").read_text())
+    assert report["grip_threshold"] == 0.3
+    out = call(placed, "ps_export", {"what": "compare", "a": spec_a, "b": spec_b, "gripThreshold": -1})
+    assert "gripThreshold" in out["error"]
+
+
+def test_a_second_export_while_a_compare_runs_is_refused(placed, two_records, monkeypatch):
+    spec_a, spec_b = two_records
+    gate = threading.Event()
+    real = stage.render_overlay
+
+    def slow(*args, **kw):
+        gate.wait(5)
+        return real(*args, **kw)
+    monkeypatch.setattr(stage, "render_overlay", slow)
+    first = call(placed, "ps_export", {"what": "compare", "a": spec_a, "b": spec_b})
+    try:
+        assert call(placed, "ps_export", {"what": "compare", "a": spec_a, "b": spec_b}) == {"error": "書き出し中です"}
+        assert call(placed, "ps_export", {"what": "replay", "spec": spec_a}) == {"error": "書き出し中です"}
+    finally:
+        gate.set()
+    for _ in range(400):
+        if call(placed, "ps_export_status", {"job": first["job"]})["done"]:
+            break
+        time.sleep(0.05)
+
+
+def test_the_stage_html_has_the_compare_controls(served):
+    html = get(served().url)[2]
+    for ident in ("comparePick", "compareSpec", "grip", "compareGo", "cphoto", "cgl", "cview", "cplay", "cslider",
+                  "cclock", "compareExport", "cfigures", "csite"):
+        assert f'id="{ident}"' in html
+    for name in ("ps_compare", "ps_export"):
+        assert name in html
 
 
 def test_the_stage_html_has_the_motion_controls(served):

@@ -292,6 +292,39 @@ def _fit_in_browser(args) -> int:
     return 0
 
 
+def _cmd_stage(args) -> int:
+    """The stage in the person's own browser, over a work folder; the command runs until Ctrl-C."""
+    import webbrowser
+    from . import stage
+
+    target = Path(args.target).expanduser()
+    if target.is_dir():
+        if args.dir:
+            raise InputError("give a picture with --dir, or a work folder alone, not both")
+        made = stage.Stage(work=target, camera=args.camera, machine_dirs=args.machine, lerobot_dirs=args.lerobot)
+    else:
+        made = stage.Stage(picture=target, work=Path(args.dir) if args.dir else None, camera=args.camera,
+                           machine_dirs=args.machine, lerobot_dirs=args.lerobot)
+
+    def wrote(site, path):
+        print(f"wrote {path}: camera {args.camera!r}, residual {site.residual_px[args.camera]:.2f} px, "
+              f"dimensions {site.dimensions}, confirmed by a person (決定 again overwrites it; Ctrl-C to finish)",
+              flush=True)
+
+    server = stage.StageServer(made, args.port, wrote)
+    print(f"Stage at {server.url}: fix the floor on the picture, place a machine, play a motion. "
+          f"Work folder {made.work}. Ctrl-C here when done.", flush=True)  # flushed: the command then waits
+    if not args.no_browser:
+        webbrowser.open(server.url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        server.close()
+    return 0
+
+
 def _cmd_fetch_sam(args) -> int:
     from . import objects
 
@@ -416,6 +449,19 @@ def _parser() -> argparse.ArgumentParser:
     f.add_argument("--port", type=int, default=0, help="the browser screen's port on 127.0.0.1 (default: any free)")
     f.add_argument("--no-browser", action="store_true", help="print the screen's address instead of opening it")
     f.set_defaults(run=_cmd_site_fit)
+
+    st = sub.add_parser("stage", help="the stage in the browser: fix the floor on a picture, place a machine, play "
+                                      "a motion over it and compare two motions")
+    st.add_argument("target", help="a picture (.jpg .jpeg .png) or a work folder made by an earlier stage")
+    st.add_argument("--dir", help="the work folder (default: next to the picture, named after it)")
+    st.add_argument("--camera", default="camera", help="the camera's name in the site (default: camera)")
+    st.add_argument("--machine", action="append", default=[], metavar="DIR",
+                    help="a machine folder to offer on the stage (repeatable)")
+    st.add_argument("--lerobot", action="append", default=[], metavar="DIR",
+                    help="a LeRobot dataset folder to offer as a motion (repeatable)")
+    st.add_argument("--port", type=int, default=0, help="the stage's port on 127.0.0.1 (default: any free)")
+    st.add_argument("--no-browser", action="store_true", help="print the stage's address instead of opening it")
+    st.set_defaults(run=_cmd_stage)
 
     w = sub.add_parser("fetch-sam", help="download the SAM weights ahead of time")
     w.add_argument("--dest", help="where to put the weights file")

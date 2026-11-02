@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 
 from .floor import solve_floor
-from .site import Floor, Site, save_site
+from .site import Floor, Site, load_site, save_site
 from .sources import open_source
 
 CHUNK = 20_000  # characters of base64 per photo part: each result stays under the chat host's size cap
@@ -187,6 +187,33 @@ globalThis.ExtApps = { App: class {
 
 # ---- the browser screen's server ----
 
+def decide_floor(image: str, width: int, height: int, out: Path, camera: str, args: dict, *, what: str) -> dict:
+    """The browser screens' 決定: solve the floor from ``args`` (``corners``, ``edgesM``, ``measured``), write the
+    site file ``out`` (confirmed by a person, no objects; ``what`` is its history text) and answer
+    ``{ok, sitePath, residualPx, mirrored, camera}``, or ``{ok: False, reason}`` without writing anything."""
+    try:
+        px, edges = check_corners(args["corners"]), check_edges(args["edgesM"])
+    except (KeyError, ValueError) as e:
+        return {"ok": False, "reason": f"bad-input: {e}"}
+    if args.get("objects"):
+        return {"ok": False, "reason": "the browser screen has no objects: cut them out in the chat"}
+    sol = solve_floor(width, height, px, edges)
+    if sol.camera is None:
+        return {"ok": False, "reason": sol.reason}
+    measured = bool(args.get("measured", False))
+    site = Site(
+        id=out.stem, cameras={camera: sol.camera},
+        floor=Floor(camera, px, edges, sol.corners_m),
+        residual_px={camera: float(sol.residual_px)},
+        confirmed_by_person=True, dimensions="measured" if measured else "estimated",
+        history=[{"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "what": what,
+                  "image": Path(image).name, "mirrored": bool(sol.mirrored)}])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    save_site(site, out)
+    return {"ok": True, "sitePath": str(out), "residualPx": round(float(sol.residual_px), 2),
+            "mirrored": bool(sol.mirrored), "camera": camera}
+
+
 class FitServer:
     """Serves the floor-fitting screen on 127.0.0.1 for one photo. 決定 in the screen writes the site file
     ``out`` (confirmed by a person, no objects); ``on_decide(site, path)`` is called each time.
@@ -251,35 +278,18 @@ class FitServer:
         raise ValueError(f"the browser screen has no tool {name!r}")
 
     def _decide(self, args: dict) -> dict:
-        try:
-            px, edges = check_corners(args["corners"]), check_edges(args["edgesM"])
-        except (KeyError, ValueError) as e:
-            return {"ok": False, "reason": f"bad-input: {e}"}
-        if args.get("objects"):
-            return {"ok": False, "reason": "the browser screen has no objects: cut them out in the chat"}
-        sol = solve_floor(self.width, self.height, px, edges)
-        if sol.camera is None:
-            return {"ok": False, "reason": sol.reason}
-        measured = bool(args.get("measured", False))
-        site = Site(
-            id=self.out.stem, cameras={self.camera: sol.camera},
-            floor=Floor(self.camera, px, edges, sol.corners_m),
-            residual_px={self.camera: float(sol.residual_px)},
-            confirmed_by_person=True, dimensions="measured" if measured else "estimated",
-            history=[{"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                      "what": "floor fixed in the browser (psbx site fit) and confirmed by a person",
-                      "image": Path(self.image).name, "mirrored": bool(sol.mirrored)}])
-        self.out.parent.mkdir(parents=True, exist_ok=True)
-        save_site(site, self.out)
-        self.decided += 1
-        if self.on_decide is not None:
-            self.on_decide(site, self.out)
-        return {"ok": True, "sitePath": str(self.out), "residualPx": round(float(sol.residual_px), 2),
-                "mirrored": bool(sol.mirrored), "camera": self.camera}
+        out = decide_floor(self.image, self.width, self.height, self.out, self.camera, args,
+                           what="floor fixed in the browser (psbx site fit) and confirmed by a person")
+        if out["ok"]:
+            self.decided += 1
+            if self.on_decide is not None:
+                self.on_decide(load_site(self.out), self.out)
+        return out
 
 
-def _handler_for(fit: FitServer):
-    prefix = f"/{fit.token}/"
+def _handler_for(screen):
+    """The HTTP handler for any screen object with ``token``, ``html()``, ``first()`` and ``call(name, args)``."""
+    prefix = f"/{screen.token}/"
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # the terminal shows the address and the decisions, not every request
@@ -296,9 +306,9 @@ def _handler_for(fit: FitServer):
 
         def do_GET(self) -> None:
             if self.path == prefix:
-                self._send(fit.html(), "text/html; charset=utf-8")
+                self._send(screen.html(), "text/html; charset=utf-8")
             elif self.path == prefix + "first":
-                self._send(fit.first(), "application/json")
+                self._send(screen.first(), "application/json")
             else:
                 self._send("not found", "text/plain", 404)
 
@@ -309,7 +319,7 @@ def _handler_for(fit: FitServer):
                 return
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-                out = {"text": fit.call(str(req["name"]), dict(req["args"]))}
+                out = {"text": screen.call(str(req["name"]), dict(req["args"]))}
             except Exception as e:  # noqa: BLE001 - whatever went wrong is shown in the screen's bottom line
                 out = {"error": f"{type(e).__name__}: {e}"}
             self._send(json.dumps(out), "application/json")

@@ -291,13 +291,6 @@ function pixelOfFloor(camera, x, y) {
   return { u: k.fx * (r[0] * x + r[1] * y + t[0]) / z + k.cx, v: k.fy * (r[3] * x + r[4] * y + t[1]) / z + k.cy };
 }
 
-function drawMachinePhoto() {
-  const c = mPhoto.getContext('2d');
-  c.fillStyle = '#222';
-  c.fillRect(0, 0, mPhoto.width, mPhoto.height);
-  if (photo) c.drawImage(photo, 0, 0, mPhoto.width, mPhoto.height);
-}
-
 function drawMachine() {
   if (!state) return;
   const k = mView.width / state.width;
@@ -354,7 +347,7 @@ function releaseMachine() {
 async function openMachine(urdf, id, { typed = false, keep = false } = {}) {
   const mine = ++machineGen;
   releaseMachine();
-  drawMachinePhoto();
+  drawPhoto(mPhoto);
   drawMachine();
   placeButton.disabled = true;
   if (!keep) say(`ロボット ${id} を読み込んでいます…`);
@@ -371,13 +364,8 @@ async function openMachine(urdf, id, { typed = false, keep = false } = {}) {
     placeButton.disabled = !placeDirty;
     drawMachine();
     if (!THREE) throw new Error('three が読み込まれていません');
-    const m = out.model;
-    const buffer = bytesOf(await fetchParts('ps_model_part', { key: m.key }, m.binParts));
-    if (mine !== machineGen) return;
-    const built = buildShells(mGl, m, buffer, MACHINE_COLORS);
-    // near 0.05 m: the same near clip as the replay video, so a close machine is cut alike
-    built.camera = new THREE.PerspectiveCamera(50, 1, 0.05, 600);
-    placeCamera(built.camera, out.camera);
+    const built = await buildScreenShells(mGl, out, MACHINE_COLORS, () => mine === machineGen);
+    if (!built) return;
     mThree = built;
     drawMachine();
     // The first frame of a fresh WebGL canvas can reach the screen opaque black in some browsers: draw once more
@@ -535,6 +523,177 @@ placeButton.addEventListener('click', async () => {
 });
 
 
+// ---- Shared by the motion and compare sections: the photo, the overlay, the play bar, the loading, the export ----
+
+// The photo (or a dark field until it has arrived) on a section's photo canvas
+function drawPhoto(canvas) {
+  const c = canvas.getContext('2d');
+  c.fillStyle = '#222';
+  c.fillRect(0, 0, canvas.width, canvas.height);
+  if (photo) c.drawImage(photo, 0, 0, canvas.width, canvas.height);
+}
+
+// The floor box, each record's trail and tool tip (record 1 dashed: tells them apart in print too), with two
+// records the A-B line (link), and the shells where the machine section puts the base (a drag there moves them).
+// `data` is null until the poses and paths have arrived: then only the clearing is done.
+function drawOverlay({ ctx, view, data, frame, three, colors, link = false }) {
+  const k = view.width / state.width;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, view.width, view.height);
+  if (!data) return;
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  if (data.floor) {
+    strokePath(ctx, data.floor, true);
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.lineWidth = 2.5 / k;
+    ctx.setLineDash([10 / k, 6 / k]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  data.records.forEach((rec, r) => {
+    for (const dev of rec.devices) {
+      ctx.setLineDash(r ? [14 / k, 10 / k] : []);
+      ctx.strokeStyle = colors[r];
+      ctx.lineWidth = 4 / k;
+      strokePath(ctx, dev.tool_trail, false);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const tip = dev.centers[frame];
+      if (tip) {
+        ctx.beginPath();
+        ctx.arc(tip[0], tip[1], 6 / k, 0, 2 * Math.PI);
+        ctx.fillStyle = colors[r];
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2 / k;
+        ctx.stroke();
+      }
+    }
+  });
+  if (link && data.records.length === 2) {
+    const [a, b] = data.records;
+    for (const dev of a.devices) {
+      const p = dev.centers[frame];
+      const q = b.devices.find((d) => d.id === dev.id)?.centers[frame];
+      if (!p || !q) continue;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2 / k;
+      ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke();
+    }
+  }
+  if (three) drawShells(three, data.poses.map((p) => p[frame]), baseOf(), data.records.map(() => true));
+}
+
+// A play bar over a slider, a button and a clock. `data()` is the screen data once its poses have arrived (else
+// null); `onFrame()` draws the bar's current frame.
+function playBar({ slider, button, clock, data, onFrame }) {
+  let frame = 0;
+  let timer = null;
+  const bar = {
+    get frame() { return frame; },
+    set(i) {
+      const d = data();
+      frame = Math.max(0, Math.min(d.frames - 1, i));
+      slider.value = String(frame);
+      clock.textContent = `${d.t[frame].toFixed(1)} / ${d.t[d.t.length - 1].toFixed(1)} s`;
+      onFrame();
+    },
+    stop() {
+      if (timer) { clearInterval(timer); timer = null; }
+      button.textContent = '再生';
+    },
+    reset() { frame = 0; },
+    lock() { slider.disabled = button.disabled = true; },
+    unlock(d) {
+      slider.max = String(d.frames - 1);
+      slider.disabled = button.disabled = d.frames < 2;
+    },
+  };
+  slider.addEventListener('input', () => { bar.stop(); bar.set(Number(slider.value)); });
+  button.addEventListener('click', () => {
+    const d = data();
+    if (!d) return;
+    if (timer) { bar.stop(); return; }
+    if (frame >= d.frames - 1) bar.set(0);
+    button.textContent = '一時停止';
+    timer = setInterval(() => {
+      if (frame >= d.frames - 1) { bar.stop(); return; }
+      bar.set(frame + 1);
+    }, d.stepS * 1000);
+  });
+  return bar;
+}
+
+// The shells of a screen's machine, built from the model parts; null when a newer run took over meanwhile
+async function buildScreenShells(glCanvas, out, colors, alive) {
+  if (!THREE) throw new Error('three が読み込まれていません');
+  const m = out.model;
+  const buffer = bytesOf(await fetchParts('ps_model_part', { key: m.key }, m.binParts));
+  if (!alive()) return null;
+  const built = buildShells(glCanvas, m, buffer, colors);
+  // near 0.05 m: the same near clip as the replay video, so a close machine is cut alike
+  built.camera = new THREE.PerspectiveCamera(50, 1, 0.05, 600);
+  placeCamera(built.camera, out.camera);
+  return built;
+}
+
+// Joins the stored data parts into `out` and makes the shells in `held` ({ three, key }; the shells of the same
+// model are kept). false when a newer run took over (`alive()` says whether this one is still the newest).
+async function loadScreenData(out, glCanvas, colors, held, alive) {
+  const part = JSON.parse(await fetchParts('ps_compare_part', { key: out.dataKey }, out.dataParts));
+  if (!alive()) return false;
+  out.poses = part.poses;
+  out.t = part.t;
+  out.figures.series = part.series;
+  out.records.forEach((rec, i) => rec.devices.forEach((dev, j) => Object.assign(dev, part.records[i].devices[j])));
+  if (!held.three || held.key !== out.model.key) {
+    releaseShells(held.three);
+    held.three = null;
+    held.key = null;
+    const built = await buildScreenShells(glCanvas, out, colors, alive);
+    if (!built) return false;
+    held.three = built;
+    held.key = out.model.key;
+  } else {
+    placeCamera(held.three.camera, out.camera);
+  }
+  return true;
+}
+
+let exporting = false;   // an export is running (the server runs one at a time)
+
+// One slider for each stage; the buttons that write a file wait while any export runs
+function updateExportButtons() {
+  exportBtn.disabled = exporting || !(tdata && tready);
+  compareExportBtn.disabled = exporting || !(cdata && cready);
+}
+
+// Starts an export and follows it to its end. text: { progress(percent), done(paths), failed } are the lines it says.
+async function runExport(args, text) {
+  if (exporting) return;
+  exporting = true;
+  updateExportButtons();
+  try {
+    const started = await call('ps_export', args);
+    if (started.error) { say(started.error, true); return; }   // e.g. an export is already running (the page was reloaded)
+    const { job } = started;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const st = await call('ps_export_status', { job });
+      if (st.error) { fail(text.failed, st.error); break; }
+      if (st.done) { say(text.done(st.paths)); break; }
+      say(text.progress(Math.round(st.progress * 100)));
+    }
+  } catch (err) {
+    fail(text.failed, err);
+  } finally {
+    exporting = false;
+    updateExportButtons();
+  }
+}
+
 // ---- The motion step: one motion played over the photo with the placed machine's shell, then written as a video ----
 
 const MOTION_COLOR = '#2f7fe0';
@@ -558,86 +717,21 @@ let motionStarted = false;
 let latestSpec = null;   // the spec of the newest open, loaded or still loading
 let tdata = null;        // what ps_motion_open answered, with the data parts joined in once they arrive
 let tready = false;      // the poses, times and pixel paths have arrived
-let tThree = null;       // the shell (three), once built
-let tModelKey = null;    // the model the shell was built from
+const tHeld = { three: null, key: null };   // the shell (three), once built, and the model it was built from
 let tgen = 0;            // counts the opens: an older one's loads must not touch the newer
-let tframe = 0;
-let tTimer = null;
-let exporting = false;
-
-function drawMotionPhoto() {
-  const c = tPhoto.getContext('2d');
-  c.fillStyle = '#222';
-  c.fillRect(0, 0, tPhoto.width, tPhoto.height);
-  if (photo) c.drawImage(photo, 0, 0, tPhoto.width, tPhoto.height);
-}
 
 function drawMotion() {
   if (!state) return;
-  const k = tView.width / state.width;
-  tctx.setTransform(1, 0, 0, 1, 0, 0);
-  tctx.clearRect(0, 0, tView.width, tView.height);
-  if (!tdata || !tready) return;
-  tctx.setTransform(k, 0, 0, k, 0, 0);
-  if (tdata.floor) {
-    strokePath(tctx, tdata.floor, true);
-    tctx.fillStyle = 'rgba(255,255,255,0.10)';
-    tctx.fill();
-    tctx.strokeStyle = 'rgba(255,255,255,0.9)';
-    tctx.lineWidth = 2.5 / k;
-    tctx.setLineDash([10 / k, 6 / k]);
-    tctx.stroke();
-    tctx.setLineDash([]);
-  }
-  for (const dev of tdata.records[0].devices) {
-    tctx.strokeStyle = MOTION_COLOR;
-    tctx.lineWidth = 4 / k;
-    strokePath(tctx, dev.tool_trail, false);
-    tctx.stroke();
-    const tip = dev.centers[tframe];
-    if (tip) {
-      tctx.beginPath();
-      tctx.arc(tip[0], tip[1], 6 / k, 0, 2 * Math.PI);
-      tctx.fillStyle = MOTION_COLOR;
-      tctx.fill();
-      tctx.strokeStyle = '#ffffff';
-      tctx.lineWidth = 2 / k;
-      tctx.stroke();
-    }
-  }
-  // The machine section's x / y / yaw place the shell: a drag there moves it while the motion plays
-  if (tThree) drawShells(tThree, [tdata.poses[0][tframe]], baseOf(), [true]);
-  const total = tdata.t[tdata.t.length - 1];
-  tClock.textContent = `${tdata.t[tframe].toFixed(1)} / ${total.toFixed(1)} s`;
+  drawOverlay({ ctx: tctx, view: tView, data: tdata && tready ? tdata : null, frame: tBar.frame, three: tHeld.three, colors: [MOTION_COLOR] });
 }
 
-function setMotionFrame(i) {
-  tframe = Math.max(0, Math.min(tdata.frames - 1, i));
-  tSlider.value = String(tframe);
-  drawMotion();
-}
-
-function stopPlay() {
-  if (tTimer) { clearInterval(tTimer); tTimer = null; }
-  tPlay.textContent = '再生';
-}
-
-tSlider.addEventListener('input', () => { stopPlay(); setMotionFrame(Number(tSlider.value)); });
-tPlay.addEventListener('click', () => {
-  if (!tdata || !tready) return;
-  if (tTimer) { stopPlay(); return; }
-  if (tframe >= tdata.frames - 1) setMotionFrame(0);
-  tPlay.textContent = '一時停止';
-  tTimer = setInterval(() => {
-    if (tframe >= tdata.frames - 1) { stopPlay(); return; }
-    setMotionFrame(tframe + 1);
-  }, tdata.stepS * 1000);
-});
+const tBar = playBar({
+  slider: tSlider, button: tPlay, clock: tClock, data: () => (tdata && tready ? tdata : null), onFrame: drawMotion });
 
 function releaseMotion() {
-  releaseShells(tThree);
-  tThree = null;
-  tModelKey = null;
+  releaseShells(tHeld.three);
+  tHeld.three = null;
+  tHeld.key = null;
 }
 
 // Opens a motion by its spec. keep: the machine was placed again, so the same motion is read anew (the trail and
@@ -645,43 +739,23 @@ function releaseMotion() {
 async function openMotion(spec, { keep = false } = {}) {
   const mine = ++tgen;
   latestSpec = spec;
-  stopPlay();
+  tBar.stop();
   tready = false;
-  tPlay.disabled = tSlider.disabled = true;
+  tBar.lock();
   exportBtn.disabled = true;
-  if (!keep) { releaseMotion(); tdata = null; tframe = 0; drawMotion(); }
+  if (!keep) { releaseMotion(); tdata = null; tBar.reset(); drawMotion(); }
   say(`動き ${spec} を読み込んでいます…`);
   try {
     const out = await call('ps_motion_open', { spec, slot: 'a' });
     if (mine !== tgen) return;
-    const part = JSON.parse(await fetchParts('ps_compare_part', { key: out.dataKey }, out.dataParts));
-    if (mine !== tgen) return;
-    out.poses = part.poses;
-    out.t = part.t;
-    out.records.forEach((rec, i) => rec.devices.forEach((dev, j) => Object.assign(dev, part.records[i].devices[j])));
-    if (!THREE) throw new Error('three が読み込まれていません');
-    if (!tThree || tModelKey !== out.model.key) {
-      releaseMotion();
-      const m = out.model;
-      const buffer = bytesOf(await fetchParts('ps_model_part', { key: m.key }, m.binParts));
-      if (mine !== tgen) return;
-      const built = buildShells(tGl, m, buffer, [MOTION_COLOR]);
-      // near 0.05 m: the same near clip as the replay video, so a close machine is cut alike
-      built.camera = new THREE.PerspectiveCamera(50, 1, 0.05, 600);
-      placeCamera(built.camera, out.camera);
-      tThree = built;
-      tModelKey = m.key;
-    } else {
-      placeCamera(tThree.camera, out.camera);
-    }
+    if (!await loadScreenData(out, tGl, [MOTION_COLOR], tHeld, () => mine === tgen)) return;
     tdata = out;
     tready = true;
-    tSlider.max = String(out.frames - 1);
-    tSlider.disabled = tPlay.disabled = out.frames < 2;
+    tBar.unlock(out);
     updateExportButtons();
     motionSpecEl.value = spec;
     showCompareA(`A: ${out.records[0].label}`);
-    setMotionFrame(keep ? tframe : 0);
+    tBar.set(keep ? tBar.frame : 0);
     requestAnimationFrame(() => { if (mine === tgen) drawMotion(); });   // a fresh WebGL canvas may first show black
     say(out.note ?? `動き「${out.records[0].label}」を読み込みました。再生できます`);
   } catch (err) {
@@ -731,27 +805,12 @@ document.getElementById('motionOpen').addEventListener('click', () => {
 });
 motionSpecEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('motionOpen').click(); });
 
-exportBtn.addEventListener('click', async () => {
-  if (!tdata || exporting) return;
-  exporting = true;
-  updateExportButtons();
-  try {
-    const started = await call('ps_export', { what: 'replay', spec: tdata.spec });
-    if (started.error) { say(started.error, true); return; }   // e.g. an export is already running (the page was reloaded)
-    const { job } = started;
-    for (;;) {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      const st = await call('ps_export_status', { job });
-      if (st.error) { fail('動画を書き出せませんでした', st.error); break; }
-      if (st.done) { say(`動画を書き出しました: ${st.paths.join(', ')}`); break; }
-      say(`動画を書き出しています… ${Math.round(st.progress * 100)}%`);
-    }
-  } catch (err) {
-    fail('動画を書き出せませんでした', err);
-  } finally {
-    exporting = false;
-    updateExportButtons();
-  }
+exportBtn.addEventListener('click', () => {
+  if (!tdata) return;
+  runExport({ what: 'replay', spec: tdata.spec }, {
+    progress: (pct) => `動画を書き出しています… ${pct}%`,
+    done: (paths) => `動画を書き出しました: ${paths.join(', ')}`,
+    failed: '動画を書き出せませんでした' });
 });
 
 // ---- The compare step: A (the motion section's) against B, both shells over the photo, the figures, then the files ----
@@ -778,19 +837,10 @@ let bSpec = null;        // the spec of B, as typed or picked
 let cspec = null;        // { a, b, grip } of the newest comparison (also one still loading)
 let cdata = null;        // what ps_compare answered, with the data parts joined in once they arrive
 let cready = false;
-let cThree = null;       // the two shells (three), once built
-let cModelKey = null;
+const cHeld = { three: null, key: null };   // the two shells (three), once built, and the model they were built from
 let cgen = 0;            // counts the runs: an older one's loads must not touch the newer
-let cframe = 0;
-let cTimer = null;
 
 const escHtml = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-// One slider for each stage; the buttons that write a file wait while any export runs (the server runs one at a time)
-function updateExportButtons() {
-  exportBtn.disabled = exporting || !(tdata && tready);
-  compareExportBtn.disabled = exporting || !(cdata && cready);
-}
 
 function showCompareA(text) {
   document.getElementById('compareA').innerHTML = `<i class="sw" style="border-color:${COMPARE_COLORS[0]}"></i>${escHtml(text)}`;
@@ -799,91 +849,19 @@ function showCompareA(text) {
 
 function updateCompareGo() { compareGo.disabled = !(bSpec && (tdata || state?.motionA)); }
 
-function drawComparePhoto() {
-  const c = cPhoto.getContext('2d');
-  c.fillStyle = '#222';
-  c.fillRect(0, 0, cPhoto.width, cPhoto.height);
-  if (photo) c.drawImage(photo, 0, 0, cPhoto.width, cPhoto.height);
-}
-
 function drawCompare() {
   if (!state) return;
-  const k = cView.width / state.width;
-  cctx.setTransform(1, 0, 0, 1, 0, 0);
-  cctx.clearRect(0, 0, cView.width, cView.height);
-  if (!cdata || !cready) return;
-  cctx.setTransform(k, 0, 0, k, 0, 0);
-  if (cdata.floor) {
-    strokePath(cctx, cdata.floor, true);
-    cctx.fillStyle = 'rgba(255,255,255,0.10)';
-    cctx.fill();
-    cctx.strokeStyle = 'rgba(255,255,255,0.9)';
-    cctx.lineWidth = 2.5 / k;
-    cctx.setLineDash([10 / k, 6 / k]);
-    cctx.stroke();
-    cctx.setLineDash([]);
-  }
-  cdata.records.forEach((rec, r) => {
-    for (const dev of rec.devices) {
-      cctx.setLineDash(r ? [14 / k, 10 / k] : []);   // A solid, B dashed (tells them apart in print too)
-      cctx.strokeStyle = COMPARE_COLORS[r];
-      cctx.lineWidth = 4 / k;
-      strokePath(cctx, dev.tool_trail, false);
-      cctx.stroke();
-      cctx.setLineDash([]);
-      const tip = dev.centers[cframe];
-      if (tip) {
-        cctx.beginPath();
-        cctx.arc(tip[0], tip[1], 6 / k, 0, 2 * Math.PI);
-        cctx.fillStyle = COMPARE_COLORS[r];
-        cctx.fill();
-        cctx.strokeStyle = '#ffffff';
-        cctx.lineWidth = 2 / k;
-        cctx.stroke();
-      }
-    }
-  });
-  const [a, b] = cdata.records;
-  for (const dev of a.devices) {   // the A-B line: how far apart the two tool tips are right now
-    const p = dev.centers[cframe];
-    const q = b.devices.find((d) => d.id === dev.id)?.centers[cframe];
-    if (!p || !q) continue;
-    cctx.strokeStyle = '#ffffff';
-    cctx.lineWidth = 2 / k;
-    cctx.beginPath(); cctx.moveTo(p[0], p[1]); cctx.lineTo(q[0], q[1]); cctx.stroke();
-  }
-  // The machine section's x / y / yaw place both shells: a drag there moves them while the comparison plays
-  if (cThree) drawShells(cThree, [cdata.poses[0][cframe], cdata.poses[1][cframe]], baseOf(), [true, true]);
-  cClock.textContent = `${cdata.t[cframe].toFixed(1)} / ${cdata.t[cdata.t.length - 1].toFixed(1)} s`;
+  drawOverlay({ ctx: cctx, view: cView, data: cdata && cready ? cdata : null, frame: cBar.frame, three: cHeld.three,
+                colors: COMPARE_COLORS, link: true });
 }
 
-function setCompareFrame(i) {
-  cframe = Math.max(0, Math.min(cdata.frames - 1, i));
-  cSlider.value = String(cframe);
-  drawCompare();
-}
-
-function stopComparePlay() {
-  if (cTimer) { clearInterval(cTimer); cTimer = null; }
-  cPlay.textContent = '再生';
-}
-
-cSlider.addEventListener('input', () => { stopComparePlay(); setCompareFrame(Number(cSlider.value)); });
-cPlay.addEventListener('click', () => {
-  if (!cdata || !cready) return;
-  if (cTimer) { stopComparePlay(); return; }
-  if (cframe >= cdata.frames - 1) setCompareFrame(0);
-  cPlay.textContent = '一時停止';
-  cTimer = setInterval(() => {
-    if (cframe >= cdata.frames - 1) { stopComparePlay(); return; }
-    setCompareFrame(cframe + 1);
-  }, cdata.stepS * 1000);
-});
+const cBar = playBar({
+  slider: cSlider, button: cPlay, clock: cClock, data: () => (cdata && cready ? cdata : null), onFrame: drawCompare });
 
 function releaseCompare() {
-  releaseShells(cThree);
-  cThree = null;
-  cModelKey = null;
+  releaseShells(cHeld.three);
+  cHeld.three = null;
+  cHeld.key = null;
 }
 
 // The threshold box: empty is the automatic one (null); anything else must be a number that is not negative
@@ -906,8 +884,8 @@ function showFigures() {
   cFigures.innerHTML = figureRows(cdata.figures, whenAt, escHtml);
   cFigures.querySelectorAll('.go').forEach((el) => el.addEventListener('click', () => {
     if (!cready) return;
-    stopComparePlay();
-    setCompareFrame(nearestCompareFrame(Number(el.dataset.t)));
+    cBar.stop();
+    cBar.set(nearestCompareFrame(Number(el.dataset.t)));
   }));
   cSite.innerHTML = siteLine(cdata.site, cdata.stride, escHtml);
 }
@@ -922,43 +900,22 @@ async function runCompare({ keep = false } = {}) {
   if (!a || !b) { say('A（「動き」で読み込んだ動き）と B を選択してください', true); return; }
   const mine = ++cgen;
   cspec = { a, b, grip };
-  stopComparePlay();
+  cBar.stop();
   cready = false;
-  cPlay.disabled = cSlider.disabled = true;
+  cBar.lock();
   updateExportButtons();
-  if (!keep) { releaseCompare(); cdata = null; cframe = 0; cFigures.textContent = ''; cSite.textContent = ''; drawCompare(); }
+  if (!keep) { releaseCompare(); cdata = null; cBar.reset(); cFigures.textContent = ''; cSite.textContent = ''; drawCompare(); }
   say('2 つの動きを比べています…');
   try {
     const out = await call('ps_compare', { a, b, gripThreshold: grip });
     if (mine !== cgen) return;
-    const part = JSON.parse(await fetchParts('ps_compare_part', { key: out.dataKey }, out.dataParts));
-    if (mine !== cgen) return;
-    out.poses = part.poses;
-    out.t = part.t;
-    out.figures.series = part.series;
-    out.records.forEach((rec, i) => rec.devices.forEach((dev, j) => Object.assign(dev, part.records[i].devices[j])));
-    if (!THREE) throw new Error('three が読み込まれていません');
-    if (!cThree || cModelKey !== out.model.key) {
-      releaseCompare();
-      const m = out.model;
-      const buffer = bytesOf(await fetchParts('ps_model_part', { key: m.key }, m.binParts));
-      if (mine !== cgen) return;
-      const built = buildShells(cGl, m, buffer, COMPARE_COLORS);
-      // near 0.05 m: the same near clip as the replay video, so a close machine is cut alike
-      built.camera = new THREE.PerspectiveCamera(50, 1, 0.05, 600);
-      placeCamera(built.camera, out.camera);
-      cThree = built;
-      cModelKey = m.key;
-    } else {
-      placeCamera(cThree.camera, out.camera);
-    }
+    if (!await loadScreenData(out, cGl, COMPARE_COLORS, cHeld, () => mine === cgen)) return;
     cdata = out;
     cready = true;
-    cSlider.max = String(out.frames - 1);
-    cSlider.disabled = cPlay.disabled = out.frames < 2;
+    cBar.unlock(out);
     updateExportButtons();
     showFigures();
-    setCompareFrame(keep ? Math.min(cframe, out.frames - 1) : 0);
+    cBar.set(keep ? cBar.frame : 0);
     requestAnimationFrame(() => { if (mine === cgen) drawCompare(); });   // a fresh WebGL canvas may first show black
     say(out.notes?.length ? out.notes.join(' ／ ') : `「${out.records[0].label}」と「${out.records[1].label}」を比べました。表の時刻を選択すると、その場面を表示します`);
   } catch (err) {
@@ -990,27 +947,12 @@ compareSpecEl.addEventListener('input', () => { bSpec = compareSpecEl.value.trim
 compareSpecEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') compareGo.click(); });
 compareGo.addEventListener('click', () => { runCompare(); });
 
-compareExportBtn.addEventListener('click', async () => {
-  if (!cdata || !cready || exporting) return;
-  exporting = true;
-  updateExportButtons();
-  try {
-    const started = await call('ps_export', { what: 'compare', a: cspec.a, b: cspec.b, gripThreshold: cspec.grip });
-    if (started.error) { say(started.error, true); return; }   // e.g. an export is already running (the page was reloaded)
-    const { job } = started;
-    for (;;) {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      const st = await call('ps_export_status', { job });
-      if (st.error) { fail('書き出せませんでした', st.error); break; }
-      if (st.done) { say(`書き出しました: ${st.paths.join(', ')}`); break; }
-      say(`レポートと動画を書き出しています… ${Math.round(st.progress * 100)}%`);
-    }
-  } catch (err) {
-    fail('書き出せませんでした', err);
-  } finally {
-    exporting = false;
-    updateExportButtons();
-  }
+compareExportBtn.addEventListener('click', () => {
+  if (!cdata || !cready) return;
+  runExport({ what: 'compare', a: cspec.a, b: cspec.b, gripThreshold: cspec.grip }, {
+    progress: (pct) => `レポートと動画を書き出しています… ${pct}%`,
+    done: (paths) => `書き出しました: ${paths.join(', ')}`,
+    failed: '書き出せませんでした' });
 });
 
 // The section opens once a machine is placed; the first time it lists the motions, and reopens the one the folder kept
@@ -1178,7 +1120,7 @@ async function start() {
       b64 += out.data;
     }
     const img = new Image();
-    img.onload = () => { photo = img; draw(); drawMachinePhoto(); drawMotionPhoto(); drawComparePhoto(); solve(); };
+    img.onload = () => { photo = img; draw(); drawPhoto(mPhoto); drawPhoto(tPhoto); drawPhoto(cPhoto); solve(); };
     img.onerror = () => say('写真を表示できませんでした', true);
     img.src = `data:image/jpeg;base64,${b64}`;
   } catch (err) {

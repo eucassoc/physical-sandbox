@@ -637,6 +637,34 @@ def test_a_second_export_while_a_compare_runs_is_refused(placed, two_records, mo
         time.sleep(0.05)
 
 
+def test_a_failed_compare_render_leaves_the_numbers_and_no_stale_video(placed, two_records, tmp_path, monkeypatch):
+    spec_a, spec_b = two_records
+    folder = tmp_path / "w" / "compare" / "demo-vs-policy"
+    folder.mkdir(parents=True)
+    for name in ("replay.mp4", "gaps.json", "gaps.csv", "gaps.png"):
+        (folder / name).write_bytes(b"stale")
+
+    def boom(*a, **k):
+        raise RuntimeError("no codec\nsecond line")
+    monkeypatch.setattr(stage, "render_overlay", boom)
+    _, st = _export_compare(placed, spec_a, spec_b)
+    assert st["done"] and st["paths"] == []
+    assert st["error"] == "動画を書き出せませんでした（数値のファイルは書きました）: no codec"
+    assert not (folder / "replay.mp4").exists()
+    assert {p.name for p in folder.iterdir()} == {"gaps.json", "gaps.csv", "gaps.png"}
+    assert (folder / "gaps.json").read_bytes() != b"stale"  # this export's numbers, not the old ones
+
+
+def test_a_compare_that_fails_before_the_numbers_keeps_the_plain_error(placed, two_records, tmp_path, monkeypatch):
+    spec_a, spec_b = two_records
+
+    def boom(*a, **k):
+        raise RuntimeError("no report")
+    monkeypatch.setattr(stage.report, "write_report", boom)
+    _, st = _export_compare(placed, spec_a, spec_b)
+    assert st["done"] and st["error"] == "no report"
+
+
 def test_the_stage_html_has_the_compare_controls(served):
     html = get(served().url)[2]
     for ident in ("comparePick", "compareSpec", "grip", "compareGo", "cphoto", "cgl", "cview", "cplay", "cslider",

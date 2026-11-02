@@ -539,9 +539,18 @@ class Stage:
             folder = self.work / "compare" / f"{_safe_name(a.label)}-vs-{_safe_name(b.label)}"
 
             def produce(progress) -> list[Path]:
+                # Only this export's files stay: an old video must not sit next to new numbers
+                for name in ("replay.mp4", "gaps.json", "gaps.csv", "gaps.png"):
+                    (folder / name).unlink(missing_ok=True)
                 written = report.write_report(compare(scene, a, b, grip_threshold=grip), folder, site=site)
-                with open_source(self.picture) as source:
-                    video = render_overlay(scene, self.camera, source, [a, b], folder / "replay.mp4", progress=progress)
+                try:
+                    with open_source(self.picture) as source:
+                        video = render_overlay(scene, self.camera, source, [a, b], folder / "replay.mp4",
+                                               progress=progress)
+                except Exception as e:  # the numbers are written; say that the video is not
+                    text = str(e).strip()
+                    raise RuntimeError("動画を書き出せませんでした（数値のファイルは書きました）: "
+                                       + (text.splitlines()[0] if text else type(e).__name__)) from e
                 return [Path(p) for p in (*written.values(), video)]
         job = secrets.token_hex(4)
         with self._jobs_lock:

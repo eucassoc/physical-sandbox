@@ -16,11 +16,12 @@ dependencies = [
   "mujoco>=3",
   "pyarrow",
   "matplotlib",
+  "fast-simplification",
 ]
 
 [project.optional-dependencies]
 sam = ["ultralytics"]
-mcp = ["mcp>=2.3", "fast-simplification"]
+mcp = ["mcp>=2.3"]
 dev = ["pytest", "pillow", "jsonschema"]
 
 [project.scripts]

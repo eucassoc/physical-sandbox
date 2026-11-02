@@ -81,6 +81,7 @@ let frame = 0;
 let timer = null;
 let three = null;       // { renderer, scene, camera, records, geometries, materials }
 let ready = false;      // the poses, times and pixel paths have arrived
+let baseM = null;       // the machine's base transform of this result, a THREE.Matrix4 made on first draw
 let generation = 0;     // counts the tool results: an older one's loads must not touch the newer
 
 const app = new App({ name: 'PsCompare', version: '0.1.0' }, {}, { autoResize: true });
@@ -202,12 +203,15 @@ function drawMachines() {
   if (!three || !ready) return;
   const { renderer, scene, camera, records } = three;
   const shown = [];
+  const local = new THREE.Matrix4();
+  // Each link's pose is in the machine's own frame; the machine's base transform (where it stands) comes apart
+  baseM ??= new THREE.Matrix4().set(...data.base);
   records.forEach((rec, r) => {
     const poses = data.poses[r][frame];
     rec.group.visible = false;
     if (!(show.machine && recShown(r) && poses)) return;
     for (const { mesh, link } of rec.meshes) {
-      mesh.matrix.set(...poses[link]);   // 16 numbers, row by row
+      mesh.matrix.copy(baseM).multiply(local.set(...poses[link]));   // base x pose; 16 numbers each, row by row
       mesh.matrixWorldNeedsUpdate = true;
     }
     shown.push(rec);
@@ -392,6 +396,7 @@ app.ontoolresult = async (result) => {
   stop();
   release();
   ready = false;
+  baseM = null;
   const body = result?.content?.[0]?.text;
   if (result?.isError) { say(`比較できませんでした: ${String(body).slice(0, 400)}`, true); return; }
   try {

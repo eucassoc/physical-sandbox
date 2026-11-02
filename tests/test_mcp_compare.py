@@ -21,69 +21,15 @@ pytest.importorskip("mcp")
 from mcp import Client  # noqa: E402
 from mcp.client.stdio import StdioServerParameters  # noqa: E402
 
-from physical_sandbox.camera import Camera  # noqa: E402
 from physical_sandbox.machine import load_machine  # noqa: E402
+from physical_sandbox import screens  # noqa: E402
 from physical_sandbox.mcp import pack, server  # noqa: E402
 from physical_sandbox.motion import motion_from_numpy, save_record  # noqa: E402
 from physical_sandbox.scene import PlacedMachine, Scene, save_scene  # noqa: E402
-from physical_sandbox.site import Floor, Site, save_site  # noqa: E402
+from physical_sandbox.site import Site, save_site  # noqa: E402
+from synthetic import H, W, look_at, make_world, motion  # noqa: E402
 
-URDF = """<?xml version="1.0"?>
-<robot name="blocks">
-  <link name="base">
-    <inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
-    <visual><origin xyz="0 0 0.15"/><geometry><box size="0.3 0.3 0.3"/></geometry></visual>
-  </link>
-  <link name="arm">
-    <inertial><mass value="1"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>
-    <visual><origin xyz="0.2 0 0"/><geometry><box size="0.4 0.1 0.1"/></geometry></visual>
-    <visual><origin xyz="0.4 0 0"/><geometry><sphere radius="0.06"/></geometry></visual>
-  </link>
-  <joint name="turn" type="revolute">
-    <parent link="base"/><child link="arm"/><origin xyz="0 0 0.4"/><axis xyz="0 0 1"/>
-    <limit lower="-3" upper="3" effort="1" velocity="1"/>
-  </joint>
-  <link name="tip">
-    <inertial><mass value="0.1"/><inertia ixx="0.01" iyy="0.01" izz="0.01" ixy="0" ixz="0" iyz="0"/></inertial>
-  </link>
-  <joint name="tip_fixed" type="fixed"><parent link="arm"/><child link="tip"/><origin xyz="0.4 0 0"/></joint>
-</robot>
-"""
-W, H = 320, 240
 SO101 = Path(os.environ.get("PS_SO101_URDF", "~/work/physical-sandbox-proto/robots/so101/so101.urdf")).expanduser()
-
-
-def look_at(eye, target=(0, 0, 0.2), size=(W, H), f=300.0, dist=None):
-    eye, target = np.array(eye, float), np.array(target, float)
-    fwd = (target - eye) / np.linalg.norm(target - eye)
-    right = np.cross(fwd, [0, 0, 1])
-    right /= np.linalg.norm(right)
-    down = np.cross(fwd, right)
-    R = np.array([right, down, fwd])
-    K = [[f, 0, size[0] / 2], [0, f, size[1] / 2], [0, 0, 1]]
-    return Camera(size[0], size[1], K, np.zeros(5) if dist is None else dist, R, -R @ eye)
-
-
-def motion(end, label, fps=10.0, n=11):
-    q = np.linspace(0, end, n).reshape(-1, 1)
-    return motion_from_numpy(q, fps=fps, joint_names=["turn"], machine="blocks", label=label)
-
-
-def make_world(tmp_path, cam=None, floor=True):
-    urdf = tmp_path / "blocks.urdf"
-    urdf.write_text(URDF)
-    corners_m = np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]], float)
-    site = Site(id="yard", cameras={"camera": cam or look_at((-2.5, 0.8, 1.2))}, residual_px={"camera": 0.7},
-                floor=Floor("camera", [(0, 0)] * 4, (2.0, 2.0), corners_m) if floor else None,
-                confirmed_by_person=True, dimensions="estimated")
-    save_site(site, tmp_path / "site.json")
-    placed = PlacedMachine(machine=load_machine(urdf), urdf=str(urdf), x=0.1, y=0.0, yaw=0.3)
-    save_scene(Scene(site=site, machines={"blocks": placed}), tmp_path / "scene.json")
-    save_record([motion(1.0, "slow")], "yard", tmp_path / "a.record.json")
-    save_record([motion(1.5, "wide")], "yard", tmp_path / "b.record.json")
-    still = tmp_path / "grey.png"
-    cv2.imwrite(str(still), np.full((H, W, 3), 128, np.uint8))
-    return site, placed, still
 
 
 @pytest.fixture
@@ -199,21 +145,24 @@ def test_the_answer_has_one_pose_set_per_frame_and_record(world):
         assert len(dev["centers"]) == out["frames"] and len(dev["tool_trail"]) >= 2
 
 
-def test_a_pose_is_the_link_in_the_site_frame(world):
+def test_a_pose_is_the_link_in_the_machine_frame_and_the_base_comes_apart(world):
     out = compare(world)
-    placed, a = world["placed"], world["site"]
+    placed = world["placed"]
     motions = {m.label: m for m in (motion(1.0, "slow"), motion(1.5, "wide"))}
-    T = placed.base_transform()
     for r, label in enumerate(("slow", "wide")):
         for k in (0, 7, out["frames"] - 1):
             t = out["figures"]["series"]["t"][k]
-            want = T @ placed.machine.link_poses(motions[label].at(t))["arm"]
+            want = placed.machine.link_poses(motions[label].at(t))["arm"]
             got = np.array(out["poses"][r][k][1]).reshape(4, 4)
             assert np.allclose(got, want, atol=2e-5)
-    # a machine placed at (0.1, 0) turned 0.3 rad: the base link sits there
-    base = np.array(out["poses"][0][0][0]).reshape(4, 4)
-    assert np.allclose(base[:3, 3], [0.1, 0.0, 0.0], atol=1e-5)
-    assert np.allclose(base[:2, :2], [[np.cos(0.3), -np.sin(0.3)], [np.sin(0.3), np.cos(0.3)]], atol=1e-5)
+    # the poses are the machine's own: its base link is at the origin. The placement (0.1, 0) turned 0.3 rad
+    # comes apart as the base transform, which the screen composes with each pose
+    assert np.allclose(np.array(out["poses"][0][0][0]).reshape(4, 4)[:3, 3], 0, atol=1e-5)
+    base = np.array(out["base"]).reshape(4, 4)
+    assert np.allclose(base, placed.base_transform(), atol=1e-6)
+    assert np.allclose(base[:3, 3], [0.1, 0.0, 0.0], atol=1e-6)
+    assert np.allclose(base[:2, :2], [[np.cos(0.3), -np.sin(0.3)], [np.sin(0.3), np.cos(0.3)]], atol=1e-6)
+    assert out["placed"] == {"id": "blocks", "x": 0.1, "y": 0.0, "yaw": 0.3}
 
 
 def test_the_tool_tip_is_projected_through_the_pinhole_camera(world):
@@ -251,10 +200,9 @@ def test_figures_are_the_comparisons_numbers_and_the_site_quality_comes_with_the
 
 
 def test_grip_threshold_is_passed_on_and_must_be_finite(world, monkeypatch):
-    import physical_sandbox.compare as cmp
     seen = []
-    real = cmp.compare
-    monkeypatch.setattr(cmp, "compare", lambda *a, **k: seen.append(k.get("grip_threshold")) or real(*a, **k))
+    real = screens.compare
+    monkeypatch.setattr(screens, "compare", lambda *a, **k: seen.append(k.get("grip_threshold")) or real(*a, **k))
     out = compare(world, gripThreshold=0.2)
     assert seen == [0.2] and "grip_threshold" in out["figures"]
     with pytest.raises(ValueError, match="gripThreshold"):
@@ -347,9 +295,9 @@ def test_the_model_cannot_open_a_web_address_but_local_cameras_pass(world):
                 "ftp://example.com/a.mp4"):
         with pytest.raises(ValueError, match="local file"):
             compare(world, video=url)
-    assert server._local_video("0") == "0"
-    assert server._local_video("rtsp://192.168.0.10/stream") == "rtsp://192.168.0.10/stream"
-    assert server._local_video(str(world["still"])) == str(world["still"])
+    assert screens.local_video("0") == "0"
+    assert screens.local_video("rtsp://192.168.0.10/stream") == "rtsp://192.168.0.10/stream"
+    assert screens.local_video(str(world["still"])) == str(world["still"])
 
 
 def world_tip(tmp_path, out):

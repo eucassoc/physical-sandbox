@@ -151,6 +151,15 @@ def test_frame_count_is_duration_times_fps(world):
     assert len(read(out)) == 20
 
 
+def test_progress_is_reported_after_each_written_frame(world):
+    make, still, tmp = world
+    scene, _ = make()
+    seen = []
+    render_overlay(scene, "camera", open_source(still), [motion(1.0, fps=10.0, n=11)], tmp / "p.mp4", fps=20.0,
+                   progress=lambda k, n: seen.append((k, n)))
+    assert seen == [(k, 20) for k in range(1, 21)]
+
+
 def test_second_call_in_one_process_is_not_black(world):
     make, still, tmp = world
     scene, cam = make()

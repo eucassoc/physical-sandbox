@@ -203,7 +203,7 @@ def _open_writer(path: Path, fps: float, size: tuple[int, int]):
 
 def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list[Motion], out: Path, *,
                    colors=COLORS, show=None, fps: float | None = None, start_s: float = 0.0,
-                   duration: float | None = None) -> Path:
+                   duration: float | None = None, progress=None) -> Path:
     """Draw ``motions`` (one or two) over ``source`` through the site camera ``camera_name``; write an mp4.
 
     Time runs from ``start_s`` for the longest motion's duration at ``fps`` (default: the source's, else 30);
@@ -212,7 +212,7 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
     ``show`` toggles ``machine`` (the shells), ``trail`` (tool tip path so far, record B dashed) and ``link``
     (a white line between the two tool tips, when two motions drive the same machine); missing keys stay on.
     ``duration`` (seconds) cuts the video short of the longest motion; a motion that is longer is just not shown
-    to its end.
+    to its end. ``progress(k, n)``, when given, is called after each written frame (k of n frames done).
     """
     if not motions:
         raise ValueError("no motions to draw")
@@ -272,6 +272,8 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
                     cv2.line(img, tuple(int(round(c)) for c in a), tuple(int(round(c)) for c in b),
                              (255, 255, 255), 2, cv2.LINE_AA)
             writer.write(img)
+            if progress is not None:
+                progress(k + 1, n_frames)
         writer.release()
         writer = None
         os.replace(partial, out)

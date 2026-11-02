@@ -165,6 +165,49 @@ def _gripper_span(scene: Scene, machine_id: str) -> float | None:
     return span if math.isfinite(span) and span > 0 else None
 
 
+def _find_grasps(scene: Scene, motions: list, grip_threshold: float | None) -> tuple:
+    """The grasp rule: ``(threshold, [closing times of each motion], note)`` for motions of one machine.
+
+    A grasp is the gripper joint closing through the threshold. The default threshold is the middle of the range
+    the gripper actually went through in all the motions, not of its joint limits: a gripper that only ever opens
+    a little (as in many teleoperated datasets) would never cross the latter. But a gripper that hardly moved at
+    all has no such middle: its wobble is noise, and no grasp is counted. ``note`` is why nothing can be said
+    about grasps (no gripper, it hardly moved, or none closed), else None.
+    """
+    names = list(motions[0].joint_names)
+    none = [[] for _ in motions]
+    if "gripper" not in names:
+        return grip_threshold, none, "グリッパーの関節（gripper）がありません"  # the machine has no joint named gripper
+    gj = names.index("gripper")
+    both = np.concatenate([m.q[:, gj] for m in motions])
+    lo, hi = float(both.min()), float(both.max())
+    span = _gripper_span(scene, motions[0].machine)
+    if grip_threshold is None and span is not None and hi - lo < MIN_GRIP_FRACTION * span:
+        return None, none, (f"グリッパーがほとんど動いていません（開閉の幅 {hi - lo:.3g} rad、関節の範囲 "
+                            f"{span:.3g} rad の {100 * (hi - lo) / span:.0f}%）")
+    if grip_threshold is None:
+        grip_threshold = (lo + hi) / 2
+    elif not math.isfinite(grip_threshold):
+        raise ValueError(f"grip_threshold must be a finite number, got {grip_threshold}")
+    grip_threshold = float(grip_threshold)
+    band = max(0.0, min(GRIP_BAND_FRACTION * (hi - lo), grip_threshold - lo, hi - grip_threshold))
+    closings = [_closings(m, gj, grip_threshold, band) for m in motions]
+    note = None
+    if not any(closings):  # a bare 0 would read as a fact; say none was found, at which threshold
+        note = f"つかむ瞬間が見つかりませんでした（しきい値 {grip_threshold:.3g}）"
+    return grip_threshold, closings, note
+
+
+def grasps_of(motion: Motion, scene: Scene, *, grip_threshold: float | None = None) -> dict:
+    """The grasps in one motion by the comparison's rule: ``{"count", "times", "threshold", "note"}``.
+
+    ``times`` are the seconds at which the gripper closes, ``threshold`` the gripper value used (None when no
+    grasp could be looked for) and ``note`` says why none was (empty when the rule ran and found some).
+    """
+    threshold, (times,), note = _find_grasps(scene, [motion], grip_threshold)
+    return {"count": len(times), "times": times, "threshold": threshold, "note": note or ""}
+
+
 def compare(scene: Scene, a: Motion, b: Motion, *, step_s: float = 1 / 30,
             grip_threshold: float | None = None) -> Comparison:
     """Numbers for the gaps between motions ``a`` and ``b`` of the same machine placed in ``scene``.
@@ -200,40 +243,17 @@ def compare(scene: Scene, a: Motion, b: Motion, *, step_s: float = 1 / 30,
     jerk = {"a": _jerk(_tips(scene, a, _grid(dur_a, step_s, cover=False)), step_s),
             "b": _jerk(_tips(scene, b, _grid(dur_b, step_s, cover=False)), step_s)}
 
-    # grasps: the gripper joint closing through the threshold, paired in order. The default threshold is the
-    # middle of the range the gripper actually went through in the two motions, not of its joint limits: a
-    # gripper that only ever opens a little (as in many teleoperated datasets) would never cross the latter.
-    # But a gripper that hardly moved at all has no such middle: its wobble is noise, and no grasp is counted.
+    # grasps: the gripper joint closing through the threshold, paired in order
     unknown, reasons = list(_UNKNOWN), {k_: _STAGE3 for k_ in _UNKNOWN}
-    grasps, counts = [], {"a": 0, "b": 0}
-    if "gripper" in names:
-        gj = names.index("gripper")
-        both = np.concatenate([a.q[:, gj], b.q[:, gj]])
-        lo, hi = float(both.min()), float(both.max())
-        span = _gripper_span(scene, a.machine)
-        if grip_threshold is None and span is not None and hi - lo < MIN_GRIP_FRACTION * span:
-            unknown.append("grasps")
-            reasons["grasps"] = (f"グリッパーがほとんど動いていません（開閉の幅 {hi - lo:.3g} rad、関節の範囲 "
-                                 f"{span:.3g} rad の {100 * (hi - lo) / span:.0f}%）")
-            grip_threshold = None
-        else:
-            if grip_threshold is None:
-                grip_threshold = (lo + hi) / 2
-            elif not math.isfinite(grip_threshold):
-                raise ValueError(f"grip_threshold must be a finite number, got {grip_threshold}")
-            grip_threshold = float(grip_threshold)
-            band = max(0.0, min(GRIP_BAND_FRACTION * (hi - lo), grip_threshold - lo, hi - grip_threshold))
-            ca, cb = _closings(a, gj, grip_threshold, band), _closings(b, gj, grip_threshold, band)
-            counts = {"a": len(ca), "b": len(cb)}
-            for ta, tb in zip(ca, cb):
-                gap_g = np.linalg.norm(_tips(scene, a, [ta])[0] - _tips(scene, b, [tb])[0])
-                grasps.append({"a_s": ta, "b_s": tb, "tool_gap_m": float(gap_g)})
-            if not ca and not cb:  # a bare 0 and 0 would read as a fact; say none was found, at which threshold
-                unknown.append("grasps")
-                reasons["grasps"] = f"つかむ瞬間が見つかりませんでした（しきい値 {grip_threshold:.3g}）"
-    else:
+    grip_threshold, (ca, cb), note = _find_grasps(scene, [a, b], grip_threshold)
+    counts = {"a": len(ca), "b": len(cb)}
+    grasps = []
+    for ta, tb in zip(ca, cb):
+        gap_g = np.linalg.norm(_tips(scene, a, [ta])[0] - _tips(scene, b, [tb])[0])
+        grasps.append({"a_s": ta, "b_s": tb, "tool_gap_m": float(gap_g)})
+    if note is not None:
         unknown.append("grasps")
-        reasons["grasps"] = "グリッパーの関節（gripper）がありません"  # the machine has no joint named gripper
+        reasons["grasps"] = note
 
     return Comparison(
         labels={"a": a.label, "b": b.label}, step_s=float(step_s), tool_deviation_m=tool_dev,

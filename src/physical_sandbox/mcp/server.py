@@ -368,14 +368,58 @@ def ps_site_status(siteDir: str) -> str:
                   "confirmedByPerson": site.confirmed_by_person})
 
 
+# ---- place a machine on a site ----
+
+def _finite(name: str, value) -> float:
+    """``value`` as a finite number: a bool, text, NaN or infinity is bad input."""
+    import math
+
+    from ..errors import InputError
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise InputError(f"{name} must be a finite number, got {value!r}")
+    return float(value)
+
+
+def ps_scene_place(siteDir: str, machine: str, x: float, y: float, yaw: float, scenePath: str | None = None,
+                   urdf: str | None = None) -> str:
+    from .. import catalog
+    from ..cli import _reading
+    from ..errors import InputError
+    from ..machine import load_machine
+    from ..push import kept_token
+    from ..scene import PlacedMachine, save_placement
+
+    x, y, yaw = _finite("x", x), _finite("y", y), _finite("yaw", yaw)
+    site = _reading(f"siteDir {siteDir!r}", load_site, Path(siteDir).expanduser() / "site.json")
+    if urdf is not None:  # a machine file on this computer: machine is the id to give it
+        mid, path = machine, Path(urdf).expanduser().resolve()
+        if not isinstance(mid, str) or not mid.strip() or len(mid) > 64 or not mid.isprintable():
+            raise InputError(f"machine must be a short name, got {machine!r}")
+        if path.suffix.lower() != ".urdf" or not path.is_file():
+            raise InputError(f"urdf {urdf!r}: no such .urdf file")
+    else:  # a catalog ref: the folder it was pulled to (no request when it is already here)
+        mid = catalog.parse_ref(machine)[1]
+        item = catalog.cached(machine) or catalog.pull(machine, token=kept_token(catalog._base()))
+        path = catalog.urdf_path(item)  # CatalogError for an item without a machine
+    fit = _read_json(_work(siteDir) / "fit.json")
+    picture = fit.get("imagePath") if isinstance(fit, dict) else None  # the picture the floor was fixed on
+    placed = PlacedMachine(load_machine(path), str(path), x, y, yaw, confirmed_by_person=False)
+    scene_path = Path(scenePath).expanduser() if scenePath else Path(siteDir).expanduser() / "scene.json"
+    save_placement(scene_path, site.id, {mid: placed}, picture=picture if isinstance(picture, str) else None)
+    return _json({"scenePath": str(scene_path), "machine": mid, "x": x, "y": y, "yaw": yaw})
+
+
 # ---- compare two motions ----
 
 @apps.tool(resource_uri=COMPARE_URI, description=(
     "Open a screen inside the chat to compare two motions of a machine on a site: the site's picture with the "
     "machine of each motion as a see-through shell in its own colour (A blue, B orange), the tool-tip paths, a "
     "slider and a play button, and the table of numbers (the gaps, with the times they happen; click a time to "
-    "jump there). siteDir is the folder with site.json; scenePath the scene file (where the machine stands); "
-    "camera the site camera's name; a and b the two motions: a recording file[#label] or "
+    "jump there). Leave b out to look at one motion alone: the same screen without the pair's gaps (it shows "
+    "the duration and the grasps). A record made for another stand of the same robot is read onto the "
+    "scene's only machine, and 'notes' in the answer says so. siteDir is the folder with site.json; scenePath the scene file (where the machine stands); "
+    "camera the site camera's name; a and b the motions: a recording file[#label] or "
     "lerobot:<dataset_dir>#<episode>. labelA and labelB name them on the screen. video is the picture to draw on "
     "(a still or a recording); without it, A's own recording when A is a LeRobot episode, else the picture the "
     "scene file names, else it asks for one. videoCamera is the camera of A's LeRobot dataset to take that "
@@ -383,8 +427,8 @@ def ps_site_status(siteDir: str) -> str:
     "'camera', so give the dataset's camera name here, such as 'side'). gripThreshold is the gripper joint value "
     "(radians) a grasp closes through (default: the middle of the range the gripper went through in the two "
     "motions). What the numbers cannot tell yet is listed with its reason."))
-def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA: str | None = None,
-               labelB: str | None = None, video: str | None = None, videoCamera: str | None = None,
+def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str | None = None,
+               labelA: str | None = None, labelB: str | None = None, video: str | None = None, videoCamera: str | None = None,
                gripThreshold: float | None = None) -> str:
     from ..cli import _check_motions, _lerobot_picture, _load_motion, _own_episode_span, _reading
     from ..errors import InputError
@@ -394,9 +438,20 @@ def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA
     if camera not in site.cameras:
         raise InputError(f"the site has no camera {camera!r} (it has {', '.join(sorted(site.cameras))})")
     scene = _reading(f"scenePath {scenePath!r}", load_scene, Path(scenePath).expanduser(), site)
-    ma, a_lerobot = _load_motion(a, scene)
-    mb, _ = _load_motion(b, scene)
-    _check_motions(scene, ma, mb)
+    notes: list[str] = []  # what the read-over of a one-device record assumed
+    ma, a_lerobot = _load_motion(a, scene, notes)
+    if b is None:  # one record alone: no pair to check, only the motion against the placed machine
+        mb = None
+        placed = scene.machines.get(ma.machine)
+        if placed is None:
+            raise InputError(f"the motion {ma.label!r} drives machine {ma.machine!r}, which is not placed in the "
+                             f"scene (placed: {', '.join(sorted(scene.machines)) or 'none'})")
+        if list(ma.joint_names) != list(placed.machine.joint_names):
+            raise InputError(f"the motion {ma.label!r} has joints {list(ma.joint_names)}, the machine "
+                             f"{ma.machine!r} has {list(placed.machine.joint_names)}")
+    else:
+        mb, _ = _load_motion(b, scene, notes)
+        _check_motions(scene, ma, mb)
 
     start_s = 0.0
     if video:
@@ -413,9 +468,11 @@ def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str, labelA
                              "file names none")
     spec = screens.local_video(spec)
     with _reading(f"video {str(spec)!r}", open_source, spec) as source:
-        out = screens.screen_data(site, scene, camera, [ma, mb], source, start_s=start_s,
-                                  grip_threshold=gripThreshold, labels=[labelA, labelB],
+        out = screens.screen_data(site, scene, camera, [ma] if mb is None else [ma, mb], source, start_s=start_s,
+                                  grip_threshold=gripThreshold,
+                                  labels=[labelA] if mb is None else [labelA, labelB],
                                   poses_budget=POSES_BUDGET)
+    out["notes"] = notes
     return json.dumps(out, separators=(",", ":"))
 
 
@@ -458,6 +515,14 @@ server.tool(description="Check a machine folder (URDF, meshes, product.json, pro
     ps_machine_check)
 server.tool(description="Whether the site in siteDir is decided (confirmed by the person), with its residual in "
                         "pixels, its object names and whether its lengths are measured or estimated.")(ps_site_status)
+server.tool(description="Place a machine on a site, in the site's floor frame in metres, and write the scene file "
+                        "(default siteDir/scene.json; ps_compare's scenePath). machine is a catalog ref "
+                        "(handle/name[:version]; pulled first when it is not on this computer) or, with urdf (a "
+                        "machine file on this computer), the id to give that machine. x and y are the base's "
+                        "position on the floor in metres, yaw its turn in radians. It answers the scene file, "
+                        "the machine's id and where it stands. Nobody has looked at the placement yet: say so "
+                        "and ask the person to check it in the compare screen or in `psbx stage`, where they "
+                        "confirm it.")(ps_scene_place)
 
 
 def main() -> None:

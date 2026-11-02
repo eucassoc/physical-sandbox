@@ -104,7 +104,7 @@ def test_the_compare_tool_opens_the_screen_and_the_model_part_tool_is_the_screen
         schema = json.dumps(tools[name]["inputSchema"])
         assert "$ref" not in schema and "prefixItems" not in schema, name
     required = set(tools["ps_compare"]["inputSchema"]["required"])
-    assert required == {"siteDir", "scenePath", "camera", "a", "b"}
+    assert required == {"siteDir", "scenePath", "camera", "a"}  # b is optional: one record can be shown alone
 
 
 def test_the_compare_screen_is_served_with_the_bridge_and_three_inlined(world):
@@ -122,6 +122,80 @@ def test_the_compare_screen_is_served_with_the_bridge_and_three_inlined(world):
 def test_three_ships_as_package_data():
     assert (Path(server.__file__).parent / "widgets" / "vendor" / "three.iife.js").is_file()
     assert (Path(server.__file__).parent / "widgets" / "compare.html").is_file()
+
+
+# ---- one record ----
+
+def test_compare_with_one_motion_shows_one_record(world):
+    w = world
+    out = json.loads(server.ps_compare(siteDir=str(w["dir"]), scenePath=str(w["dir"] / "scene.json"),
+                                       camera="camera", a=str(w["dir"] / "a.record.json"), video=str(w["still"])))
+    assert len(out["records"]) == 1 and out["records"][0]["label"] == "slow"
+    assert "tool_deviation_m" not in out["figures"]
+    assert set(out["figures"]) >= {"duration_s", "grasp_counts", "grip_threshold"}
+    assert out["notes"] == []
+    full = merged(out)
+    assert len(full["poses"]) == 1 and len(full["poses"][0]) == full["frames"]
+
+
+def test_compare_with_one_motion_takes_its_label_and_tells_the_read_over(world):
+    w = world
+    save_record([motion_from_numpy(np.linspace(0, 1, 11).reshape(-1, 1), fps=10.0, joint_names=["turn"],
+                                   machine="stand", label="other")], "yard", w["dir"] / "c.record.json")
+    out = json.loads(server.ps_compare(siteDir=str(w["dir"]), scenePath=str(w["dir"] / "scene.json"),
+                                       camera="camera", a=str(w["dir"] / "c.record.json"), labelA="mine",
+                                       video=str(w["still"])))
+    assert [r["label"] for r in out["records"]] == ["mine"]
+    assert len(out["notes"]) == 1 and "stand" in out["notes"][0] and "blocks" in out["notes"][0]
+
+
+def test_compare_with_two_motions_still_answers_notes(world):
+    assert compare(world)["notes"] == []
+
+
+def test_compare_with_one_motion_refuses_a_record_whose_joints_are_not_the_machines(world):
+    from physical_sandbox.errors import InputError
+
+    w = world
+    save_record([motion_from_numpy(np.zeros((5, 2)), fps=10.0, joint_names=["turn", "extra"], machine="blocks",
+                                   label="wrong")], "yard", w["dir"] / "c.record.json")
+    with pytest.raises(InputError, match="joints"):
+        server.ps_compare(siteDir=str(w["dir"]), scenePath=str(w["dir"] / "scene.json"), camera="camera",
+                          a=str(w["dir"] / "c.record.json"), video=str(w["still"]))
+
+
+def test_the_compare_screen_hides_the_pair_parts_and_the_figures_read_one_record(world, tmp_path):
+    import shutil
+    import subprocess
+
+    html = server._widget("compare.html", three=True)
+    assert 'id="lblRecB"' in html and 'id="lblLink"' in html and "data.records.length === 2" in html
+    assert ".shows label[hidden] { display: none; }" in html  # a flex label would show through `hidden`
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    lib = (Path(server.__file__).parent / "widgets" / "lib" / "figures.js").read_text()
+    (tmp_path / "rows.js").write_text(lib + """
+const rows = figureRows({ duration_s: { a: 3.0 }, grasp_counts: { a: 2 }, grip_threshold: 0.25 }, (t) => t, (s) => s);
+console.log(rows);""")
+    done = subprocess.run([node, str(tmp_path / "rows.js")], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert "3.00 s" in done.stdout and "2 回" in done.stdout and "B " not in done.stdout and "undefined" not in done.stdout
+
+
+def test_the_compare_screens_script_is_valid_javascript(world, tmp_path):
+    import re
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    html = server._widget("compare.html", three=True)
+    script = re.findall(r'<script type="module">(.*?)</script>', html, re.S)[-1]
+    (tmp_path / "compare.mjs").write_text(script)
+    done = subprocess.run([node, "--check", str(tmp_path / "compare.mjs")], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
 
 
 # ---- what ps_compare answers ----

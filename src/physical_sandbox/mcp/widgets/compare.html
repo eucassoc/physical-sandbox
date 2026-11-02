@@ -17,6 +17,7 @@
   .shows b { font-weight: 600; margin-right: 2px; }
   .shows label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
   .shows label.off { opacity: .45; cursor: default; }
+  .shows label[hidden] { display: none; }
   .sw { width: 22px; height: 0; border-top: 3px solid; display: inline-block; }
   .sw.b { border-top-style: dashed; }
   .site { margin-top: 8px; color: var(--muted); }
@@ -44,12 +45,12 @@
   <div class="row shows" id="shows">
     <b>記録</b>
     <label><input type="checkbox" data-show="recA" checked /><i class="sw" style="border-color:#2f7fe0"></i><span id="labelA">A</span></label>
-    <label><input type="checkbox" data-show="recB" checked /><i class="sw b" style="border-color:#f08c1a"></i><span id="labelB">B</span></label>
+    <label id="lblRecB"><input type="checkbox" data-show="recB" checked /><i class="sw b" style="border-color:#f08c1a"></i><span id="labelB">B</span></label>
     <b>表示</b>
     <label id="lblMachine"><input type="checkbox" data-show="machine" checked />ロボット</label>
     <label id="lblBox"><input type="checkbox" data-show="box" checked />床の枠</label>
     <label><input type="checkbox" data-show="trail" checked />通り道</label>
-    <label><input type="checkbox" data-show="link" checked />A と B を結ぶ線</label>
+    <label id="lblLink"><input type="checkbox" data-show="link" checked />A と B を結ぶ線</label>
   </div>
   <div class="site" id="site"></div>
   <table id="figures"></table>
@@ -179,7 +180,7 @@ function draw() {
     }
   });
   const [a, b] = data.records;
-  if (show.link && show.recA && show.recB) {
+  if (data.records.length === 2 && show.link && show.recA && show.recB) {   // the A-B line is for a pair
     for (const dev of a.devices) {
       const p = dev.centers[frame];
       const q = b.devices.find((d) => d.id === dev.id)?.centers[frame];
@@ -232,7 +233,11 @@ function figures() {
   }));
   document.getElementById('site').innerHTML = siteLine(data.site, data.stride, esc);
   document.getElementById('labelA').textContent = `A: ${data.records[0].label}`;
-  document.getElementById('labelB').textContent = `B: ${data.records[1].label}`;
+  // One record alone has no B row and no line to B: draw only what the data has
+  const pair = data.records.length === 2;
+  document.getElementById('lblRecB').hidden = !pair;
+  document.getElementById('lblLink').hidden = !pair;
+  if (pair) document.getElementById('labelB').textContent = `B: ${data.records[1].label}`;
 }
 
 document.querySelectorAll('[data-show]').forEach((box) => box.addEventListener('change', () => {

@@ -23,7 +23,7 @@ function figureRows(figures, when, esc) {
   }
   if (f.shape_deviation_m !== undefined) row('通り道の形のずれ', mm(f.shape_deviation_m));
   const d = f.duration_s;
-  if (d) row('動いた時間', `A ${sec(d.a)}、B ${sec(d.b)}（B − A = ${d.diff >= 0 ? '+' : ''}${d.diff.toFixed(2)} s）`);
+  if (d) row('動いた時間', d.b === undefined ? sec(d.a) : `A ${sec(d.a)}、B ${sec(d.b)}（B − A = ${d.diff >= 0 ? '+' : ''}${d.diff.toFixed(2)} s）`);
   if (f.jerk) row('なめらかさ（ジャーク）', `A ${dash(f.jerk.a, (v) => `${v.toPrecision(3)} m/s³`)}、B ${dash(f.jerk.b, (v) => `${v.toPrecision(3)} m/s³`)}`);
   for (const [name, j] of Object.entries(f.joints ?? {})) {
     row(`関節 ${name} のずれ`, `最大 ${deg(j.max_rad)}（${when(j.at_s)}）、平均 ${deg(j.mean_rad)}`);
@@ -31,7 +31,7 @@ function figureRows(figures, when, esc) {
   const n = f.grasp_counts;
   if (n && !unknown.includes('grasps')) {
     const at = f.grip_threshold === null || f.grip_threshold === undefined ? '' : `（しきい値 ${Number(f.grip_threshold).toPrecision(3)}）`;
-    row('つかんだ回数', `A ${n.a} 回、B ${n.b} 回${at}`);
+    row('つかんだ回数', n.b === undefined ? `${n.a} 回${at}` : `A ${n.a} 回、B ${n.b} 回${at}`);
     (f.grasps ?? []).forEach((g, i) => row(`${i + 1} 回目につかんだとき`, `手先のずれ ${mm(g.tool_gap_m)}（A の ${when(g.a_s)}、B の ${sec(g.b_s)}）`));
   }
   for (const name of unknown) {

@@ -98,7 +98,7 @@ def test_tool_list_marks_the_screen_and_hides_the_screen_only_tools(env):
     assert set(tools) == {"ps_fit_floor", "ps_spike_image", "ps_floor_solve", "ps_objects_propose",
                           "ps_site_decide", "ps_site_status", "ps_compare", "ps_model_part", "ps_compare_part",
                           "ps_objects_part", "ps_catalog_search", "ps_catalog_pull", "ps_catalog_push",
-                          "ps_machine_check"}
+                          "ps_machine_check", "ps_scene_place"}
     for name in ("ps_fit_floor", "ps_spike_image", "ps_floor_solve", "ps_objects_propose", "ps_site_decide",
                  "ps_objects_part"):
         assert tools[name]["_meta"]["ui"]["resourceUri"] == "ui://physical-sandbox/fit-floor.html"
@@ -107,6 +107,7 @@ def test_tool_list_marks_the_screen_and_hides_the_screen_only_tools(env):
     for name in ("ps_fit_floor", "ps_objects_propose"):
         assert "model" in (tools[name]["_meta"]["ui"].get("visibility") or ["model"])  # the agent can call it
     assert "ui" not in (tools["ps_site_status"].get("_meta") or {})
+    assert "ui" not in (tools["ps_scene_place"].get("_meta") or {})
 
 
 def test_machine_check_over_stdio_says_what_is_missing(env, tmp_path):
@@ -585,3 +586,122 @@ def test_propose_decodes_the_picture_once(env, monkeypatch):
     monkeypatch.setattr(server, "open_source", lambda spec: opened.append(spec) or real(spec))
     server.ps_objects_propose(env["image"], boxes("pole"), env["site"], edgesM=EDGES)
     assert len(opened) == 1  # the display copy is made from the frame the segmenter got
+
+
+# ---- ps_scene_place ----
+
+@pytest.fixture
+def placed_world(tmp_path):
+    """A decided site, its folder, and a machine's URDF (the tiny boxes), as the chat finds them."""
+    from synthetic import make_world
+
+    make_world(tmp_path)
+    (tmp_path / "scene.json").unlink()
+    for rec in tmp_path.glob("*.record.json"):
+        rec.unlink()
+    return tmp_path
+
+
+def place(site_dir, **over):
+    d = dict(siteDir=str(site_dir), machine="mini", urdf=str(site_dir / "blocks.urdf"), x=0.5, y=0.0, yaw=0.0)
+    d.update(over)
+    return json.loads(server.ps_scene_place(**d))
+
+
+def test_scene_place_writes_a_scene_from_a_urdf(env, placed_world):
+    from physical_sandbox.scene import load_scene
+
+    async def go():
+        async with started(env) as client:
+            return json.loads(text(await client.call_tool(
+                "ps_scene_place", {"siteDir": str(placed_world), "machine": "mini",
+                                   "urdf": str(placed_world / "blocks.urdf"), "x": 0.5, "y": 0.0, "yaw": 0.0})))
+    out = run(go())
+    assert out == {"scenePath": str(placed_world / "scene.json"), "machine": "mini", "x": 0.5, "y": 0.0, "yaw": 0.0}
+    scene = load_scene(placed_world / "scene.json", load_site(placed_world / "site.json"))
+    assert scene.machines["mini"].x == 0.5 and not scene.machines["mini"].confirmed_by_person
+    assert json.loads((placed_world / "scene.json").read_text()).get("picture") is None
+
+
+def test_scene_place_keeps_the_scenes_records_and_takes_the_picture_of_the_fixed_floor(placed_world):
+    (placed_world / "scene.json").write_text(json.dumps({"format": "physical-sandbox.scene/1", "site": "yard",
+                                                         "machines": {}, "records": ["x.record.json"]}))
+    (placed_world / ".work").mkdir()
+    (placed_world / ".work" / "fit.json").write_text(json.dumps({"imagePath": "/p/still.png", "imageKey": "k"}))
+    out = place(placed_world, scenePath=str(placed_world / "other.json"))
+    assert out["scenePath"] == str(placed_world / "other.json")
+    written = json.loads((placed_world / "other.json").read_text())
+    assert written["picture"] == "/p/still.png" and written["records"] == []  # a new file has no records
+    place(placed_world)
+    kept = json.loads((placed_world / "scene.json").read_text())
+    assert kept["records"] == ["x.record.json"] and kept["picture"] == "/p/still.png"
+
+
+@pytest.mark.parametrize("bad", [True, float("nan"), float("inf"), "1"])
+def test_scene_place_refuses_a_value_that_is_not_a_finite_number(placed_world, bad):
+    from physical_sandbox.errors import InputError
+
+    for key in ("x", "y", "yaw"):
+        with pytest.raises(InputError, match=key):
+            place(placed_world, **{key: bad})
+    assert not (placed_world / "scene.json").exists()
+
+
+def test_scene_place_refuses_a_missing_site_and_a_missing_urdf(placed_world, tmp_path):
+    from physical_sandbox.errors import InputError
+
+    with pytest.raises(InputError):
+        place(tmp_path / "nowhere")
+    with pytest.raises(InputError, match="urdf"):
+        place(placed_world, urdf=str(placed_world / "nope.urdf"))
+
+
+def test_scene_place_takes_a_pulled_catalog_machine_without_any_request(placed_world, monkeypatch):
+    import shutil
+
+    from physical_sandbox import catalog
+    from physical_sandbox.scene import load_scene
+
+    item = placed_world / "item"
+    item.mkdir()
+    shutil.copy(placed_world / "blocks.urdf", item / "arm.urdf")
+    (item / "manifest.json").write_text(json.dumps({"files": [{"path": "arm.urdf"}]}))
+    monkeypatch.setattr(catalog, "cached", lambda ref: item)
+    monkeypatch.setattr(catalog, "pull", lambda *a, **k: pytest.fail("no request for a pulled item"))
+    out = json.loads(server.ps_scene_place(siteDir=str(placed_world), machine="acme/arm:1.0", x=0.1, y=0.2, yaw=0.3))
+    assert out["machine"] == "arm"
+    scene = load_scene(placed_world / "scene.json", load_site(placed_world / "site.json"))
+    assert list(scene.machines) == ["arm"] and scene.machines["arm"].yaw == 0.3
+
+
+def test_scene_place_pulls_a_catalog_machine_that_is_not_cached(placed_world, monkeypatch):
+    import shutil
+
+    from physical_sandbox import catalog, push
+
+    item = placed_world / "item"
+    item.mkdir()
+    shutil.copy(placed_world / "blocks.urdf", item / "arm.urdf")
+    (item / "manifest.json").write_text(json.dumps({"files": [{"path": "arm.urdf"}]}))
+    seen = {}
+    monkeypatch.setattr(catalog, "cached", lambda ref: None)
+    monkeypatch.setattr(push, "kept_token", lambda base: "tok")
+
+    def pull(ref, **kw):
+        seen.update(ref=ref, **kw)
+        return item
+    monkeypatch.setattr(catalog, "pull", pull)
+    out = json.loads(server.ps_scene_place(siteDir=str(placed_world), machine="acme/arm", x=0, y=0, yaw=0))
+    assert out["machine"] == "arm" and seen["ref"] == "acme/arm" and seen["token"] == "tok"
+
+
+def test_scene_place_says_when_a_catalog_item_has_no_machine(placed_world, monkeypatch):
+    from physical_sandbox import catalog
+    from physical_sandbox.errors import CatalogError
+
+    item = placed_world / "item"
+    item.mkdir()
+    (item / "manifest.json").write_text(json.dumps({"files": [{"path": "run.record.json"}]}))
+    monkeypatch.setattr(catalog, "cached", lambda ref: item)
+    with pytest.raises(CatalogError):
+        server.ps_scene_place(siteDir=str(placed_world), machine="acme/run", x=0, y=0, yaw=0)

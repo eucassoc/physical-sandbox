@@ -301,8 +301,9 @@ def _cmd_fetch_sam(args) -> int:
 
 def _cmd_pull(args) -> int:
     from . import catalog
+    from .push import kept_token
 
-    print(catalog.pull(args.ref, force=args.force))
+    print(catalog.pull(args.ref, force=args.force, token=kept_token(catalog._base())))
     return 0
 
 
@@ -325,17 +326,19 @@ def _cmd_push(args) -> int:
 
 def _cmd_login(args) -> int:
     from . import catalog
-    from .push import login, token_file
+    from .push import _signed_in, token_file
 
-    login(catalog._base(), log=print)
-    print(f"signed in; the token is kept in {token_file()}")
+    _, handle = _signed_in(catalog._base(), log=print)
+    print(f"signed in as {handle}; the token is kept in {token_file()}")
     return 0
 
 
 def _cmd_catalog_search(args) -> int:
     from . import catalog
+    from .push import kept_token
 
-    items = catalog.search(args.q, category=args.category, tag=args.tag, kind=args.kind)
+    items = catalog.search(args.q, category=args.category, tag=args.tag, kind=args.kind,
+                           token=kept_token(catalog._base()))
     if args.json:
         print(json.dumps({"items": items}, ensure_ascii=False))
         return 0

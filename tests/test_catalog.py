@@ -113,3 +113,26 @@ def test_a_broken_transfer_is_a_catalog_error(catalog_server):
     catalog_server.stop()
     with pytest.raises(CatalogError):
         catalog.search("arm", base=catalog_server.url)
+
+
+def test_search_and_pull_send_the_token_when_given(catalog_server, cache):
+    catalog.search("mini", base=catalog_server.url, token="tok-1")
+    assert catalog_server.headers[-1].get("Authorization") == "Bearer tok-1"
+    catalog.pull("t/mini:1", base=catalog_server.url, token="tok-1")
+    assert all(h.get("Authorization") == "Bearer tok-1" for h in catalog_server.headers[-3:])
+
+
+def test_search_and_pull_send_no_token_without_one(catalog_server, cache):
+    catalog.search("mini", base=catalog_server.url)
+    assert "Authorization" not in catalog_server.headers[-1]
+
+
+def test_pull_latest_sends_the_token_to_the_version_lookup_too(catalog_server, cache):
+    catalog.pull("t/mini", base=catalog_server.url, token="tok-1")
+    assert catalog_server.headers and all(h.get("Authorization") == "Bearer tok-1" for h in catalog_server.headers)
+
+
+def test_search_marks_private_items(catalog_server):
+    items = catalog.search("mini", base=catalog_server.url)
+    assert all(isinstance(i["private"], bool) for i in items)
+    assert items[0]["private"] == (items[0].get("visibility") == "private")

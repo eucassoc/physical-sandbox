@@ -58,9 +58,12 @@ def _user_agent() -> str:
     return f"psbx/{__version__}"
 
 
-def _get(url: str) -> bytes:
+def _get(url: str, token: str | None = None) -> bytes:
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": _user_agent()})
+        headers = {"User-Agent": _user_agent()}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
             return r.read()
     except urllib.error.HTTPError as e:
@@ -74,20 +77,23 @@ def _get(url: str) -> bytes:
         raise _Offline(f"{url}: {getattr(e, 'reason', None) or e}") from e
 
 
-def _get_json(url: str):
+def _get_json(url: str, token: str | None = None):
     try:
-        return json.loads(_get(url).decode())
+        return json.loads(_get(url, token).decode())
     except ValueError as e:
         raise CatalogError(f"{url}: not JSON") from e
 
 
-def search(q: str = "", *, category=None, tag=None, kind=None, base: str | None = None) -> list[dict]:
+def search(q: str = "", *, category=None, tag=None, kind=None, base: str | None = None,
+           token: str | None = None) -> list[dict]:
+    """The catalog's items for a query. With a ``token`` the signed-in person's private items are included."""
     base = (base or _base()).rstrip("/")
     params = {k: v for k, v in (("q", q), ("category", category), ("tag", tag), ("kind", kind)) if v}
     url = f"{base}/api/catalog/search?{urllib.parse.urlencode(params)}"
     try:
-        return _get_json(url)["items"]
-    except (KeyError, TypeError) as e:
+        items = _get_json(url, token)["items"]
+        return [{**item, "private": item.get("visibility") == "private"} for item in items]
+    except (KeyError, TypeError, AttributeError) as e:
         raise CatalogError(f"{url}: no items in the answer") from e
 
 
@@ -124,9 +130,9 @@ def _safe_rel(path: str) -> str:
     return path
 
 
-def _resolve_latest(handle: str, name: str, base: str) -> str:
+def _resolve_latest(handle: str, name: str, base: str, token: str | None = None) -> str:
     try:
-        v = _get_json(f"{base}/api/catalog/{handle}/{name}")["item"]["latest_version"]
+        v = _get_json(f"{base}/api/catalog/{handle}/{name}", token)["item"]["latest_version"]
     except _Offline as e:
         c = cached(f"{handle}/{name}")
         if c is not None:
@@ -141,13 +147,13 @@ def _resolve_latest(handle: str, name: str, base: str) -> str:
     return v
 
 
-def pull(ref: str, *, base: str | None = None, force: bool = False) -> Path:
+def pull(ref: str, *, base: str | None = None, force: bool = False, token: str | None = None) -> Path:
     base = (base or _base()).rstrip("/")  # PS_CATALOG_URL is read at call time, so it can change after import
     handle, name, version = parse_ref(ref)
     parent = _name_dir(handle, name)
     if version == "latest":
         # latest moves, so ask the server; the cached marker is only the offline fallback
-        version = _resolve_latest(handle, name, base)
+        version = _resolve_latest(handle, name, base, token)
         resolved_latest = True
     else:
         resolved_latest = False
@@ -161,14 +167,14 @@ def pull(ref: str, *, base: str | None = None, force: bool = False) -> Path:
         shutil.rmtree(partial, ignore_errors=True)
         partial.mkdir(parents=True)
         root = f"{base}/api/catalog/{handle}/{name}/{version}"
-        manifest_bytes = _get(f"{root}/manifest")
+        manifest_bytes = _get(f"{root}/manifest", token)
         try:
             files = json.loads(manifest_bytes.decode())["files"]
         except (ValueError, KeyError, TypeError) as e:
             raise CatalogError(f"{root}/manifest: not a manifest") from e
         for f in files:
             rel = _safe_rel(f["path"])
-            data = _get(f"{root}/files/{urllib.parse.quote(rel)}")
+            data = _get(f"{root}/files/{urllib.parse.quote(rel)}", token)
             if hashlib.sha256(data).hexdigest() != str(f["sha256"]).lower():
                 raise CatalogError(f"{handle}/{name}:{version}: sha256 of {rel} does not match the manifest")
             out = partial / rel

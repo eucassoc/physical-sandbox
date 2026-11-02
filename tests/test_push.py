@@ -364,3 +364,40 @@ def test_a_record_version_of_a_public_item_reports_public(tmp_path, catalog_serv
     result = push("ada/run:2", rec, machine_dir=machines, base=catalog_server.url, log=said.append)
     assert result.visibility == "public" and any("already public" in s for s in said)
     assert result.companion_visibility == {}
+
+
+def test_login_status_reads_the_token_file_only(catalog_server, home):
+    assert push_mod.login_status(catalog_server.url) == {"signedIn": False, "handle": None}
+    push_mod._keep(catalog_server.url, "tok-1", 3600, handle="ada")
+    assert push_mod.login_status(catalog_server.url) == {"signedIn": True, "handle": "ada"}
+    assert catalog_server.hits == 0
+
+
+def test_an_expired_token_is_not_signed_in(catalog_server, home):
+    push_mod._keep(catalog_server.url, "tok-1", -1, handle="ada")
+    assert push_mod.login_status(catalog_server.url) == {"signedIn": False, "handle": None}
+
+
+def test_a_token_for_another_base_is_not_signed_in(catalog_server, home):
+    push_mod._keep("https://elsewhere.example", "tok-1", 3600, handle="ada")
+    assert push_mod.login_status(catalog_server.url) == {"signedIn": False, "handle": None}
+
+
+def test_signing_in_remembers_the_handle(catalog_server, home):
+    push_mod._signed_in(catalog_server.url, log=lambda s: None)
+    kept = json.loads(push_mod.token_file().read_text())
+    assert kept["handle"] == "ada" and kept["token"] == "tok-1"
+    assert os.stat(push_mod.token_file()).st_mode & 0o777 == 0o600
+    assert push_mod.login_status(catalog_server.url) == {"signedIn": True, "handle": "ada"}
+
+
+def test_a_token_kept_without_a_handle_is_signed_in_with_no_handle(catalog_server, home):
+    push_mod._keep(catalog_server.url, "tok-1", 3600)
+    assert push_mod.login_status(catalog_server.url) == {"signedIn": True, "handle": None}
+
+
+def test_the_cli_login_says_the_handle_and_keeps_it(catalog_server, monkeypatch, capsys):
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
+    assert main(["login"]) == 0
+    assert f"signed in as ada; the token is kept in {push_mod.token_file()}" in capsys.readouterr().out
+    assert push_mod.login_status(catalog_server.url) == {"signedIn": True, "handle": "ada"}

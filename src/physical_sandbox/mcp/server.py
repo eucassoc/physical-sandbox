@@ -173,15 +173,17 @@ apps = Apps()
 
 def ps_catalog_search(q: str = "", category: str | None = None, kind: str | None = None) -> str:
     from .. import catalog
+    from ..push import kept_token
 
-    return _json({"items": catalog.search(q, category=category, kind=kind)})
+    return _json({"items": catalog.search(q, category=category, kind=kind, token=kept_token(catalog._base()))})
 
 
 def ps_catalog_pull(ref: str) -> str:
     from .. import catalog
     from ..errors import CatalogError
+    from ..push import kept_token
 
-    d = catalog.pull(ref)
+    d = catalog.pull(ref, token=kept_token(catalog._base()))
     try:
         urdf = str(catalog.urdf_path(d))
     except CatalogError:  # an item without a machine (a recording, say)

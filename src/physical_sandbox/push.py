@@ -128,21 +128,48 @@ def _forget(base: str) -> None:
         pass
 
 
-def _keep(base: str, token: str, expires_in) -> None:
+def _write_kept(kept: dict) -> None:
     path = token_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    expires = datetime.now(timezone.utc) + timedelta(seconds=float(expires_in or 3600))
-    text = json.dumps({"base": base, "token": token,
-                       "expiresAt": expires.isoformat(timespec="milliseconds").replace("+00:00", "Z")})
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w") as f:
-            f.write(text)
+            f.write(json.dumps(kept))
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _keep(base: str, token: str, expires_in, handle: str | None = None) -> None:
+    expires = datetime.now(timezone.utc) + timedelta(seconds=float(expires_in or 3600))
+    kept = {"base": base, "token": token,
+            "expiresAt": expires.isoformat(timespec="milliseconds").replace("+00:00", "Z")}
+    if handle:
+        kept["handle"] = handle
+    _write_kept(kept)
+
+
+def remember_handle(base: str, handle: str) -> None:
+    """Add the account's handle to the kept token (a screen shows it without asking the network)."""
+    try:
+        kept = json.loads(token_file().read_text())
+    except (OSError, ValueError):
+        return
+    if isinstance(kept, dict) and kept.get("base") == base:
+        _write_kept({**kept, "handle": handle})
+
+
+def login_status(base: str) -> dict:
+    """{"signedIn", "handle"} from the token file alone (no request): signedIn is False without a valid token."""
+    if kept_token(base) is None:
+        return {"signedIn": False, "handle": None}
+    try:
+        handle = json.loads(token_file().read_text()).get("handle")
+    except (OSError, ValueError, AttributeError):
+        handle = None
+    return {"signedIn": True, "handle": handle if isinstance(handle, str) and handle else None}
 
 
 def login(base: str, *, log=print) -> str:
@@ -195,6 +222,7 @@ def _signed_in(base: str, log, interactive: bool = True) -> tuple[str, str]:
             raise
         if not handle:
             raise InputError("decide your handle on PS.com first (/catalog/me)")
+        remember_handle(base, handle)
         return token, handle
     raise PushError("signin", 401)
 

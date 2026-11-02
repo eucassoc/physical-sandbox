@@ -430,7 +430,7 @@ def ps_scene_place(siteDir: str, machine: str, x: float, y: float, yaw: float, s
 def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str | None = None,
                labelA: str | None = None, labelB: str | None = None, video: str | None = None, videoCamera: str | None = None,
                gripThreshold: float | None = None) -> str:
-    from ..cli import _check_motions, _lerobot_picture, _load_motion, _own_episode_span, _reading
+    from ..cli import _check_motion, _check_motions, _lerobot_picture, _load_motion, _own_episode_span, _reading
     from ..errors import InputError
     from ..scene import load_scene
 
@@ -442,13 +442,7 @@ def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str | None 
     ma, a_lerobot = _load_motion(a, scene, notes)
     if b is None:  # one record alone: no pair to check, only the motion against the placed machine
         mb = None
-        placed = scene.machines.get(ma.machine)
-        if placed is None:
-            raise InputError(f"the motion {ma.label!r} drives machine {ma.machine!r}, which is not placed in the "
-                             f"scene (placed: {', '.join(sorted(scene.machines)) or 'none'})")
-        if list(ma.joint_names) != list(placed.machine.joint_names):
-            raise InputError(f"the motion {ma.label!r} has joints {list(ma.joint_names)}, the machine "
-                             f"{ma.machine!r} has {list(placed.machine.joint_names)}")
+        _check_motion(scene, ma)
     else:
         mb, _ = _load_motion(b, scene, notes)
         _check_motions(scene, ma, mb)

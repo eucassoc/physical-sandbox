@@ -441,7 +441,7 @@ class Stage:
     def _load_motion(self, spec: str):
         """``(scene, motion, notes)`` for a motion spec (a record file with ``#label``, or ``lerobot:<dir>#<n>``) on
         the one machine the scene places. A bad spec raises ``InputError`` (the page shows it)."""
-        from .cli import _load_motion, _split_label
+        from .cli import _check_motion, _load_motion, _split_label
 
         site = self._decided_site()
         if self._placed_machine() is None:
@@ -459,9 +459,13 @@ class Stage:
         elif not motion.label:
             motion = dataclasses.replace(motion, label=motion.machine)
         placed = scene.machines.get(motion.machine)
-        if placed is not None and list(motion.joint_names) != list(placed.machine.joint_names):
+        try:
+            _check_motion(scene, motion)
+        except InputError:
+            if placed is None:  # not placed: the page is told as the check words it
+                raise
             raise ValueError(f"記録の関節がロボットと合いません（記録: {', '.join(motion.joint_names)} ／ "
-                             f"ロボット: {', '.join(placed.machine.joint_names)}）")
+                             f"ロボット: {', '.join(placed.machine.joint_names)}）") from None
         return scene, motion, notes
 
     def _motion_open(self, args: dict) -> dict:

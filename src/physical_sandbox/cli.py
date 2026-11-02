@@ -87,16 +87,22 @@ def _load_motion(spec: str, scene, notes: list[str] | None = None):
     return chosen, None
 
 
+def _check_motion(scene, m) -> None:
+    """One motion must fit the scene: its machine is placed and its joints are that machine's (bad input
+    otherwise, with the names to fix it)."""
+    placed = scene.machines.get(m.machine)
+    if placed is None:
+        raise InputError(f"the motion {m.label!r} drives machine {m.machine!r}, which is not placed in the "
+                         f"scene (placed: {', '.join(sorted(scene.machines)) or 'none'})")
+    if list(m.joint_names) != list(placed.machine.joint_names):
+        raise InputError(f"the motion {m.label!r} has joints {list(m.joint_names)}, the machine {m.machine!r} "
+                         f"has {list(placed.machine.joint_names)}")
+
+
 def _check_motions(scene, a, b) -> None:
     """The motions must fit the scene and each other: bad input otherwise (with the names to fix it)."""
     for m in (a, b):
-        placed = scene.machines.get(m.machine)
-        if placed is None:
-            raise InputError(f"the motion {m.label!r} drives machine {m.machine!r}, which is not placed in the "
-                             f"scene (placed: {', '.join(sorted(scene.machines)) or 'none'})")
-        if list(m.joint_names) != list(placed.machine.joint_names):
-            raise InputError(f"the motion {m.label!r} has joints {list(m.joint_names)}, the machine {m.machine!r} "
-                             f"has {list(placed.machine.joint_names)}")
+        _check_motion(scene, m)
     if a.machine != b.machine:
         raise InputError(f"the motions drive different machines: {a.machine!r} and {b.machine!r}")
     if list(a.joint_names) != list(b.joint_names):

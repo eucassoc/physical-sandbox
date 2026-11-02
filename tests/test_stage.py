@@ -2,6 +2,7 @@
 import json
 import shutil
 import threading
+import time
 import urllib.request
 
 import cv2
@@ -11,11 +12,13 @@ import pytest
 from physical_sandbox import push, stage
 from physical_sandbox.cli import main
 from physical_sandbox.errors import InputError
+from physical_sandbox.motion import motion_from_numpy, save_record
 from physical_sandbox.scene import load_scene
 from physical_sandbox.site import load_site
 from physical_sandbox.stage import Stage, StageServer
 
 import test_fit_screen
+from mini_lerobot import make_dataset
 from synthetic import URDF
 from test_fit_screen import CORNERS, H, W, get, status_of
 
@@ -377,3 +380,146 @@ def test_an_unlisted_urdf_that_was_never_opened_cannot_be_placed(
     stray.write_text(URDF)
     assert "error" in call(decided, "ps_scene_place", {"id": "stray", "urdf": str(stray), "x": 0, "y": 0, "yaw": 0})
     assert not (tmp_path / "w" / "scene.json").exists()
+
+
+# ---- the motion step ----
+
+@pytest.fixture
+def placed(decided, cache_mini):
+    out = call(decided, "ps_scene_place", {"id": "mini", "urdf": cache_mini, "x": 0, "y": 0, "yaw": 0})
+    assert "scenePath" in out
+    return decided
+
+
+def _record(path, label="demo", machine="mini", site_id="site"):
+    q = np.linspace(0, 1, 6).reshape(-1, 1)
+    save_record([motion_from_numpy(q, fps=10, joint_names=["turn"], machine=machine, label=label)], site_id, path)
+    return path
+
+
+def test_motions_list_finds_records_in_the_folder_and_lerobot_dirs(placed, tmp_path, monkeypatch):
+    _record(tmp_path / "w" / "demo.record.json")
+    hub = tmp_path / "hf" / "lerobot" / "hub" / "datasets--lerobot--tiny" / "snapshots" / "abc"
+    make_dataset(hub, ["turn"], [np.zeros((4, 1))])
+    own = make_dataset(tmp_path / "own", ["turn"], [np.zeros((4, 1)), np.zeros((4, 1))])
+    for root in (hub, own):  # the real files say how many episodes they hold
+        info = json.loads((root / "meta" / "info.json").read_text())
+        info["total_episodes"] = 1 if root == hub else 2
+        (root / "meta" / "info.json").write_text(json.dumps(info))
+    (tmp_path / "hf" / "lerobot" / "hub" / "datasets--lerobot--empty" / "snapshots" / "x").mkdir(parents=True)
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    placed.stage.lerobot_dirs = (own,)
+    out = call(placed, "ps_motions_list", {})
+    assert out["records"] == [{"spec": str(tmp_path / "w" / "demo.record.json"), "label": "demo"}]
+    by_dir = {d["dir"]: d for d in out["lerobot"]}
+    assert set(by_dir) == {str(hub), str(own)}
+    assert by_dir[str(hub)] == {"dir": str(hub), "name": "lerobot/tiny", "episodes": 1}
+    assert by_dir[str(own)]["episodes"] == 2 and by_dir[str(own)]["name"] == "own"
+
+
+def test_motions_list_names_each_motion_of_a_record_and_skips_what_is_not_one(placed, tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "nohf"))
+    q = np.linspace(0, 1, 6).reshape(-1, 1)
+    save_record([motion_from_numpy(q, fps=10, joint_names=["turn"], machine=m, label=m) for m in ("p1", "p2")],
+                "site", tmp_path / "w" / "two.record.json")
+    (tmp_path / "w" / "broken.record.json").write_text("{not json")
+    out = call(placed, "ps_motions_list", {})
+    path = str(tmp_path / "w" / "two.record.json")
+    assert out["records"] == [{"spec": path + "#p1", "label": "p1"}, {"spec": path + "#p2", "label": "p2"}]
+    assert out["lerobot"] == []
+
+
+def test_motion_open_gives_one_record_and_keeps_the_spec(placed, tmp_path):
+    spec = str(_record(tmp_path / "w" / "demo.record.json"))
+    out = call(placed, "ps_motion_open", {"spec": spec, "slot": "a"})
+    assert len(out["records"]) == 1 and out["dataParts"] >= 1 and out["note"] is None and out["spec"] == spec
+    assert len(out["base"]) == 16 and out["model"]["links"] and out["camera"]["intr"]["width"] == W
+    kept = json.loads((tmp_path / "w" / "stage.json").read_text())
+    assert kept["a"].endswith("demo.record.json") and kept["machine"]["id"] == "mini"
+    part = call(placed, "ps_compare_part", {"key": out["dataKey"], "part": 0})
+    data = json.loads("".join(call(placed, "ps_compare_part", {"key": out["dataKey"], "part": i})["data"]
+                              for i in range(out["dataParts"])))
+    assert part["part"] == 0 and len(data["poses"]) == 1 and len(data["poses"][0]) == out["frames"]
+    first = json.loads(StageServer(Stage(work=tmp_path / "w")).first())
+    assert first["motionA"] == spec and first["motionB"] is None
+
+
+def test_motion_open_reads_a_record_for_another_machine_over_the_placed_one(placed, tmp_path):
+    spec = str(_record(tmp_path / "w" / "other.record.json", machine="elsewhere"))
+    out = call(placed, "ps_motion_open", {"spec": spec, "slot": "b"})
+    assert "elsewhere" in out["note"] and "mini" in out["note"]
+    assert json.loads((tmp_path / "w" / "stage.json").read_text())["b"] == spec
+
+
+def test_motion_open_refuses_without_a_placed_machine_and_for_a_bad_spec(decided, placed, tmp_path):
+    spec = str(_record(tmp_path / "w" / "demo.record.json"))
+    assert "error" in call(placed, "ps_motion_open", {"spec": str(tmp_path / "w" / "none.record.json"), "slot": "a"})
+    assert "error" in call(placed, "ps_motion_open", {"spec": spec, "slot": "c"})
+    (tmp_path / "w" / "scene.json").unlink()
+    out = call(placed, "ps_motion_open", {"spec": spec, "slot": "a"})
+    assert "ロボットを置いてから" in out["error"]
+
+
+def _export(server, spec):
+    job = call(server, "ps_export", {"what": "replay", "spec": spec})["job"]
+    st = {}
+    for _ in range(400):
+        st = call(server, "ps_export_status", {"job": job})
+        if st["done"]:
+            break
+        time.sleep(0.05)
+    return job, st
+
+
+def test_export_replay_writes_the_video_and_reports_progress(placed, tmp_path):
+    spec = str(_record(tmp_path / "w" / "demo.record.json"))
+    job, st = _export(placed, spec)
+    assert len(job) == 8 and st["error"] is None and st["done"]
+    assert st["paths"] == [str(tmp_path / "w" / "replay-demo.mp4")]
+    assert (tmp_path / "w" / "replay-demo.mp4").stat().st_size > 0 and st["progress"] == 1
+
+
+def test_export_names_a_label_with_odd_characters_safely(placed, tmp_path):
+    spec = str(_record(tmp_path / "w" / "demo.record.json", label="ロボ a/b"))
+    _, st = _export(placed, spec)
+    assert st["error"] is None and st["paths"] == [str(tmp_path / "w" / "replay-___a_b.mp4")]
+
+
+def test_a_second_export_while_one_runs_is_refused(placed, tmp_path, monkeypatch):
+    gate = threading.Event()
+    real = stage.render_overlay
+
+    def slow(*args, **kw):
+        gate.wait(5)
+        return real(*args, **kw)
+    monkeypatch.setattr(stage, "render_overlay", slow)
+    spec = str(_record(tmp_path / "w" / "demo.record.json"))
+    first = call(placed, "ps_export", {"what": "replay", "spec": spec})
+    try:
+        assert call(placed, "ps_export", {"what": "replay", "spec": spec}) == {"error": "書き出し中です"}
+        assert call(placed, "ps_export_status", {"job": first["job"]})["done"] is False
+    finally:
+        gate.set()
+    for _ in range(400):
+        if call(placed, "ps_export_status", {"job": first["job"]})["done"]:
+            break
+        time.sleep(0.05)
+    assert call(placed, "ps_export", {"what": "replay", "spec": spec}).get("job")
+
+
+def test_an_export_that_fails_reports_one_line_and_an_unknown_job_is_an_error(placed, tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("no codec\nsecond line")
+    monkeypatch.setattr(stage, "render_overlay", boom)
+    _, st = _export(placed, str(_record(tmp_path / "w" / "demo.record.json")))
+    assert st["done"] and st["error"] == "no codec" and st["paths"] == []
+    assert "error" in call(placed, "ps_export_status", {"job": "nosuchjob"})
+    assert "error" in call(placed, "ps_export", {"what": "gif", "spec": "x"})
+
+
+def test_the_stage_html_has_the_motion_controls(served):
+    html = get(served().url)[2]
+    for ident in ("motionPick", "motionSpec", "episode", "tphoto", "tgl", "tview", "tplay", "tslider", "tclock", "exportBtn"):
+        assert f'id="{ident}"' in html
+    for name in ("ps_motions_list", "ps_motion_open", "ps_compare_part", "ps_export", "ps_export_status"):
+        assert name in html

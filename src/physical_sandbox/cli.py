@@ -38,8 +38,15 @@ def _split_label(spec: str) -> tuple[str, str | None]:
     return path, label
 
 
-def _load_motion(spec: str, scene):
-    """One motion from a ``--a``/``--b`` spec. Returns (motion, lerobot) with lerobot = (dir, episode) or None."""
+def _load_motion(spec: str, scene, notes: list[str] | None = None):
+    """One motion from a ``--a``/``--b`` spec. Returns (motion, lerobot) with lerobot = (dir, episode) or None.
+
+    With ``notes`` (a list the caller wants told what was assumed), a record whose only motion drives a machine
+    that the scene does not place is read over onto the scene's only machine (a record made for another stand of
+    the same robot) and ``notes`` gets a line saying so; without it the motion stays as the record has it and
+    ``_check_motions`` refuses it. A record with several motions is never guessed at: the names are listed."""
+    import dataclasses
+
     from .motion import load_record, motion_from_lerobot
 
     if spec.startswith("lerobot:"):
@@ -60,12 +67,24 @@ def _load_motion(spec: str, scene):
     motions = _reading(f"--a/--b {path!r}", load_record, path)
     if not motions:
         raise _spec_error(spec, "the recording has no motion with joint angles")
-    if label is None:
-        return motions[0], None
-    for m in motions:
-        if m.label == label:
-            return m, None
-    raise _spec_error(spec, f"no motion labelled {label!r} (it has: {', '.join(repr(m.label) for m in motions)})")
+    chosen = motions[0]
+    if label is not None:
+        for m in motions:
+            if m.label == label:
+                chosen = m
+                break
+        else:
+            raise _spec_error(spec, f"no motion labelled {label!r} (it has: {', '.join(repr(m.label) for m in motions)})")
+    if chosen.machine not in scene.machines and len(scene.machines) == 1:
+        (mid, _), = scene.machines.items()
+        if len(motions) > 1:
+            products = ", ".join(repr(m.machine) for m in motions)
+            raise _spec_error(spec, f"the recording drives {products}, not the scene's machine {mid!r}: "
+                                    f"it has more than one motion, so none is taken for {mid!r}")
+        if notes is not None:
+            notes.append(f"記録の機器 '{chosen.machine}' をシーンの機器 '{mid}' として読み込みました")
+            chosen = dataclasses.replace(chosen, machine=mid)
+    return chosen, None
 
 
 def _check_motions(scene, a, b) -> None:

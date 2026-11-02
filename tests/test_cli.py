@@ -8,12 +8,13 @@ import numpy as np
 import pytest
 
 from physical_sandbox.camera import Camera
-from physical_sandbox.cli import main
+from physical_sandbox.cli import _load_motion, main
+from physical_sandbox.errors import InputError
 from physical_sandbox.machine import load_machine
 from physical_sandbox.motion import motion_from_numpy, save_record
 from physical_sandbox.report import write_report
 from physical_sandbox.compare import compare
-from physical_sandbox.scene import PlacedMachine, Scene, save_scene
+from physical_sandbox.scene import PlacedMachine, Scene, load_scene, save_scene
 from physical_sandbox.site import Site, load_site, save_site
 
 from conftest import URDF
@@ -622,3 +623,39 @@ def test_catalog_search_json_and_table(catalog_server, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["items"][0]["name"] == "mini"
     assert main(["catalog", "search", "arm"]) == 0
     assert capsys.readouterr().out.split() == ["t/mini", "1", "arm", "Mini", "arm"]
+
+
+# ---- a record made for another stand of the robot ----
+
+@pytest.fixture
+def mini_scene(files):
+    tmp_path, site, _ = files
+    return load_scene(tmp_path / "scene.json", site)
+
+
+def test_a_one_device_record_drives_the_only_machine_under_its_id(mini_scene, tmp_path):
+    q = np.linspace(0, 1, 5).reshape(-1, 1)
+    save_record([motion_from_numpy(q, fps=10, joint_names=["turn"], machine="other", label="x")],
+                mini_scene.site.id, tmp_path / "r.record.json")
+    notes = []
+    m, lerobot = _load_motion(str(tmp_path / "r.record.json"), mini_scene, notes)
+    assert m.machine == "blocks" and lerobot is None
+    assert "other" in notes[0] and "blocks" in notes[0]
+    plain, _ = _load_motion(str(tmp_path / "r.record.json"), mini_scene)  # compare keeps refusing it later
+    assert plain.machine == "other"
+
+
+def test_a_record_for_a_placed_machine_is_left_alone(mini_scene, tmp_path):
+    notes = []
+    m, _ = _load_motion(str(tmp_path / "a.record.json"), mini_scene, notes)
+    assert m.machine == "blocks" and notes == []
+
+
+def test_a_two_device_record_for_another_machine_is_refused_with_the_names(mini_scene, tmp_path):
+    q = np.linspace(0, 1, 5).reshape(-1, 1)
+    save_record([motion_from_numpy(q, fps=10, joint_names=["turn"], machine=name, label=name)
+                 for name in ("p1", "p2")], mini_scene.site.id, tmp_path / "two.record.json")
+    with pytest.raises(InputError, match="p1.*p2|p2.*p1"):
+        _load_motion(str(tmp_path / "two.record.json"), mini_scene)
+    with pytest.raises(InputError, match="blocks"):
+        _load_motion(str(tmp_path / "two.record.json") + "#p2", mini_scene)

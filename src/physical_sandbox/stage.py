@@ -7,24 +7,31 @@ first step the page fixes the floor; its other sections are filled in by later s
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
+import os
+import re
 import secrets
+import threading
 from pathlib import Path
 
 import numpy as np
 
-from . import catalog, fit_screen, push
+from . import catalog, fit_screen, push, screens
 from .errors import CatalogError, InputError
 from .fit_screen import A4_M, CHUNK, LOCAL_BRIDGE, decide_floor, default_corners, floor_grid, photo, photo_part
 from .machine import load_machine
 from .mcp.pack import model_part, pack_model
-from .scene import PlacedMachine, save_placement
+from .motion import load_record
+from .render import render_overlay
+from .scene import PlacedMachine, load_scene, save_placement
 from .screens import compact, pixels
 from .site import Site, load_site
 from .sources import open_source
 
 STAGE_FORMAT = "physical-sandbox.stage/1"
+_UNREADABLE = (OSError, ValueError, KeyError, TypeError, AttributeError)  # a file that is not what it should be
 
 
 def work_dir_for(picture: Path) -> Path:
@@ -68,6 +75,25 @@ def _subfolders(parent: Path, depth: int) -> list[Path]:
     return level
 
 
+def _safe_name(label: str) -> str:
+    """A label as a file name part: every character outside ``A-Za-z0-9._-`` (non-ASCII too) becomes ``_``."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", label) or "motion"
+
+
+def _hub_root() -> Path:
+    """Where LeRobot keeps the datasets it downloaded: ``$HF_HOME/lerobot/hub``, else under ``~/.cache/huggingface``."""
+    home = os.environ.get("HF_HOME")
+    return (Path(home).expanduser() if home else Path.home() / ".cache" / "huggingface") / "lerobot" / "hub"
+
+
+def _dataset_name(folder: Path) -> str:
+    """A dataset's name: ``owner/name`` for a hub snapshot (``datasets--owner--name/snapshots/<hash>``), else the folder's."""
+    hub = folder.parent.parent.name
+    if folder.parent.name == "snapshots" and hub.startswith("datasets--"):
+        return hub[len("datasets--"):].replace("--", "/")
+    return folder.name
+
+
 def _number(args: dict, key: str) -> float:
     """``args[key]`` as a finite number (a bool or text is not one)."""
     value = args.get(key)
@@ -87,6 +113,8 @@ class Stage:
         self.machine_dirs = tuple(Path(d) for d in machine_dirs)
         self.lerobot_dirs = tuple(Path(d) for d in lerobot_dirs)
         self._opened: set[Path] = set()  # machine files the page opened (a typed path may be placed after it)
+        self._jobs: dict[str, dict] = {}  # exports by job id; one runs at a time
+        self._jobs_lock = threading.Lock()
         if picture is None:
             self.work = Path(work)
             found = _picture_named_in(self.work)
@@ -158,7 +186,7 @@ class Stage:
             "parts": -(-len(self._photo["b64"]) // CHUNK), "camera": self.camera,
             "floor": {"corners": corners, "edgesM": edges, "measured": measured,
                       "decided": floor is not None and site.confirmed_by_person},
-            "machine": self._placed_machine(), "motionA": None, "motionB": None, "gripThreshold": None,
+            "machine": self._placed_machine(), "motionA": self._kept("a"), "motionB": self._kept("b"), "gripThreshold": None,
             "login": push.login_status(catalog._base()),  # the token file only: no request
             "workDir": str(self.work),
         }
@@ -181,6 +209,16 @@ class Stage:
             return json.dumps(self._machine_open(args))
         if name == "ps_scene_place":
             return json.dumps(self._scene_place(args))
+        if name == "ps_motions_list":
+            return json.dumps(self._motions_list())
+        if name == "ps_motion_open":
+            return json.dumps(self._motion_open(args))
+        if name == "ps_compare_part":
+            return screens.data_part(str(args["key"]), int(args["part"]), "ps_motion_open")
+        if name == "ps_export":
+            return json.dumps(self._export(args))
+        if name == "ps_export_status":
+            return json.dumps(self._export_status(str(args.get("job", ""))))
         if name == "ps_model_part":
             return json.dumps({"part": int(args["part"]), "data": model_part(str(args["key"]), int(args["part"]), CHUNK)})
         raise ValueError(f"the stage has no tool {name!r}")
@@ -206,6 +244,15 @@ class Stage:
         d.update(keys)
         self.work.mkdir(parents=True, exist_ok=True)
         fit_screen.write_atomic(self.stage_path, json.dumps(d, indent=2).encode())
+
+    def _kept(self, key: str) -> str | None:
+        """A text ``stage.json`` keeps under ``key`` (the motion spec of slot ``a`` or ``b``), or None."""
+        try:
+            d = json.loads(self.stage_path.read_text())
+        except (OSError, ValueError):
+            return None
+        value = d.get(key) if isinstance(d, dict) else None
+        return value if isinstance(value, str) and value else None
 
     def _scene_machines(self) -> dict:
         """The ``machines`` of ``scene.json`` as the file has them (none when it is not there or not readable)."""
@@ -341,6 +388,120 @@ class Stage:
         self._opened.add(urdf)
         self._update_stage_json(machine={"id": mid, "urdf": str(urdf)})
         return {"scenePath": str(self.scene_path), "base": compact(placed.base_transform(), 6)}
+
+    # ---- the motion step ----
+
+    def _motions_list(self) -> dict:
+        """The motions the page can open: every ``*.record.json`` of the work folder (one entry per motion) and
+        every LeRobot dataset (the hub's downloads, then the ``--lerobot`` folders)."""
+        records = []
+        for path in sorted(self.work.glob("*.record.json")):
+            try:
+                motions = load_record(path)
+            except _UNREADABLE:
+                continue
+            for m in motions:
+                label = m.label or m.machine
+                records.append({"spec": str(path) if len(motions) == 1 else f"{path}#{label}", "label": label})
+        found: list[Path] = []
+        hub = _hub_root()
+        if hub.is_dir():
+            found += sorted(hub.glob("datasets--*/snapshots/*"))
+        found += self.lerobot_dirs
+        lerobot, seen = [], set()
+        for folder in found:
+            info_path = folder / "meta" / "info.json"
+            if str(folder) in seen or not info_path.is_file():
+                continue
+            seen.add(str(folder))
+            try:
+                total = json.loads(info_path.read_text()).get("total_episodes")
+            except (OSError, ValueError, AttributeError):
+                continue
+            lerobot.append({"dir": str(folder), "name": _dataset_name(folder),
+                            "episodes": total if isinstance(total, int) and not isinstance(total, bool) else None})
+        return {"records": records, "lerobot": lerobot}
+
+    def _load_motion(self, spec: str):
+        """``(scene, motion, notes)`` for a motion spec (a record file with ``#label``, or ``lerobot:<dir>#<n>``) on
+        the one machine the scene places. A bad spec raises ``InputError`` (the page shows it)."""
+        from .cli import _load_motion, _split_label
+
+        site = self._decided_site()
+        if self._placed_machine() is None:
+            raise ValueError("ロボットを置いてから動きを読み込んでください")
+        scene = load_scene(self.scene_path, site)
+        if not spec.startswith("lerobot:"):
+            path, label = _split_label(spec)
+            if not Path(path).expanduser().is_absolute() and (self.work / path).is_file():
+                spec = str(self.work / path) + (f"#{label}" if label is not None else "")
+        notes: list[str] = []
+        motion, lerobot = _load_motion(spec, scene, notes)
+        if lerobot is not None:
+            motion = dataclasses.replace(
+                motion, label=f"{_dataset_name(Path(lerobot[0]).expanduser()).rsplit('/', 1)[-1]} ep{lerobot[1]}")
+        elif not motion.label:
+            motion = dataclasses.replace(motion, label=motion.machine)
+        return scene, motion, notes
+
+    def _motion_open(self, args: dict) -> dict:
+        """One motion on the placed machine: what the compare screen draws (``screens.screen_data`` with one record)."""
+        slot, spec = args.get("slot"), args.get("spec")
+        if slot not in ("a", "b"):
+            raise ValueError("slot must be 'a' or 'b'")
+        if not isinstance(spec, str) or not spec.strip():
+            raise ValueError("spec must be a record file or lerobot:<dir>#<episode>")
+        spec = spec.strip()
+        scene, motion, notes = self._load_motion(spec)
+        with open_source(self.picture) as source:
+            out = screens.screen_data(scene.site, scene, self.camera, [motion], source)
+        out["note"] = notes[0] if notes else None
+        out["spec"] = spec
+        self._update_stage_json(**{slot: spec})
+        return out
+
+    def _export(self, args: dict) -> dict:
+        """Start writing the motion over the photo as an mp4 in the work folder (one at a time); answers the job id."""
+        if args.get("what") != "replay":
+            raise ValueError("what must be 'replay'")
+        spec = args.get("spec")
+        if not isinstance(spec, str) or not spec.strip():
+            raise ValueError("spec must be a record file or lerobot:<dir>#<episode>")
+        scene, motion, _ = self._load_motion(spec.strip())
+        out = self.work / f"replay-{_safe_name(motion.label)}.mp4"
+        job = secrets.token_hex(4)
+        with self._jobs_lock:
+            if any(not j["done"] for j in self._jobs.values()):
+                return {"error": "書き出し中です"}
+            self._jobs[job] = state = {"done": False, "progress": 0, "paths": [], "error": None}
+
+        def progress(k: int, n: int) -> None:
+            with self._jobs_lock:
+                state["progress"] = k / n
+
+        def run() -> None:
+            error, paths = None, []
+            try:
+                with open_source(self.picture) as source:
+                    render_overlay(scene, self.camera, source, [motion], out, progress=progress)
+                paths = [str(out)]
+            except Exception as e:  # the page shows one line; the thread must not die silently
+                text = str(e).strip()
+                error = text.splitlines()[0] if text else type(e).__name__
+            with self._jobs_lock:
+                state.update(done=True, paths=paths, error=error)
+                if error is None:
+                    state["progress"] = 1.0
+        threading.Thread(target=run, daemon=True).start()
+        return {"job": job}
+
+    def _export_status(self, job: str) -> dict:
+        with self._jobs_lock:
+            state = self._jobs.get(job)
+            if state is None:
+                raise ValueError(f"no export {job!r}")
+            return {"done": state["done"], "progress": state["progress"], "paths": list(state["paths"]),
+                    "error": state["error"]}
 
 
 class StageServer:

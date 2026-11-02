@@ -29,6 +29,11 @@
   .placebar input[type=number] { width: 5.5em; }
   .placebar label { display: inline-flex; align-items: center; gap: 4px; }
   .placebar input[type=range] { width: 180px; }
+  .motionbar select, .motionbar input[type=text], .motionbar input[type=number] { font: inherit; padding: 3px 6px; border: 1px solid var(--muted); border-radius: 4px; background: transparent; color: var(--fg); min-width: 0; }
+  .motionbar input[type=text] { flex: 1 1 14em; }
+  .motionbar input[type=number] { width: 5em; }
+  .motionbar label { display: inline-flex; align-items: center; gap: 4px; }
+  .playbar input[type=range] { flex: 1 1 200px; }
   .hits:empty { display: none; }
   .floorsay { flex: 1 1 260px; color: var(--muted); }
   .bottom { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 12px; align-items: center; padding: 6px 12px; background: var(--bg); border-top: 1px solid var(--line); }
@@ -86,7 +91,27 @@
   </section>
   <section id="motion" class="locked">
     <h2>動き</h2>
-    <p class="hint">ロボットを置くと使えます</p>
+    <p class="hint" id="motionhint">ロボットを置くと使えます</p>
+    <div id="motionBody" hidden>
+      <div class="bar motionbar">
+        <select id="motionPick" title="読み込む動き"></select>
+        <label id="episodeLabel" hidden>エピソード <input type="number" id="episode" min="0" step="1" value="0" /></label>
+        <input type="text" id="motionSpec" placeholder="記録ファイルのパス、または lerobot:フォルダ#エピソード番号" />
+        <button class="chip" id="motionOpen">読み込む</button>
+      </div>
+      <p class="hint" id="motionEmpty"></p>
+      <div class="stack">
+        <canvas id="tphoto" width="1280" height="720"></canvas>
+        <canvas id="tgl" width="1280" height="720"></canvas>
+        <canvas id="tview" width="1280" height="720"></canvas>
+      </div>
+      <div class="bar playbar">
+        <button class="chip" id="tplay" disabled>再生</button>
+        <input type="range" id="tslider" min="0" max="0" step="1" value="0" disabled />
+        <span id="tclock">0.0 / 0.0 s</span>
+        <button class="decide" id="exportBtn" disabled>動画に書き出す</button>
+      </div>
+    </div>
   </section>
   <section id="compare" class="locked">
     <h2>比べる</h2>
@@ -282,6 +307,7 @@ function setPlace(next) {
   placeButton.disabled = !mdata;
   showPlace();
   drawMachine();
+  drawMotion();   // the playing shell stands where the machine section puts it
 }
 
 function releaseMachine() {
@@ -321,7 +347,7 @@ async function openMachine(urdf, id, { typed = false, keep = false } = {}) {
     drawMachine();
     // The first frame of a fresh WebGL canvas can reach the screen opaque black in some browsers: draw once more
     requestAnimationFrame(() => { if (mine === machineGen) drawMachine(); });
-    if (out.placed) document.getElementById('motion').classList.remove('locked');   // this folder already places it
+    if (out.placed) openMotionSection();   // this folder already places it
     if (!keep) {
       say(out.placed
         ? `${out.id} は決定済みの位置に表示しています。動かした場合は、もう一度「決定」してください`
@@ -463,13 +489,241 @@ placeButton.addEventListener('click', async () => {
       id: mdata.id, urdf: mdata.urdf,
       x: Math.round(place.x * 1000) / 1000, y: Math.round(place.y * 1000) / 1000, yaw: place.yaw * Math.PI / 180 });
     placeDirty = false;
-    document.getElementById('motion').classList.remove('locked');
+    openMotionSection();
     say(`決定しました。シーンのファイルを書きました: ${out.scenePath}`);
+    if (motionSpec) openMotion(motionSpec, { keep: true });   // the trail and the tip are for where it stands now
   } catch (err) {
     placeButton.disabled = false;
     fail('決定できませんでした', err);
   }
 });
+
+
+// ---- The motion step: one motion played over the photo with the placed machine's shell, then written as a video ----
+
+const MOTION_COLOR = '#2f7fe0';
+const MOTION_EMPTY = 'LeRobot のデータセットがありません。例: huggingface-cli download lerobot/svla_so101_pickplace --repo-type dataset';
+const motionPick = document.getElementById('motionPick');
+const episodeLabel = document.getElementById('episodeLabel');
+const episodeEl = document.getElementById('episode');
+const motionSpecEl = document.getElementById('motionSpec');
+const motionEmpty = document.getElementById('motionEmpty');
+const tPhoto = document.getElementById('tphoto');
+const tGl = document.getElementById('tgl');
+const tView = document.getElementById('tview');
+const tctx = tView.getContext('2d');
+const tSlider = document.getElementById('tslider');
+const tPlay = document.getElementById('tplay');
+const tClock = document.getElementById('tclock');
+const exportBtn = document.getElementById('exportBtn');
+
+let motionList = { records: [], lerobot: [] };   // what ps_motions_list answered
+let motionStarted = false;
+let motionSpec = null;   // the spec of the motion that is open
+let tdata = null;        // what ps_motion_open answered, with the data parts joined in once they arrive
+let tready = false;      // the poses, times and pixel paths have arrived
+let tThree = null;       // the shell (three), once built
+let tModelKey = null;    // the model the shell was built from
+let tgen = 0;            // counts the opens: an older one's loads must not touch the newer
+let tframe = 0;
+let tTimer = null;
+let exporting = false;
+
+function drawMotionPhoto() {
+  const c = tPhoto.getContext('2d');
+  c.fillStyle = '#222';
+  c.fillRect(0, 0, tPhoto.width, tPhoto.height);
+  if (photo) c.drawImage(photo, 0, 0, tPhoto.width, tPhoto.height);
+}
+
+function drawMotion() {
+  if (!state) return;
+  const k = tView.width / state.width;
+  tctx.setTransform(1, 0, 0, 1, 0, 0);
+  tctx.clearRect(0, 0, tView.width, tView.height);
+  if (!tdata || !tready) return;
+  tctx.setTransform(k, 0, 0, k, 0, 0);
+  if (tdata.floor) {
+    strokePath(tctx, tdata.floor, true);
+    tctx.fillStyle = 'rgba(255,255,255,0.10)';
+    tctx.fill();
+    tctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    tctx.lineWidth = 2.5 / k;
+    tctx.setLineDash([10 / k, 6 / k]);
+    tctx.stroke();
+    tctx.setLineDash([]);
+  }
+  for (const dev of tdata.records[0].devices) {
+    tctx.strokeStyle = MOTION_COLOR;
+    tctx.lineWidth = 4 / k;
+    strokePath(tctx, dev.tool_trail, false);
+    tctx.stroke();
+    const tip = dev.centers[tframe];
+    if (tip) {
+      tctx.beginPath();
+      tctx.arc(tip[0], tip[1], 6 / k, 0, 2 * Math.PI);
+      tctx.fillStyle = MOTION_COLOR;
+      tctx.fill();
+      tctx.strokeStyle = '#ffffff';
+      tctx.lineWidth = 2 / k;
+      tctx.stroke();
+    }
+  }
+  // The machine section's x / y / yaw place the shell: a drag there moves it while the motion plays
+  if (tThree) drawShells(tThree, [tdata.poses[0][tframe]], baseOf(), [true]);
+  const total = tdata.t[tdata.t.length - 1];
+  tClock.textContent = `${tdata.t[tframe].toFixed(1)} / ${total.toFixed(1)} s`;
+}
+
+function setMotionFrame(i) {
+  tframe = Math.max(0, Math.min(tdata.frames - 1, i));
+  tSlider.value = String(tframe);
+  drawMotion();
+}
+
+function stopPlay() {
+  if (tTimer) { clearInterval(tTimer); tTimer = null; }
+  tPlay.textContent = '再生';
+}
+
+tSlider.addEventListener('input', () => { stopPlay(); setMotionFrame(Number(tSlider.value)); });
+tPlay.addEventListener('click', () => {
+  if (!tdata || !tready) return;
+  if (tTimer) { stopPlay(); return; }
+  if (tframe >= tdata.frames - 1) setMotionFrame(0);
+  tPlay.textContent = '一時停止';
+  tTimer = setInterval(() => {
+    if (tframe >= tdata.frames - 1) { stopPlay(); return; }
+    setMotionFrame(tframe + 1);
+  }, tdata.stepS * 1000);
+});
+
+function releaseMotion() {
+  releaseShells(tThree);
+  tThree = null;
+  tModelKey = null;
+}
+
+// Opens a motion by its spec. keep: the machine was placed again, so the same motion is read anew (the trail and
+// the tip move with it) while the frame and the shell stay.
+async function openMotion(spec, { keep = false } = {}) {
+  const mine = ++tgen;
+  stopPlay();
+  tready = false;
+  exportBtn.disabled = tPlay.disabled = tSlider.disabled = true;
+  if (!keep) { releaseMotion(); tdata = null; tframe = 0; drawMotion(); }
+  say(`動き ${spec} を読み込んでいます…`);
+  try {
+    const out = await call('ps_motion_open', { spec, slot: 'a' });
+    if (mine !== tgen) return;
+    const part = JSON.parse(await fetchParts('ps_compare_part', { key: out.dataKey }, out.dataParts));
+    if (mine !== tgen) return;
+    out.poses = part.poses;
+    out.t = part.t;
+    out.records.forEach((rec, i) => rec.devices.forEach((dev, j) => Object.assign(dev, part.records[i].devices[j])));
+    if (!THREE) throw new Error('three が読み込まれていません');
+    if (!tThree || tModelKey !== out.model.key) {
+      releaseMotion();
+      const m = out.model;
+      const buffer = bytesOf(await fetchParts('ps_model_part', { key: m.key }, m.binParts));
+      if (mine !== tgen) return;
+      const built = buildShells(tGl, m, buffer, [MOTION_COLOR]);
+      // near 0.05 m: the same near clip as the replay video, so a close machine is cut alike
+      built.camera = new THREE.PerspectiveCamera(50, 1, 0.05, 600);
+      placeCamera(built.camera, out.camera);
+      tThree = built;
+      tModelKey = m.key;
+    } else {
+      placeCamera(tThree.camera, out.camera);
+    }
+    tdata = out;
+    motionSpec = spec;
+    tready = true;
+    tSlider.max = String(out.frames - 1);
+    tSlider.disabled = tPlay.disabled = out.frames < 2;
+    exportBtn.disabled = exporting;
+    motionSpecEl.value = spec;
+    setMotionFrame(keep ? tframe : 0);
+    requestAnimationFrame(() => { if (mine === tgen) drawMotion(); });   // a fresh WebGL canvas may first show black
+    say(out.note ?? `動き「${out.records[0].label}」を読み込みました。再生できます`);
+  } catch (err) {
+    if (mine === tgen) fail('動きを読み込めませんでした', err);
+  }
+}
+
+function fillMotionPick() {
+  motionPick.textContent = '';
+  const add = (value, text) => {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = text;
+    motionPick.append(o);
+  };
+  add('', '動きを選択してください');
+  motionList.records.forEach((r, i) => add(`r:${i}`, `${r.label}（記録）`));
+  motionList.lerobot.forEach((d, i) => add(`d:${i}`, `${d.name}（LeRobot）`));
+  motionEmpty.textContent = motionList.lerobot.length ? '' : MOTION_EMPTY;
+}
+
+async function listMotions() {
+  motionList = await call('ps_motions_list', {});
+  fillMotionPick();
+}
+
+function openPicked() {
+  const v = motionPick.value;
+  episodeLabel.hidden = !v.startsWith('d:');
+  if (v === '') return;
+  if (v.startsWith('r:')) { openMotion(motionList.records[Number(v.slice(2))].spec); return; }
+  const d = motionList.lerobot[Number(v.slice(2))];
+  if (d.episodes) episodeEl.max = String(d.episodes - 1);
+  else episodeEl.removeAttribute('max');
+  const n = Math.max(0, Math.round(Number(episodeEl.value) || 0));
+  episodeEl.value = String(n);
+  openMotion(`lerobot:${d.dir}#${n}`);
+}
+motionPick.addEventListener('change', openPicked);
+episodeEl.addEventListener('change', openPicked);
+document.getElementById('motionOpen').addEventListener('click', () => {
+  const spec = motionSpecEl.value.trim();
+  if (!spec) { say('記録ファイルのパスを入力してください', true); return; }
+  openMotion(spec);
+});
+motionSpecEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('motionOpen').click(); });
+
+exportBtn.addEventListener('click', async () => {
+  if (!tdata || exporting) return;
+  exporting = true;
+  exportBtn.disabled = true;
+  try {
+    const { job } = await call('ps_export', { what: 'replay', spec: tdata.spec });
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const st = await call('ps_export_status', { job });
+      if (st.error) { fail('動画を書き出せませんでした', st.error); break; }
+      if (st.done) { say(`動画を書き出しました: ${st.paths.join(', ')}`); break; }
+      say(`動画を書き出しています… ${Math.round(st.progress * 100)}%`);
+    }
+  } catch (err) {
+    fail('動画を書き出せませんでした', err);
+  } finally {
+    exporting = false;
+    exportBtn.disabled = !(tdata && tready);
+  }
+});
+
+// The section opens once a machine is placed; the first time it lists the motions, and reopens the one the folder kept
+function openMotionSection() {
+  document.getElementById('motion').classList.remove('locked');
+  document.getElementById('motionBody').hidden = false;
+  document.getElementById('motionhint').textContent =
+    '動きを選択すると、写真の上にロボットの動きを重ねて再生します。動画に書き出すこともできます';
+  if (motionStarted) return;
+  motionStarted = true;
+  listMotions()
+    .then(() => { if (state.motionA) openMotion(state.motionA); })
+    .catch((err) => fail('動きの一覧を取得できませんでした', err));
+}
 
 function showLogin(login) {
   loginEl.textContent = login?.signedIn
@@ -601,7 +855,7 @@ async function start() {
     showEdges();
     if (decidedOnce) openSections();
     updateDecide();
-    for (const c of [canvas, mPhoto, mView, mGl]) {
+    for (const c of [canvas, mPhoto, mView, mGl, tPhoto, tView, tGl]) {
       c.width = 1280;
       c.height = Math.round(1280 * state.height / state.width);
     }
@@ -614,7 +868,7 @@ async function start() {
       b64 += out.data;
     }
     const img = new Image();
-    img.onload = () => { photo = img; draw(); drawMachinePhoto(); solve(); };
+    img.onload = () => { photo = img; draw(); drawMachinePhoto(); drawMotionPhoto(); solve(); };
     img.onerror = () => say('写真を表示できませんでした', true);
     img.src = `data:image/jpeg;base64,${b64}`;
   } catch (err) {

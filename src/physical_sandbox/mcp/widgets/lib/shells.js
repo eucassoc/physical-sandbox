@@ -22,6 +22,22 @@ function placeCamera(camera, { intr, extr }) {
   camera.updateProjectionMatrix();
 }
 
+/** The floor point (x, y, metres, in the site frame) that the pinhole ray through pixel (u, v) meets, or null when
+ *  the ray does not meet the floor (z = 0) in front of the camera. `camera` is { intr: { fx, fy, cx, cy }, extr:
+ *  { R: 9 numbers row by row (site to camera), t: 3 } }; the picture is taken as undistorted (no lens term). */
+function floorPointJs({ intr, extr }, u, v) {
+  const r = extr.R;
+  const t = extr.t;
+  const d = [(u - intr.cx) / intr.fx, (v - intr.cy) / intr.fy, 1];
+  // site direction = R^T d; camera centre = -R^T t
+  const dir = [0, 1, 2].map((i) => r[i] * d[0] + r[3 + i] * d[1] + r[6 + i] * d[2]);
+  const centre = [0, 1, 2].map((i) => -(r[i] * t[0] + r[3 + i] * t[1] + r[6 + i] * t[2]));
+  if (!(Math.abs(dir[2]) > 1e-12)) return null;
+  const s = -centre[2] / dir[2];
+  if (!(s > 0) || !Number.isFinite(s)) return null;
+  return { x: centre[0] + s * dir[0], y: centre[1] + s * dir[1] };
+}
+
 /** Base64 text to an ArrayBuffer. */
 function bytesOf(b64) {
   const s = atob(b64);

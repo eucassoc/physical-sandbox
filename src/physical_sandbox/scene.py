@@ -124,6 +124,35 @@ def save_scene(scene: Scene, path) -> None:
         tmp_scene.unlink(missing_ok=True)
 
 
+def save_placement(path, site_id: str, machines: dict[str, PlacedMachine], *, picture: str | None) -> None:
+    """Write the scene file for the machines' placement only (the stage's 決定): the same ``format``, ``site`` and
+    ``machines`` as ``save_scene``, plus the ``picture`` it was placed on. The ``records`` list of a scene file
+    already at ``path`` is kept as it is (``[]`` when there is none), and no record file is touched, so placing
+    a machine again never loses the motions that were saved for the scene."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        kept = json.loads(path.read_text()).get("records")
+    except (OSError, ValueError, AttributeError):
+        kept = None
+    data = {
+        "format": FORMAT,
+        "site": site_id,
+        "machines": {mid: {"urdf": _urdf_for_file(p.urdf, path.parent), "x": p.x, "y": p.y, "yaw": p.yaw,
+                           "confirmedByPerson": p.confirmed_by_person}
+                     for mid, p in machines.items()},
+        "records": kept if isinstance(kept, list) else [],
+    }
+    if picture:
+        data["picture"] = picture
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=1) + "\n")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def _need(d, key: str, where: str):
     if not isinstance(d, dict) or key not in d:
         raise ValueError(f"{where}: missing {key!r}")

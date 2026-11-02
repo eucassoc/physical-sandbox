@@ -20,6 +20,16 @@
   .lengths select { font: inherit; padding: 3px 4px; border: 1px solid var(--muted); border-radius: 4px; background: transparent; color: var(--fg); }
   button.decide { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
   button.decide:disabled { opacity: .5; cursor: default; }
+  .stack { position: relative; border-radius: 6px; overflow: hidden; background: #222; margin-top: 8px; }
+  .stack canvas { display: block; width: 100%; height: auto; border-radius: 0; }
+  .stack canvas + canvas { position: absolute; inset: 0; height: 100%; background: transparent; }
+  .stack canvas#mview { cursor: grab; }
+  .machinebar input[type=text], .machinebar input[type=search] { font: inherit; padding: 3px 6px; border: 1px solid var(--muted); border-radius: 4px; background: transparent; color: var(--fg); min-width: 0; flex: 1 1 12em; }
+  .machinebar select, .placebar input[type=number] { font: inherit; padding: 3px 4px; border: 1px solid var(--muted); border-radius: 4px; background: transparent; color: var(--fg); }
+  .placebar input[type=number] { width: 5.5em; }
+  .placebar label { display: inline-flex; align-items: center; gap: 4px; }
+  .placebar input[type=range] { width: 180px; }
+  .hits:empty { display: none; }
   .floorsay { flex: 1 1 260px; color: var(--muted); }
   .bottom { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 12px; align-items: center; padding: 6px 12px; background: var(--bg); border-top: 1px solid var(--line); }
   .say { flex: 1 1 auto; color: var(--muted); overflow-wrap: anywhere; }
@@ -51,6 +61,28 @@
   <section id="machine" class="locked">
     <h2>ロボット</h2>
     <p class="hint" id="machinehint">床を決定すると使えます</p>
+    <div id="machineBody" hidden>
+      <div class="bar machinebar">
+        <select id="machinePick" title="置くロボット"></select>
+        <input type="search" id="catalogQ" placeholder="公開カタログを検索" />
+        <button class="chip" id="catalogGo">検索</button>
+        <input type="text" id="urdfPath" placeholder="URDF ファイルのパス" />
+        <button class="chip" id="urdfOpen">開く</button>
+      </div>
+      <div class="bar hits" id="catalogHits"></div>
+      <div class="stack">
+        <canvas id="mphoto" width="1280" height="720"></canvas>
+        <canvas id="mgl" width="1280" height="720"></canvas>
+        <canvas id="mview" width="1280" height="720"></canvas>
+      </div>
+      <div class="bar placebar">
+        <label>x <input type="number" id="px" step="0.01" /> m</label>
+        <label>y <input type="number" id="py" step="0.01" /> m</label>
+        <label>向き <input type="range" id="yaw" min="-180" max="180" step="1" value="0" />
+          <input type="number" id="yawNum" min="-180" max="180" step="1" value="0" /> °</label>
+        <button class="decide" id="place" disabled>決定</button>
+      </div>
+    </div>
   </section>
   <section id="motion" class="locked">
     <h2>動き</h2>
@@ -65,10 +97,13 @@
   <span class="say" id="say">写真を読み込んでいます…</span>
   <span class="login" id="login"></span>
 </div>
+<script>/*__THREE__*/</script>
 <script type="module">
 /*__EXT_APPS_BUNDLE__*/
 /*__LIB:floor__*/
+/*__LIB:shells__*/
 const { App } = globalThis.ExtApps;
+const THREE = globalThis.THREE;
 const canvas = document.getElementById('view');
 const ctx = canvas.getContext('2d');
 const sayEl = document.getElementById('say');
@@ -135,8 +170,305 @@ function changed(why) {
 // The sections after the floor open once a floor is decided
 function openSections() {
   document.getElementById('machine').classList.remove('locked');
-  document.getElementById('machinehint').textContent = '床を決定しました。ロボットを置く手順はここに加わります';
+  document.getElementById('machineBody').hidden = false;
+  document.getElementById('machinehint').textContent =
+    'ロボットを選択し、写真の床の上へドラッグして置き、向きを合わせて「決定」してください';
+  startMachines().catch((err) => fail('ロボットの一覧を取得できませんでした', err));
 }
+
+// ---- The machine step: pick a machine, see its shell on the floor, drag it, turn it, 決定 ----
+
+const MACHINE_COLORS = ['#2f7fe0'];
+const pickEl = document.getElementById('machinePick');
+const catalogQ = document.getElementById('catalogQ');
+const catalogHits = document.getElementById('catalogHits');
+const urdfPath = document.getElementById('urdfPath');
+const pxEl = document.getElementById('px');
+const pyEl = document.getElementById('py');
+const yawEl = document.getElementById('yaw');
+const yawNum = document.getElementById('yawNum');
+const placeButton = document.getElementById('place');
+const mPhoto = document.getElementById('mphoto');
+const mGl = document.getElementById('mgl');
+const mView = document.getElementById('mview');
+const mctx = mView.getContext('2d');
+const CATALOG_FIRST = 'physical-sandbox/so101';
+
+let machines = [];       // the list the server gave: { id, urdf, source, label }
+let machineStarted = false;
+let machineGen = 0;      // counts the opens: an older one's loads must not touch the newer
+let current = null;      // { id, urdf, typed } of the machine that is open
+let mdata = null;        // what ps_machine_open answered
+let mThree = null;       // the shells (three), once built
+let place = { x: 0, y: 0, yaw: 0 };   // metres, metres, degrees
+let placeDirty = false;
+let mDrag = null;        // { dx, dy }: the base's offset from the grabbed floor point
+
+async function fetchParts(name, args, count) {
+  const out = new Array(count);
+  let next = 0;
+  const worker = async () => {
+    while (next < count) {
+      const part = next++;
+      out[part] = (await call(name, { ...args, part })).data;
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  return out.join('');
+}
+
+// The machine's base transform, row by row (as scene.py's base_transform does it)
+function baseOf() {
+  const a = place.yaw * Math.PI / 180;
+  const c = Math.cos(a), s = Math.sin(a);
+  return [c, -s, 0, place.x, s, c, 0, place.y, 0, 0, 1, 0, 0, 0, 0, 1];
+}
+
+// The pixel of the floor point (x, y, 0) through the pinhole camera, or null behind it
+function pixelOfFloor(camera, x, y) {
+  const r = camera.extr.R, t = camera.extr.t, k = camera.intr;
+  const z = r[6] * x + r[7] * y + t[2];
+  if (!(z > 1e-9)) return null;
+  return { u: k.fx * (r[0] * x + r[1] * y + t[0]) / z + k.cx, v: k.fy * (r[3] * x + r[4] * y + t[1]) / z + k.cy };
+}
+
+function drawMachinePhoto() {
+  const c = mPhoto.getContext('2d');
+  c.fillStyle = '#222';
+  c.fillRect(0, 0, mPhoto.width, mPhoto.height);
+  if (photo) c.drawImage(photo, 0, 0, mPhoto.width, mPhoto.height);
+}
+
+function drawMachine() {
+  if (!state) return;
+  const k = mView.width / state.width;
+  mctx.setTransform(1, 0, 0, 1, 0, 0);
+  mctx.clearRect(0, 0, mView.width, mView.height);
+  if (!mdata) return;
+  mctx.setTransform(k, 0, 0, k, 0, 0);
+  if (mdata.floor) {
+    strokePath(mctx, mdata.floor, true);
+    mctx.fillStyle = 'rgba(255,255,255,0.10)';
+    mctx.fill();
+    mctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    mctx.lineWidth = 2.5 / k;
+    mctx.setLineDash([10 / k, 6 / k]);
+    mctx.stroke();
+    mctx.setLineDash([]);
+  }
+  const p = pixelOfFloor(mdata.camera, place.x, place.y);
+  if (p) {   // where the base stands, and which way it faces
+    const a = place.yaw * Math.PI / 180;
+    const q = pixelOfFloor(mdata.camera, place.x + 0.1 * Math.cos(a), place.y + 0.1 * Math.sin(a));
+    mctx.strokeStyle = '#ffffff';
+    mctx.fillStyle = MACHINE_COLORS[0];
+    mctx.lineWidth = 2 / k;
+    mctx.beginPath(); mctx.arc(p.u, p.v, 6 / k, 0, 2 * Math.PI); mctx.fill(); mctx.stroke();
+    if (q) { mctx.beginPath(); mctx.moveTo(p.u, p.v); mctx.lineTo(q.u, q.v); mctx.stroke(); }
+  }
+  if (mThree) drawShells(mThree, [mdata.zeroPoses], baseOf(), [true]);
+}
+
+function showPlace() {
+  pxEl.value = String(Math.round(place.x * 1000) / 1000);
+  pyEl.value = String(Math.round(place.y * 1000) / 1000);
+  yawEl.value = yawNum.value = String(Math.round(place.yaw));
+}
+
+function setPlace(next) {
+  place = { ...place, ...next };
+  place.yaw = ((place.yaw + 180) % 360 + 360) % 360 - 180;   // -180 .. 180
+  placeDirty = true;
+  placeButton.disabled = !mdata;
+  showPlace();
+  drawMachine();
+}
+
+function releaseMachine() {
+  releaseShells(mThree);
+  mThree = null;
+  mdata = null;
+}
+
+async function openMachine(urdf, id, { typed = false, keep = false } = {}) {
+  const mine = ++machineGen;
+  releaseMachine();
+  drawMachinePhoto();
+  drawMachine();
+  placeButton.disabled = true;
+  if (!keep) say(`ロボット ${id} を読み込んでいます…`);
+  try {
+    const out = await call('ps_machine_open', typed ? { urdf, id, typed: true } : { urdf, id });
+    if (mine !== machineGen) return;
+    mdata = out;
+    current = { id: out.id, urdf: out.urdf, typed };
+    if (!keep) {
+      place = out.placed ? { x: out.placed.x, y: out.placed.y, yaw: out.placed.yaw * 180 / Math.PI } : { x: out.center.x, y: out.center.y, yaw: 0 };
+    }
+    showPlace();
+    placeDirty = !out.placed || keep && placeDirty;
+    placeButton.disabled = !placeDirty;
+    drawMachine();
+    if (!THREE) throw new Error('three が読み込まれていません');
+    const m = out.model;
+    const buffer = bytesOf(await fetchParts('ps_model_part', { key: m.key }, m.binParts));
+    if (mine !== machineGen) return;
+    const built = buildShells(mGl, m, buffer, MACHINE_COLORS);
+    // near 0.05 m: the same near clip as the replay video, so a close machine is cut alike
+    built.camera = new THREE.PerspectiveCamera(50, 1, 0.05, 600);
+    placeCamera(built.camera, out.camera);
+    mThree = built;
+    drawMachine();
+    // The first frame of a fresh WebGL canvas can reach the screen opaque black in some browsers: draw once more
+    requestAnimationFrame(() => { if (mine === machineGen) drawMachine(); });
+    if (out.placed) document.getElementById('motion').classList.remove('locked');   // this folder already places it
+    if (!keep) {
+      say(out.placed
+        ? `${out.id} は決定済みの位置に表示しています。動かした場合は、もう一度「決定」してください`
+        : `${out.id} を床に置きました（仮）。ドラッグで動かし、向きを合わせて「決定」してください`);
+    }
+  } catch (err) {
+    if (mine === machineGen) fail('ロボットを表示できませんでした', err);
+  }
+}
+
+// The select: a first line to say what it is for; the catalog's so101 when nothing is here yet
+function fillPick(selectUrdf) {
+  pickEl.textContent = '';
+  const first = document.createElement('option');
+  first.value = '';
+  first.textContent = machines.length ? 'ロボットを選択してください' : `${CATALOG_FIRST}（公開カタログから取得）`;
+  if (!machines.length) first.value = `catalog:${CATALOG_FIRST}`;
+  pickEl.append(first);
+  machines.forEach((m, i) => {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = m.source === 'catalog' ? m.label : `${m.label}（${m.source === 'cache' ? 'キャッシュ' : 'フォルダ'}）`;
+    pickEl.append(o);
+  });
+  const at = machines.findIndex((m) => m.urdf === selectUrdf);
+  pickEl.value = at >= 0 ? String(at) : first.value;
+}
+
+async function listMachines(selectUrdf = null) {
+  machines = (await call('ps_machines_list', {})).machines;
+  fillPick(selectUrdf);
+}
+
+async function startMachines() {
+  if (machineStarted) {   // the floor was decided again: the camera and the floor are new
+    if (current) openMachine(current.urdf, current.id, { typed: current.typed, keep: true });
+    return;
+  }
+  machineStarted = true;
+  await listMachines();
+  const m = state.machine;
+  if (m) {   // this folder already places a machine: show it where it stands
+    await listMachines(m.urdf);
+    openMachine(m.urdf, m.id);
+  }
+}
+
+async function pullAndOpen(ref) {
+  say(`${ref} を公開カタログから取得しています…`);
+  const out = await call('ps_catalog_pull', { ref });
+  if (out.error) { say(out.error, true); return; }
+  await listMachines(out.urdf);
+  openMachine(out.urdf, out.id);
+}
+
+pickEl.addEventListener('change', () => {
+  const v = pickEl.value;
+  if (v.startsWith('catalog:')) { pullAndOpen(v.slice('catalog:'.length)).catch((err) => fail('取得できませんでした', err)); return; }
+  if (v === '') return;
+  const m = machines[Number(v)];
+  openMachine(m.urdf, m.id);
+});
+
+async function searchCatalog() {
+  say('公開カタログを検索しています…');
+  const out = await call('ps_catalog_search', { q: catalogQ.value.trim() });
+  if (out.error) { say(out.error, true); return; }
+  catalogHits.textContent = '';
+  for (const item of out.items) {
+    const ref = item.version ? `${item.ref}:${item.version}` : item.ref;
+    const chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.textContent = `${item.label}（${item.ref}${item.private ? '・非公開' : ''}）を取得`;
+    chip.addEventListener('click', () => pullAndOpen(ref).catch((err) => fail('取得できませんでした', err)));
+    catalogHits.append(chip);
+  }
+  say(out.items.length ? `${out.items.length} 件見つかりました。取得するものを選択してください` : '見つかりませんでした');
+}
+document.getElementById('catalogGo').addEventListener('click', () => searchCatalog().catch((err) => fail('検索できませんでした', err)));
+catalogQ.addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('catalogGo').click(); });
+
+function openTyped() {
+  const path = urdfPath.value.trim();
+  if (!path) { say('URDF ファイルのパスを入力してください', true); return; }
+  const id = path.split(/[\\/]/).pop().replace(/\.urdf$/i, '') || 'robot';
+  openMachine(path, id, { typed: true });
+}
+document.getElementById('urdfOpen').addEventListener('click', openTyped);
+urdfPath.addEventListener('keydown', (e) => { if (e.key === 'Enter') openTyped(); });
+
+// The numbers beside the picture
+for (const [el, key] of [[pxEl, 'x'], [pyEl, 'y']]) {
+  el.addEventListener('change', () => {
+    const n = Number(el.value);
+    if (el.value.trim() === '' || !Number.isFinite(n)) { showPlace(); return; }
+    setPlace({ [key]: n });
+  });
+}
+yawEl.addEventListener('input', () => setPlace({ yaw: Number(yawEl.value) }));
+yawNum.addEventListener('change', () => {
+  const n = Number(yawNum.value);
+  if (yawNum.value.trim() === '' || !Number.isFinite(n)) { showPlace(); return; }
+  setPlace({ yaw: n });
+});
+
+// Dragging: the base follows the floor point under the pointer (the lens is already undone in the picture)
+function toMachinePhoto(e) {
+  const r = mView.getBoundingClientRect();
+  return { u: (e.clientX - r.left) / r.width * state.width, v: (e.clientY - r.top) / r.height * state.height };
+}
+mView.addEventListener('pointerdown', (e) => {
+  if (!state || !mdata) return;
+  const q = toMachinePhoto(e);
+  const p = pixelOfFloor(mdata.camera, place.x, place.y);
+  const reach = 60 / (mView.getBoundingClientRect().width / state.width);   // 60 screen pixels
+  if (!p || Math.hypot(q.u - p.u, q.v - p.v) > reach) return;
+  const f = floorPointJs(mdata.camera, q.u, q.v);
+  if (!f) return;
+  mDrag = { dx: place.x - f.x, dy: place.y - f.y };
+  mView.setPointerCapture(e.pointerId);
+});
+mView.addEventListener('pointermove', (e) => {
+  if (!mDrag) return;
+  const q = toMachinePhoto(e);
+  const f = floorPointJs(mdata.camera, q.u, q.v);
+  if (f) setPlace({ x: f.x + mDrag.dx, y: f.y + mDrag.dy });
+});
+const endMachineDrag = () => { mDrag = null; };
+mView.addEventListener('pointerup', endMachineDrag);
+mView.addEventListener('pointercancel', endMachineDrag);
+mView.addEventListener('lostpointercapture', endMachineDrag);
+
+placeButton.addEventListener('click', async () => {
+  if (!mdata) return;
+  placeButton.disabled = true;
+  try {
+    const out = await call('ps_scene_place', {
+      id: mdata.id, urdf: mdata.urdf,
+      x: Math.round(place.x * 1000) / 1000, y: Math.round(place.y * 1000) / 1000, yaw: place.yaw * Math.PI / 180 });
+    placeDirty = false;
+    document.getElementById('motion').classList.remove('locked');
+    say(`決定しました。シーンのファイルを書きました: ${out.scenePath}`);
+  } catch (err) {
+    placeButton.disabled = false;
+    fail('決定できませんでした', err);
+  }
+});
 
 function showLogin(login) {
   loginEl.textContent = login?.signedIn
@@ -268,8 +600,10 @@ async function start() {
     showEdges();
     if (decidedOnce) openSections();
     updateDecide();
-    canvas.width = 1280;
-    canvas.height = Math.round(1280 * state.height / state.width);
+    for (const c of [canvas, mPhoto, mView, mGl]) {
+      c.width = 1280;
+      c.height = Math.round(1280 * state.height / state.width);
+    }
     draw();
     // The photo in parts: each part is one small call
     let b64 = '';
@@ -279,7 +613,7 @@ async function start() {
       b64 += out.data;
     }
     const img = new Image();
-    img.onload = () => { photo = img; draw(); solve(); };
+    img.onload = () => { photo = img; draw(); drawMachinePhoto(); solve(); };
     img.onerror = () => say('写真を表示できませんでした', true);
     img.src = `data:image/jpeg;base64,${b64}`;
   } catch (err) {

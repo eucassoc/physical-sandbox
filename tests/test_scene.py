@@ -7,7 +7,7 @@ import pytest
 
 from physical_sandbox.machine import load_machine
 from physical_sandbox.motion import motion_from_numpy
-from physical_sandbox.scene import PlacedMachine, Scene, load_scene, save_scene
+from physical_sandbox.scene import FORMAT, PlacedMachine, Scene, load_scene, save_placement, save_scene
 from physical_sandbox.site import Site
 
 URDF = """<?xml version="1.0"?>
@@ -235,3 +235,24 @@ def test_save_without_motions_keeps_unrelated_record(urdf, tmp_path):
     other.write_text("precious")
     save_scene(_scene(urdf, with_motion=False), tmp_path / "scene.json")
     assert other.read_text() == "precious"
+
+
+def test_save_placement_keeps_an_existing_records_list(tmp_path, urdf):
+    path = tmp_path / "scene.json"
+    path.write_text(json.dumps({"format": FORMAT, "site": "s-1", "machines": {}, "records": ["scene.record.json"]}))
+    placed = _scene(urdf, with_motion=False).machines["arm"]
+    save_placement(path, "s-1", {"arm": placed}, picture="/p/desk.jpg")
+    d = json.loads(path.read_text())
+    assert d["records"] == ["scene.record.json"] and d["picture"] == "/p/desk.jpg"
+    assert d["machines"]["arm"]["confirmedByPerson"] and d["format"] == FORMAT and d["site"] == "s-1"
+
+
+def test_save_placement_starts_an_empty_records_list_and_touches_no_record_file(tmp_path, urdf):
+    path = tmp_path / "scene.json"
+    (tmp_path / "scene.record.json").write_text("{}")
+    placed = _scene(urdf, with_motion=False).machines["arm"]
+    save_placement(path, "s-1", {"arm": placed}, picture=None)
+    d = json.loads(path.read_text())
+    assert d["records"] == [] and "picture" not in d
+    assert (tmp_path / "scene.record.json").read_text() == "{}"
+    assert load_scene(path, Site(id="s-1", cameras={})).machines["arm"].x == 0.2

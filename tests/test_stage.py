@@ -8,13 +8,15 @@ import cv2
 import numpy as np
 import pytest
 
-from physical_sandbox import stage
+from physical_sandbox import push, stage
 from physical_sandbox.cli import main
 from physical_sandbox.errors import InputError
+from physical_sandbox.scene import load_scene
 from physical_sandbox.site import load_site
 from physical_sandbox.stage import Stage, StageServer
 
 import test_fit_screen
+from synthetic import URDF
 from test_fit_screen import CORNERS, H, W, get, status_of
 
 
@@ -168,7 +170,8 @@ def test_neither_picture_nor_work_is_refused():
 def test_the_stage_html_has_the_four_sections_and_no_markers(served):
     html = get(served().url)[2]
     assert all(f'id="{s}"' in html for s in ("floor", "machine", "motion", "compare"))
-    assert "/*__LIB:" not in html and "__THREE__" not in html and "__EXT_APPS_BUNDLE__" not in html
+    # three's own source mentions "__THREE__": only the marker comment must be gone
+    assert "/*__LIB:" not in html and "/*__THREE__*/" not in html and "__EXT_APPS_BUNDLE__" not in html
 
 
 # ---- the command ----
@@ -232,3 +235,117 @@ def test_stage_command_prints_what_was_written_on_each_decision(still, tmp_path,
 def test_stage_command_names_a_missing_picture(tmp_path, home, capsys):
     assert main(["stage", str(tmp_path / "nothing.jpg"), "--no-browser"]) == 2
     assert "nothing.jpg" in capsys.readouterr().err
+
+
+@pytest.fixture
+def decided(served):
+    s = served()
+    assert call(s, "ps_site_decide", {"corners": CORNERS, "edgesM": [4.0, 3.0], "measured": True})["ok"]
+    return s
+
+
+@pytest.fixture
+def cache_mini(still, tmp_path):
+    folder = tmp_path / "cache" / "machines" / "mini"
+    folder.mkdir(parents=True)
+    (folder / "mini.urdf").write_text(URDF)
+    return str(folder / "mini.urdf")
+
+
+def test_machines_list_finds_the_cache_the_catalog_cache_and_the_dirs(decided, cache_mini, tmp_path):
+    out = call(decided, "ps_machines_list", {})
+    assert {m["id"] for m in out["machines"]} == {"mini"} and out["machines"][0]["source"] == "cache"
+    pulled = tmp_path / "cache" / "catalog" / "t" / "arm" / "2"
+    pulled.mkdir(parents=True)
+    (pulled / "arm.urdf").write_text(URDF)
+    mine = tmp_path / "mine"
+    (mine / "own").mkdir(parents=True)
+    (mine / "own" / "own.urdf").write_text(URDF)
+    decided.stage.machine_dirs = (mine,)
+    got = {m["id"]: m for m in call(decided, "ps_machines_list", {})["machines"]}
+    assert set(got) == {"mini", "arm", "own"}
+    assert got["arm"]["source"] == "catalog" and got["arm"]["label"] == "t/arm:2"
+    assert got["own"]["source"] == "dir" and got["own"]["urdf"].endswith("own.urdf")
+
+
+def test_machine_open_gives_the_zero_pose_the_camera_and_the_floor_centre(decided, cache_mini):
+    out = call(decided, "ps_machine_open", {"urdf": cache_mini, "id": "mini"})
+    assert len(out["zeroPoses"]) == len(out["model"]["links"]) and len(out["zeroPoses"][0]) == 16
+    assert out["placed"] is None and abs(out["center"]["x"] - 2.0) < 1e-6 and abs(out["center"]["y"] - 1.5) < 1e-6
+    assert len(out["floor"]) == 4 and set(out["camera"]) == {"intr", "extr"} and len(out["camera"]["extr"]["R"]) == 9
+
+
+def test_machine_open_refuses_a_urdf_that_was_not_listed(decided, tmp_path):
+    stray = tmp_path / "x.urdf"
+    stray.write_text(URDF)
+    assert "error" in call(decided, "ps_machine_open", {"urdf": str(stray), "id": "x"})
+    assert "model" in call(decided, "ps_machine_open", {"urdf": str(stray), "id": "x", "typed": True})
+    assert "error" in call(decided, "ps_machine_open", {"urdf": str(tmp_path / "none.urdf"), "id": "x", "typed": True})
+    (tmp_path / "x.txt").write_text(URDF)
+    assert "error" in call(decided, "ps_machine_open", {"urdf": str(tmp_path / "x.txt"), "id": "x", "typed": True})
+
+
+def test_machine_open_needs_a_decided_floor(served, cache_mini):
+    assert "error" in call(served(), "ps_machine_open", {"urdf": cache_mini, "id": "mini"})
+
+
+def test_scene_place_writes_the_scene_and_first_shows_it(decided, cache_mini, tmp_path, still):
+    out = call(decided, "ps_scene_place", {"id": "mini", "urdf": cache_mini, "x": 1.0, "y": 0.5, "yaw": 0.3})
+    assert out["scenePath"].endswith("scene.json") and len(out["base"]) == 16
+    scene = load_scene(tmp_path / "w" / "scene.json", load_site(tmp_path / "w" / "site.json"))
+    assert scene.machines["mini"].confirmed_by_person and abs(scene.machines["mini"].yaw - 0.3) < 1e-9
+    d = json.loads((tmp_path / "w" / "scene.json").read_text())
+    assert d["picture"] == str(still.resolve()) and d["records"] == []
+    kept = json.loads((tmp_path / "w" / "stage.json").read_text())
+    assert kept["picture"] == str(still.resolve()) and kept["machine"] == {"id": "mini", "urdf": cache_mini}
+    first = json.loads(StageServer(Stage(work=tmp_path / "w")).first())
+    assert first["machine"] == {"id": "mini", "urdf": str(tmp_path / "cache" / "machines" / "mini" / "mini.urdf"),
+                                "placed": {"x": 1.0, "y": 0.5, "yaw": 0.3}}
+    reopened = call(decided, "ps_machine_open", {"urdf": cache_mini, "id": "mini"})
+    assert reopened["placed"] == {"x": 1.0, "y": 0.5, "yaw": 0.3}
+
+
+def test_scene_place_refuses_numbers_that_are_not_finite(decided, cache_mini, tmp_path):
+    for bad in (float("nan"), float("inf"), "a"):
+        assert "error" in call(decided, "ps_scene_place", {"id": "mini", "urdf": cache_mini, "x": bad, "y": 0, "yaw": 0})
+    assert not (tmp_path / "w" / "scene.json").exists()
+
+
+def test_scene_place_keeps_the_records_of_the_scene(decided, cache_mini, tmp_path):
+    (tmp_path / "w" / "scene.json").write_text(json.dumps(
+        {"format": "physical-sandbox.scene/1", "site": "site", "machines": {}, "records": ["a.record.json"]}))
+    call(decided, "ps_scene_place", {"id": "mini", "urdf": cache_mini, "x": 1.0, "y": 0.5, "yaw": 0.0})
+    assert json.loads((tmp_path / "w" / "scene.json").read_text())["records"] == ["a.record.json"]
+
+
+def test_catalog_search_and_pull_go_through_the_stage_with_the_token(decided, catalog_server, monkeypatch, home):
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
+    push._keep(catalog_server.url, "tok-1", 3600, handle="ada")
+    items = call(decided, "ps_catalog_search", {"q": "mini"})["items"]
+    assert items[0]["ref"] == "t/mini" and items[0]["private"] is False and items[0]["version"] == "1"
+    assert items[0]["label"] == "ミニ"
+    assert catalog_server.headers[-1]["Authorization"] == "Bearer tok-1"
+    out = call(decided, "ps_catalog_pull", {"ref": "t/mini:1"})
+    assert out["id"] == "mini" and out["urdf"].endswith("mini.urdf")
+    listed = call(decided, "ps_machines_list", {})["machines"]
+    assert [m["label"] for m in listed] == ["t/mini:1"]
+
+
+def test_a_catalog_that_cannot_be_reached_is_an_error_answer_not_a_raise(decided, monkeypatch):
+    monkeypatch.setenv("PS_CATALOG_URL", "http://127.0.0.1:9")
+    assert "error" in call(decided, "ps_catalog_search", {"q": "x"})
+    assert "error" in call(decided, "ps_catalog_pull", {"ref": "t/mini:1"})
+
+
+def test_first_and_the_machine_list_make_no_request_to_the_catalog(decided, catalog_server, monkeypatch, cache_mini):
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
+    get(decided.url + "first")
+    call(decided, "ps_machines_list", {})
+    assert catalog_server.hits == 0
+
+
+def test_the_stage_html_has_the_machine_controls(served):
+    html = get(served().url)[2]
+    for ident in ("machinePick", "catalogQ", "urdfPath", "px", "py", "yaw"):
+        assert f'id="{ident}"' in html
+    assert "floorPointJs" in html and "ps_machine_open" in html

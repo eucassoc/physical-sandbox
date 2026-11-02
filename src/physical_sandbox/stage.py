@@ -80,10 +80,12 @@ def _safe_name(label: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", label) or "motion"
 
 
-def _hub_root() -> Path:
-    """Where LeRobot keeps the datasets it downloaded: ``$HF_HOME/lerobot/hub``, else under ``~/.cache/huggingface``."""
+def _hub_roots() -> list[Path]:
+    """Where downloaded datasets wait: LeRobot's own ``<HF_HOME>/lerobot/hub`` and the Hugging Face hub's
+    ``<HF_HOME>/hub`` (where ``huggingface-cli download`` writes); ``HF_HOME`` defaults to ``~/.cache/huggingface``."""
     home = os.environ.get("HF_HOME")
-    return (Path(home).expanduser() if home else Path.home() / ".cache" / "huggingface") / "lerobot" / "hub"
+    base = Path(home).expanduser() if home else Path.home() / ".cache" / "huggingface"
+    return [base / "lerobot" / "hub", base / "hub"]
 
 
 def _dataset_name(folder: Path) -> str:
@@ -404,16 +406,16 @@ class Stage:
                 label = m.label or m.machine
                 records.append({"spec": str(path) if len(motions) == 1 else f"{path}#{label}", "label": label})
         found: list[Path] = []
-        hub = _hub_root()
-        if hub.is_dir():
-            found += sorted(hub.glob("datasets--*/snapshots/*"))
+        for hub in _hub_roots():
+            if hub.is_dir():
+                found += sorted(hub.glob("datasets--*/snapshots/*"))
         found += self.lerobot_dirs
         lerobot, seen = [], set()
         for folder in found:
             info_path = folder / "meta" / "info.json"
-            if str(folder) in seen or not info_path.is_file():
+            if not info_path.is_file() or folder.resolve() in seen:
                 continue
-            seen.add(str(folder))
+            seen.add(folder.resolve())
             try:
                 total = json.loads(info_path.read_text()).get("total_episodes")
             except (OSError, ValueError, AttributeError):
@@ -442,6 +444,10 @@ class Stage:
                 motion, label=f"{_dataset_name(Path(lerobot[0]).expanduser()).rsplit('/', 1)[-1]} ep{lerobot[1]}")
         elif not motion.label:
             motion = dataclasses.replace(motion, label=motion.machine)
+        placed = scene.machines.get(motion.machine)
+        if placed is not None and list(motion.joint_names) != list(placed.machine.joint_names):
+            raise ValueError(f"記録の関節がロボットと合いません（記録: {', '.join(motion.joint_names)} ／ "
+                             f"ロボット: {', '.join(placed.machine.joint_names)}）")
         return scene, motion, notes
 
     def _motion_open(self, args: dict) -> dict:

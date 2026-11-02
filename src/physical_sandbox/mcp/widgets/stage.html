@@ -491,7 +491,7 @@ placeButton.addEventListener('click', async () => {
     placeDirty = false;
     openMotionSection();
     say(`決定しました。シーンのファイルを書きました: ${out.scenePath}`);
-    if (motionSpec) openMotion(motionSpec, { keep: true });   // the trail and the tip are for where it stands now
+    if (latestSpec) openMotion(latestSpec, { keep: true });   // the trail and the tip are for where it stands now (the newest spec, also one still loading)
   } catch (err) {
     placeButton.disabled = false;
     fail('決定できませんでした', err);
@@ -519,7 +519,7 @@ const exportBtn = document.getElementById('exportBtn');
 
 let motionList = { records: [], lerobot: [] };   // what ps_motions_list answered
 let motionStarted = false;
-let motionSpec = null;   // the spec of the motion that is open
+let latestSpec = null;   // the spec of the newest open, loaded or still loading
 let tdata = null;        // what ps_motion_open answered, with the data parts joined in once they arrive
 let tready = false;      // the poses, times and pixel paths have arrived
 let tThree = null;       // the shell (three), once built
@@ -608,6 +608,7 @@ function releaseMotion() {
 // the tip move with it) while the frame and the shell stay.
 async function openMotion(spec, { keep = false } = {}) {
   const mine = ++tgen;
+  latestSpec = spec;
   stopPlay();
   tready = false;
   exportBtn.disabled = tPlay.disabled = tSlider.disabled = true;
@@ -637,7 +638,6 @@ async function openMotion(spec, { keep = false } = {}) {
       placeCamera(tThree.camera, out.camera);
     }
     tdata = out;
-    motionSpec = spec;
     tready = true;
     tSlider.max = String(out.frames - 1);
     tSlider.disabled = tPlay.disabled = out.frames < 2;
@@ -696,7 +696,9 @@ exportBtn.addEventListener('click', async () => {
   exporting = true;
   exportBtn.disabled = true;
   try {
-    const { job } = await call('ps_export', { what: 'replay', spec: tdata.spec });
+    const started = await call('ps_export', { what: 'replay', spec: tdata.spec });
+    if (started.error) { say(started.error, true); return; }   // e.g. an export is already running (the page was reloaded)
+    const { job } = started;
     for (;;) {
       await new Promise((resolve) => setTimeout(resolve, 300));
       const st = await call('ps_export_status', { job });

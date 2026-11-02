@@ -407,12 +407,15 @@ def test_motions_list_finds_records_in_the_folder_and_lerobot_dirs(placed, tmp_p
         info["total_episodes"] = 1 if root == hub else 2
         (root / "meta" / "info.json").write_text(json.dumps(info))
     (tmp_path / "hf" / "lerobot" / "hub" / "datasets--lerobot--empty" / "snapshots" / "x").mkdir(parents=True)
+    plain = tmp_path / "hf" / "hub" / "datasets--x--y" / "snapshots" / "abc"  # what huggingface-cli download writes
+    make_dataset(plain, ["turn"], [np.zeros((4, 1))])
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
-    placed.stage.lerobot_dirs = (own,)
+    placed.stage.lerobot_dirs = (own, hub)  # a dir that is also under the hub is listed once
     out = call(placed, "ps_motions_list", {})
     assert out["records"] == [{"spec": str(tmp_path / "w" / "demo.record.json"), "label": "demo"}]
     by_dir = {d["dir"]: d for d in out["lerobot"]}
-    assert set(by_dir) == {str(hub), str(own)}
+    assert len(out["lerobot"]) == 3 and set(by_dir) == {str(hub), str(own), str(plain)}
+    assert by_dir[str(plain)]["name"] == "x/y"
     assert by_dir[str(hub)] == {"dir": str(hub), "name": "lerobot/tiny", "episodes": 1}
     assert by_dir[str(own)]["episodes"] == 2 and by_dir[str(own)]["name"] == "own"
 
@@ -458,6 +461,17 @@ def test_motion_open_refuses_without_a_placed_machine_and_for_a_bad_spec(decided
     (tmp_path / "w" / "scene.json").unlink()
     out = call(placed, "ps_motion_open", {"spec": spec, "slot": "a"})
     assert "ロボットを置いてから" in out["error"]
+
+
+def test_motion_open_refuses_a_record_whose_joints_are_not_the_machines(placed, tmp_path):
+    q = np.linspace(0, 1, 6).reshape(-1, 1)
+    save_record([motion_from_numpy(q, fps=10, joint_names=["other"], machine="elsewhere", label="x")],
+                "site", tmp_path / "w" / "foreign.record.json")
+    spec = str(tmp_path / "w" / "foreign.record.json")
+    out = call(placed, "ps_motion_open", {"spec": spec, "slot": "a"})
+    assert "記録の関節がロボットと合いません" in out["error"] and "other" in out["error"] and "turn" in out["error"]
+    assert "a" not in json.loads((tmp_path / "w" / "stage.json").read_text())
+    assert "error" in call(placed, "ps_export", {"what": "replay", "spec": spec})
 
 
 def _export(server, spec):

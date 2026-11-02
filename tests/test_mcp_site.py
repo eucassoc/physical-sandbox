@@ -157,6 +157,7 @@ def test_the_screen_and_bridge_ship_as_package_data():
     data = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())
     patterns = data["tool"]["setuptools"]["package-data"]["physical_sandbox.mcp"]
     assert "widgets/*.html" in patterns and "widgets/vendor/*.js" in patterns
+    assert "widgets/lib/*.js" in patterns  # the shared page functions the screens inline
 
 
 def test_the_vendored_bundles_licences_ship_with_them_and_are_named_in_the_notice():

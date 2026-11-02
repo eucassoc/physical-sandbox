@@ -84,7 +84,7 @@ async function call(name, args) {
   const text = res?.content?.[0]?.text;
   if (res?.isError) throw new Error(`${name}: ${text ?? 'エラー'}`);
   try { return JSON.parse(text); }
-  catch { throw new Error(`${name}: 答えを読めませんでした（${String(text).slice(0, 200)}）`); }
+  catch { throw new Error(`${name}: 応答を読み込めませんでした（${String(text).slice(0, 200)}）`); }
 }
 
 function toPhoto(e) {
@@ -218,7 +218,7 @@ async function solve() {
       const names = (state.objects ?? []).length ? `。物体 ${(state.objects ?? []).length} 個` : '';
       say(`${floorOk(out.stepM)}（画角 ${out.fovDeg}°、ずれ ${out.residualPx} 画素${names}）${note}`);
     } else {
-      say(`この角の位置では床が決まりません（${out.reason}）。角を動かしてください`, true);
+      say(`この角の位置では床を決定できません（${out.reason}）。角を動かしてください`, true);
     }
     updateDecide();
   } catch (err) {
@@ -281,7 +281,7 @@ decideButton.addEventListener('click', async () => {
   updateDecide();
   say(`決定しました。場所のファイルを書きました: ${out.sitePath}`);
   if (app.kind === 'local') { // the browser screen: nobody to tell, the terminal shows the file
-    say(`決定しました。場所のファイルを書きました: ${out.sitePath}。直すなら角や長さを変えてもう一度「決定」を、終わりなら端末で Ctrl-C を押してください`);
+    say(`決定しました。場所のファイルを書きました: ${out.sitePath}。変更する場合は角や長さを変えてもう一度「決定」を、終わりなら端末で Ctrl-C を押してください`);
     return;
   }
   const lengths = `辺 1→2 ${cmOf(state.edgesM[0])} cm、辺 2→3 ${cmOf(state.edgesM[1])} cm（${measuredBox.checked ? '実測' : '推定'}）`;

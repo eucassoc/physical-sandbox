@@ -2,8 +2,9 @@
 plays a motion over the photo and compares two motions (``psbx stage``).
 
 ``Stage`` holds the work folder's rules (which picture, which files) and answers the page's calls; ``StageServer``
-serves the page on 127.0.0.1 with the same small server the floor-only screen uses (``fit_screen``). In this
-first step the page fixes the floor; its other sections are filled in by later steps.
+serves the page on 127.0.0.1 with the same small server the floor-only screen uses (``fit_screen``). The page has
+four sections: the floor (fixed from four corners), the machine (placed on the floor), the motion (one record or
+LeRobot episode played over the photo) and the comparison of two motions, with exports of the replay and the report.
 """
 from __future__ import annotations
 
@@ -77,8 +78,18 @@ def _subfolders(parent: Path, depth: int) -> list[Path]:
 
 
 def _safe_name(label: str) -> str:
-    """A label as a file name part: every character outside ``A-Za-z0-9._-`` (non-ASCII too) becomes ``_``."""
-    return re.sub(r"[^A-Za-z0-9._-]", "_", label) or "motion"
+    """A label as a file name part: letters and digits of any script (a Japanese label stays readable), ``.``, ``_``
+    and ``-`` stay; everything else becomes ``_``. Leading dots go (no hidden files); an empty result is ``motion``."""
+    return re.sub(r"[^\w.-]", "_", label).lstrip(".") or "motion"
+
+
+def _record_stem(path: Path) -> str:
+    """A record file's name without ``.record.json`` (else without its last suffix): ``demo.record.json`` -> ``demo``."""
+    name = Path(path).name
+    for suffix in (".record.json", ".json"):
+        if name.endswith(suffix) and len(name) > len(suffix):
+            return name[: -len(suffix)]
+    return Path(path).stem
 
 
 def _hub_roots() -> list[Path]:
@@ -109,12 +120,11 @@ class Stage:
     """A picture and the work folder that belongs to it. Exactly one of ``picture`` and ``work`` may be None:
     with only the folder, its ``stage.json`` or ``scene.json`` says which picture it is for."""
 
-    def __init__(self, picture=None, work=None, camera: str = "camera", machine_dirs=(), lerobot_dirs=()):
+    def __init__(self, picture=None, work=None, camera: str | None = None, machine_dirs=(), lerobot_dirs=()):
         if picture is None and work is None:
             raise InputError("the stage needs a picture or a work folder")
-        self.camera = camera
-        self.machine_dirs = tuple(Path(d) for d in machine_dirs)
-        self.lerobot_dirs = tuple(Path(d) for d in lerobot_dirs)
+        self.machine_dirs = tuple(Path(d).expanduser().resolve() for d in machine_dirs)
+        self.lerobot_dirs = tuple(Path(d).expanduser().resolve() for d in lerobot_dirs)
         self._opened: set[Path] = set()  # machine files the page opened (a typed path may be placed after it)
         self._jobs: dict[str, dict] = {}  # exports by job id; one runs at a time
         self._jobs_lock = threading.Lock()
@@ -132,6 +142,7 @@ class Stage:
             raise InputError(f"picture {str(self.picture)!r}: no such file")
         self._check_still()
         self._check_site_is_for_this_picture()
+        self.camera = camera if camera is not None else self._site_camera()
 
     @property
     def site_path(self) -> Path:
@@ -154,6 +165,12 @@ class Stage:
             return load_site(self.site_path)
         except (OSError, ValueError, KeyError) as e:
             raise InputError(f"{self.site_path}: cannot read it ({e})") from e
+
+    def _site_camera(self) -> str:
+        """The camera name to use when none was given: the one the work folder's floor was decided with, else ``camera``."""
+        site = self.site
+        floor = site.floor if site is not None else None
+        return floor.camera if floor is not None and floor.camera else "camera"
 
     def _check_still(self) -> None:
         try:
@@ -198,7 +215,7 @@ class Stage:
     def call(self, name: str, args: dict) -> str:
         """One of the page's calls, by name; the JSON text it expects back."""
         if name == "ps_spike_image":
-            return json.dumps(photo_part(str(args["imagePath"]), int(args["part"])))
+            return json.dumps(photo_part(str(self.picture), int(args["part"])))
         if name == "ps_floor_solve":
             return json.dumps(floor_grid(args["width"], args["height"], args["corners"], args["edgesM"]))
         if name == "ps_site_decide":
@@ -233,8 +250,7 @@ class Stage:
         out = decide_floor(str(self.picture), self.width, self.height, self.site_path, self.camera, args,
                            what="floor fixed in the browser (psbx stage) and confirmed by a person")
         if out["ok"]:  # stage.json lets the folder alone find its picture next time
-            fit_screen.write_atomic(self.stage_path, json.dumps(
-                {"format": STAGE_FORMAT, "picture": str(self.picture)}, indent=2).encode())
+            self._update_stage_json(picture=str(self.picture))
         return out
 
     # ---- the machine step ----
@@ -262,12 +278,12 @@ class Stage:
         return value if isinstance(value, str) and value else None
 
     def _kept_grip(self) -> float | None:
-        """The grip threshold ``stage.json`` keeps (a finite number >= 0), or None for the automatic one."""
+        """The grip threshold ``stage.json`` keeps (a finite number), or None for the automatic one."""
         try:
             value = json.loads(self.stage_path.read_text()).get("gripThreshold")
         except (OSError, ValueError, AttributeError):
             return None
-        ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
         return float(value) if ok else None
 
     def _scene_machines(self) -> dict:
@@ -311,7 +327,7 @@ class Stage:
 
     def _catalog_search(self, q: str) -> dict:
         try:
-            items = catalog.search(q, token=push.kept_token(catalog._base()))
+            items = catalog.search(q, kind="machine", token=push.kept_token(catalog._base()))
         except (CatalogError, InputError) as e:  # offline, a refusal: the screen shows it in its bottom line
             return {"error": str(e)}
         out = []
@@ -456,8 +472,13 @@ class Stage:
         if lerobot is not None:
             motion = dataclasses.replace(
                 motion, label=f"{_dataset_name(Path(lerobot[0]).expanduser()).rsplit('/', 1)[-1]} ep{lerobot[1]}")
-        elif not motion.label:
-            motion = dataclasses.replace(motion, label=motion.machine)
+        else:
+            # A record file's motion is named by the file (two records of one robot are both "SO-101" inside):
+            # ``<stem>``, or ``<stem>-<label>`` when the file holds several motions.
+            path = Path(_split_label(spec)[0]).expanduser()
+            several = len(load_record(path)) > 1
+            own = motion.label or motion.machine
+            motion = dataclasses.replace(motion, label=f"{_record_stem(path)}-{own}" if several else _record_stem(path))
         placed = scene.machines.get(motion.machine)
         try:
             _check_motion(scene, motion)
@@ -485,13 +506,10 @@ class Stage:
         return out
 
     def _grip(self, args: dict) -> float | None:
-        """``args["gripThreshold"]``: None (or absent) for the automatic threshold, else a finite number >= 0 (rad)."""
+        """``args["gripThreshold"]``: None (or absent) for the automatic threshold, else a finite number (rad)."""
         if args.get("gripThreshold") is None:
             return None
-        value = _number(args, "gripThreshold")
-        if value < 0:
-            raise ValueError("gripThreshold must be a finite number >= 0")
-        return value
+        return _number(args, "gripThreshold")
 
     def _two_motions(self, args: dict):
         """``(scene, a, b, notes)`` for the compare calls' ``a`` and ``b`` specs: both load on the placed machine and

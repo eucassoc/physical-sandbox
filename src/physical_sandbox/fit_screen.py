@@ -302,7 +302,10 @@ def _handler_for(screen):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):  # the browser went away before the answer: nothing to do
+                pass
 
         def do_GET(self) -> None:
             if self.path == prefix:

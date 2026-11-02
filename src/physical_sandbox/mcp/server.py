@@ -418,7 +418,8 @@ def ps_scene_place(siteDir: str, machine: str, x: float, y: float, yaw: float, s
     "slider and a play button, and the table of numbers (the gaps, with the times they happen; click a time to "
     "jump there). Leave b out to look at one motion alone: the same screen without the pair's gaps (it shows "
     "the duration and the grasps). A record made for another stand of the same robot is read onto the "
-    "scene's only machine, and 'notes' in the answer says so. siteDir is the folder with site.json; scenePath the scene file (where the machine stands); "
+    "scene's only machine, and 'notes' in the answer says so. siteDir is the folder with site.json; scenePath the "
+    "scene file (where the machine stands); "
     "camera the site camera's name; a and b the motions: a recording file[#label] or "
     "lerobot:<dataset_dir>#<episode>. labelA and labelB name them on the screen. video is the picture to draw on "
     "(a still or a recording); without it, A's own recording when A is a LeRobot episode, else the picture the "
@@ -428,8 +429,8 @@ def ps_scene_place(siteDir: str, machine: str, x: float, y: float, yaw: float, s
     "(radians) a grasp closes through (default: the middle of the range the gripper went through in the two "
     "motions). What the numbers cannot tell yet is listed with its reason."))
 def ps_compare(siteDir: str, scenePath: str, camera: str, a: str, b: str | None = None,
-               labelA: str | None = None, labelB: str | None = None, video: str | None = None, videoCamera: str | None = None,
-               gripThreshold: float | None = None) -> str:
+               labelA: str | None = None, labelB: str | None = None, video: str | None = None,
+               videoCamera: str | None = None, gripThreshold: float | None = None) -> str:
     from ..cli import _check_motion, _check_motions, _lerobot_picture, _load_motion, _own_episode_span, _reading
     from ..errors import InputError
     from ..scene import load_scene
@@ -513,7 +514,8 @@ server.tool(description="Place a machine on a site, in the site's floor frame in
                         "(default siteDir/scene.json; ps_compare's scenePath). machine is a catalog ref "
                         "(handle/name[:version]; pulled first when it is not on this computer) or, with urdf (a "
                         "machine file on this computer), the id to give that machine. x and y are the base's "
-                        "position on the floor in metres, yaw its turn in radians. It answers the scene file, "
+                        "position on the floor in metres, yaw its turn in radians. It replaces any machine the "
+                        "scene file already places (one machine per scene). It answers the scene file, "
                         "the machine's id and where it stands. Nobody has looked at the placement yet: say so "
                         "and ask the person to check it in the compare screen or in `psbx stage`, where they "
                         "confirm it.")(ps_scene_place)

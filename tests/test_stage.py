@@ -1,4 +1,4 @@
-"""The stage: one browser screen over a work folder (floor step), served on 127.0.0.1."""
+"""The stage: one browser screen over a work folder (floor, machine, motion, compare, export), served on 127.0.0.1."""
 import json
 import shutil
 import threading
@@ -89,6 +89,37 @@ def test_decide_writes_the_site_and_first_then_continues_from_it(served, still, 
     assert first["floor"]["edgesM"] == [4.0, 3.0]
 
 
+def test_deciding_the_floor_again_keeps_what_stage_json_holds(served, cache_mini, still):
+    s = served()
+    call(s, "ps_site_decide", {"corners": CORNERS, "edgesM": [4.0, 3.0]})
+    assert "scenePath" in call(s, "ps_scene_place", {"id": "mini", "urdf": cache_mini, "x": 0, "y": 0, "yaw": 0})
+    record = _record(s.stage.work / "demo.record.json")
+    call(s, "ps_motion_open", {"slot": "a", "spec": str(record)})
+    assert call(s, "ps_site_decide", {"corners": CORNERS, "edgesM": [4.0, 3.0]})["ok"]
+    first = json.loads(s.first())
+    assert first["machine"]["id"] == "mini" and first["motionA"] == str(record)
+    assert json.loads(s.stage.stage_path.read_text())["picture"] == str(still.resolve())
+
+
+def test_a_folder_decided_with_another_camera_keeps_it_unless_one_is_given(still, tmp_path, home, cache_mini):
+    work = tmp_path / "w"
+    s = StageServer(Stage(picture=still, work=work, camera="side"))
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    try:
+        assert call(s, "ps_site_decide", {"corners": CORNERS, "edgesM": [4.0, 3.0]})["ok"]
+        again = StageServer(Stage(picture=still, work=work))
+        threading.Thread(target=again.serve_forever, daemon=True).start()
+        try:
+            assert json.loads(again.first())["camera"] == "side"
+            opened = call(again, "ps_machine_open", {"id": "mini", "urdf": cache_mini, "typed": True})
+            assert opened["id"] == "mini" and "error" not in opened
+        finally:
+            again.shutdown()
+        assert Stage(picture=still, work=work, camera="other").camera == "other"
+    finally:
+        s.shutdown()
+
+
 def test_a_bad_decide_writes_nothing(served, tmp_path):
     s = served()
     out = call(s, "ps_site_decide", {"corners": CORNERS[:3], "edgesM": [4.0, 3.0]})
@@ -128,6 +159,7 @@ def test_writes_only_as_json_posts_to_the_call_address(served):
     assert status_of(s.url + "first") == 200 and status_of(s.url.replace(s.token, "wrong") + "first") == 404
     with urllib.request.urlopen(s.url, timeout=5) as r:
         assert r.headers["Cache-Control"] == "no-store"
+        r.read()  # the whole page: the test itself must not reset the connection mid-answer
 
 
 def test_a_folder_fixed_on_another_picture_is_refused(served, still, tmp_path):
@@ -176,6 +208,29 @@ def test_the_stage_html_has_the_four_sections_and_no_markers(served):
     assert all(f'id="{s}"' in html for s in ("floor", "machine", "motion", "compare"))
     # three's own source mentions "__THREE__": only the marker comment must be gone
     assert "/*__LIB:" not in html and "/*__THREE__*/" not in html and "__EXT_APPS_BUNDLE__" not in html
+
+
+def _node_checks(html: str, tmp_path) -> None:
+    """``node --check`` of the last module script of an assembled page (skipped without node)."""
+    import re
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = re.findall(r'<script type="module">(.*?)</script>', html, re.S)[-1]
+    (tmp_path / "page.mjs").write_text(script)
+    done = subprocess.run([node, "--check", str(tmp_path / "page.mjs")], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+
+
+def test_the_stage_pages_script_is_valid_javascript(tmp_path):
+    _node_checks(stage.fit_screen.widget_html("stage.html", stage.LOCAL_BRIDGE, three=True), tmp_path)
+
+
+def test_the_floor_screens_script_is_valid_javascript(tmp_path):
+    from physical_sandbox.mcp import server
+    _node_checks(server._widget("fit-floor.html"), tmp_path)
 
 
 # ---- the command ----
@@ -329,6 +384,7 @@ def test_catalog_search_and_pull_go_through_the_stage_with_the_token(decided, ca
     assert items[0]["ref"] == "t/mini" and items[0]["private"] is False and items[0]["version"] == "1"
     assert items[0]["label"] == "ミニ"
     assert catalog_server.headers[-1]["Authorization"] == "Bearer tok-1"
+    assert ("GET", "/api/catalog/search?q=mini&kind=machine") in catalog_server.calls  # machines only
     out = call(decided, "ps_catalog_pull", {"ref": "t/mini:1"})
     assert out["id"] == "mini" and out["urdf"].endswith("mini.urdf")
     listed = call(decided, "ps_machines_list", {})["machines"]
@@ -495,9 +551,30 @@ def test_export_replay_writes_the_video_and_reports_progress(placed, tmp_path):
 
 
 def test_export_names_a_label_with_odd_characters_safely(placed, tmp_path):
-    spec = str(_record(tmp_path / "w" / "demo.record.json", label="ロボ a/b"))
+    assert stage._safe_name("手本 a/b") == "手本_a_b" and stage._safe_name("..hidden") == "hidden"
+    assert stage._safe_name("") == "motion" and stage._safe_name("...") == "motion"
+    spec = str(_record(tmp_path / "w" / "手本 a.record.json", label="SO-101"))  # the file names the motion
     _, st = _export(placed, spec)
-    assert st["error"] is None and st["paths"] == [str(tmp_path / "w" / "replay-___a_b.mp4")]
+    assert st["error"] is None and st["paths"] == [str(tmp_path / "w" / "replay-手本_a.mp4")]
+
+
+def test_two_records_of_one_robot_export_under_their_own_names(placed, tmp_path):
+    a = str(_record(tmp_path / "w" / "demo.record.json", label="SO-101"))
+    b = str(_record(tmp_path / "w" / "policy.record.json", label="SO-101"))
+    _, st = _export(placed, a)
+    assert st["paths"] == [str(tmp_path / "w" / "replay-demo.mp4")]
+    _, st = _export_compare(placed, a, b)
+    assert st["error"] is None and (tmp_path / "w" / "compare" / "demo-vs-policy" / "gaps.json").is_file()
+
+
+def test_a_record_with_several_motions_is_named_by_its_file_and_the_motion(placed, tmp_path, monkeypatch):
+    q = np.linspace(0, 1, 6).reshape(-1, 1)
+    save_record([motion_from_numpy(q, fps=10, joint_names=["turn"], machine="mini", label=m) for m in ("p1", "p2")],
+                "site", tmp_path / "w" / "two.record.json")
+    path = str(tmp_path / "w" / "two.record.json")
+    assert placed.stage._load_motion(path + "#p2")[1].label == "two-p2"
+    assert placed.stage._load_motion(str(_record(tmp_path / "w" / "one.record.json")))[1].label == "one"
+    assert stage._record_stem(Path("/x/plain.json")) == "plain" and stage._record_stem(Path("/x/a.b")) == "a"
 
 
 def test_a_second_export_while_one_runs_is_refused(placed, tmp_path, monkeypatch):
@@ -578,7 +655,7 @@ def test_compare_keeps_the_grip_threshold_and_first_carries_it(placed, two_recor
 
 def test_compare_refuses_a_bad_threshold_and_bad_specs_and_keeps_nothing(placed, two_records, tmp_path):
     spec_a, spec_b = two_records
-    for bad in (-0.1, float("nan"), float("inf"), True, "0.2"):
+    for bad in (float("nan"), float("inf"), True, "0.2"):
         out = call(placed, "ps_compare", {"a": spec_a, "b": spec_b, "gripThreshold": bad})
         assert "gripThreshold" in out["error"], bad
     assert "error" in call(placed, "ps_compare", {"a": spec_a, "b": str(tmp_path / "w" / "none.record.json"), "gripThreshold": None})
@@ -612,8 +689,15 @@ def test_export_compare_takes_the_grip_threshold(placed, two_records, tmp_path):
     assert st["error"] is None
     report = json.loads((tmp_path / "w" / "compare" / "demo-vs-policy" / "gaps.json").read_text())
     assert report["grip_threshold"] == 0.3
-    out = call(placed, "ps_export", {"what": "compare", "a": spec_a, "b": spec_b, "gripThreshold": -1})
+    out = call(placed, "ps_export", {"what": "compare", "a": spec_a, "b": spec_b, "gripThreshold": float("inf")})
     assert "gripThreshold" in out["error"]
+
+
+def test_the_grip_threshold_may_be_any_finite_number(placed, two_records, tmp_path):
+    spec_a, spec_b = two_records
+    out = call(placed, "ps_compare", {"a": spec_a, "b": spec_b, "gripThreshold": -0.2})
+    assert out["figures"]["grip_threshold"] == -0.2
+    assert json.loads(StageServer(Stage(work=tmp_path / "w")).first())["gripThreshold"] == -0.2
 
 
 def test_a_second_export_while_a_compare_runs_is_refused(placed, two_records, monkeypatch):

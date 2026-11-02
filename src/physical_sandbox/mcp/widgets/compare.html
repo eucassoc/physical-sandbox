@@ -96,7 +96,7 @@ async function call(name, args) {
   const text = res?.content?.[0]?.text;
   if (res?.isError) throw new Error(`${name}: ${text ?? 'エラー'}`);
   try { return JSON.parse(text); }
-  catch { throw new Error(`${name}: 答えを読めませんでした（${String(text).slice(0, 200)}）`); }
+  catch { throw new Error(`${name}: 応答を読み込めませんでした（${String(text).slice(0, 200)}）`); }
 }
 
 async function fetchParts(name, args, count) {

@@ -14,10 +14,11 @@ Five minutes, one photo of your own desk:
 2. Put an A4 sheet on a desk and take a photo of it, `desk.jpg`.
 3. `psbx stage desk.jpg`. Drag the four corners onto the sheet's corners, pick A4, press 決定 (Decide). The work
    folder is `desk/`, next to the photo.
-4. In the robot step pick `physical-sandbox/so101` (it is pulled from the public catalog), drag it beside the
-   sheet, press 決定 (Decide).
-5. In the motion step pick `svla_so101_pickplace`, episode 0, press 読み込む (Load) and 再生 (Play): the arm
-   moves on your desk. 動画に書き出す (Export video) writes the replay.
+4. In the robot step pick `physical-sandbox/so101` (it is pulled from the public catalog; the page offers it as
+   that one line only while no machine is cached, otherwise type `so101` in the catalog search box and take it
+   from the hits), drag it beside the sheet, press 決定 (Decide).
+5. In the motion step pick `svla_so101_pickplace` from the list, episode 0: choosing from the list loads the
+   motion (読み込む (Load) is for a path you typed). Press 再生 (Play): the arm moves on your desk. 動画に書き出す (Export video) writes the replay.
 6. In the compare step pick the same dataset, episode 1, as the second motion and press 比べる (Compare): the
    table of gaps and two shells. 書き出す (Export) writes the report.
 
@@ -57,8 +58,11 @@ the robot step after the floor is decided, the motion and compare steps after a 
 3. **動き (Motion).** Pick a motion: a record file (`*.record.json`) in the work folder, or a LeRobot dataset
    found under `$HF_HOME/hub` and `$HF_HOME/lerobot/hub` (`~/.cache/huggingface` unless `HF_HOME` is set) or
    given with `--lerobot`, with its episode number; or type a record's path or `lerobot:<folder>#<episode>`.
-   読み込む (Load) reads it, 再生 (Play) draws it over the photo; you can drag the robot while it plays.
-   動画に書き出す (Export video) writes `replay-<label>.mp4` in the work folder. A record with one device
+   Choosing from the list loads it (読み込む (Load) reads a typed path); 再生 (Play) draws it over the photo. To move
+   the robot while the motion plays, use the robot step: the shell there follows the motion, and the motion view
+   follows the robot. 動画に書き出す (Export video) writes `replay-<label>.mp4` in the work folder, where the
+   label is the record file's name without `.record.json` (`<file>-<motion>` when the file holds several motions;
+   `<dataset> ep<N>` for a LeRobot episode). A record with one device
    drives the placed machine, and the page says so.
 4. **比べる (Compare).** The motion of the step before is A. Pick a second motion B the same way (and, if you
    like, the しきい値 (threshold) of the grasp, in radians). 比べる (Compare) shows both shells, the tool-tip trails, the line between the two tips and the
@@ -66,7 +70,7 @@ the robot step after the floor is decided, the motion and compare steps after a 
    `replay.mp4`, the same files as [`psbx compare`](#compare-two-motions).
 
 The options: `--dir DIR` is the work folder (default: next to the picture, named after it), `--camera side`
-names the camera in the site (default `camera`), `--machine DIR` and `--lerobot DIR` offer a machine folder or a
+names the camera in the site (default: the one the folder's floor was decided with, else `camera`), `--machine DIR` and `--lerobot DIR` offer a machine folder or a
 dataset folder (both repeatable), `--port` fixes the port, `--no-browser` only prints the address, for a machine
 you reach over SSH (forward the port).
 

@@ -132,7 +132,7 @@
         <select id="comparePick" title="比べる相手の動き（B）"></select>
         <label id="compareEpisodeLabel" hidden>エピソード <input type="number" id="compareEpisode" min="0" step="1" value="0" /></label>
         <input type="text" id="compareSpec" placeholder="B の記録ファイルのパス、または lerobot:フォルダ#エピソード番号" />
-        <label title="空なら自動で決まります">しきい値 <input type="number" id="grip" min="0" step="any" placeholder="自動" /> rad</label>
+        <label title="空なら自動で決定します">しきい値 <input type="number" id="grip" step="any" placeholder="自動" /> rad</label>
         <button class="chip" id="compareGo" disabled>比べる</button>
       </div>
       <div class="stack">
@@ -201,7 +201,7 @@ async function call(name, args) {
   const text = res?.content?.[0]?.text;
   if (res?.isError) throw new Error(`${name}: ${text ?? 'エラー'}`);
   try { return JSON.parse(text); }
-  catch { throw new Error(`${name}: 答えを読めませんでした（${String(text).slice(0, 200)}）`); }
+  catch { throw new Error(`${name}: 応答を読み込めませんでした（${String(text).slice(0, 200)}）`); }
 }
 
 function toPhoto(e) {
@@ -318,7 +318,14 @@ function drawMachine() {
     mctx.beginPath(); mctx.arc(p.u, p.v, 6 / k, 0, 2 * Math.PI); mctx.fill(); mctx.stroke();
     if (q) { mctx.beginPath(); mctx.moveTo(p.u, p.v); mctx.lineTo(q.u, q.v); mctx.stroke(); }
   }
-  if (mThree) drawShells(mThree, [mdata.zeroPoses], baseOf(), [true]);
+  if (mThree) drawShells(mThree, [shellPoses()], baseOf(), [true]);
+}
+
+// The pose the machine section draws: the loaded motion's current frame when the motion section holds one for the
+// same model (so the shell here follows the motion), else the machine's zero pose
+function shellPoses() {
+  if (tdata && tready && tdata.model.key === mdata.model.key) return tdata.poses[0][tBar.frame] ?? mdata.zeroPoses;
+  return mdata.zeroPoses;
 }
 
 function showPlace() {
@@ -333,8 +340,7 @@ function setPlace(next) {
   placeDirty = true;
   placeButton.disabled = !mdata;
   showPlace();
-  drawMachine();
-  drawMotion();   // the playing shell stands where the machine section puts it
+  drawMotion();   // draws the machine section too; the playing shell stands where it puts it
   drawCompare();  // and both shells of the comparison
 }
 
@@ -408,6 +414,8 @@ async function listMachines(selectUrdf = null) {
 async function startMachines() {
   if (machineStarted) {   // the floor was decided again: the camera and the floor are new
     if (current) openMachine(current.urdf, current.id, { typed: current.typed, keep: true });
+    if (latestSpec) openMotion(latestSpec, { keep: true });   // the motion and the comparison are drawn through
+    if (cspec) runCompare({ keep: true });                    // the new camera too: read them anew
     return;
   }
   machineStarted = true;
@@ -722,6 +730,7 @@ let tgen = 0;            // counts the opens: an older one's loads must not touc
 
 function drawMotion() {
   if (!state) return;
+  drawMachine();   // the shell of the robot step follows the motion's frame
   drawOverlay({ ctx: tctx, view: tView, data: tdata && tready ? tdata : null, frame: tBar.frame, three: tHeld.three, colors: [MOTION_COLOR] });
 }
 
@@ -864,12 +873,12 @@ function releaseCompare() {
   cHeld.key = null;
 }
 
-// The threshold box: empty is the automatic one (null); anything else must be a number that is not negative
+// The threshold box: empty is the automatic one (null); anything else must be a finite number
 function gripValue() {
   const text = gripEl.value.trim();
   if (text === '') return null;
   const n = Number(text);
-  if (!Number.isFinite(n) || n < 0) throw new Error('しきい値は 0 以上の数（rad）で入力してください。空にすると自動で決まります');
+  if (!Number.isFinite(n)) throw new Error('しきい値は数（rad）で入力してください。空にすると自動で決定します');
   return n;
 }
 
@@ -979,7 +988,7 @@ function openMotionSection() {
 
 function showLogin(login) {
   loginEl.textContent = login?.signedIn
-    ? `ログイン中: ${login.handle ?? ''}`
+    ? (login.handle ? `ログイン中: ${login.handle}` : 'ログイン中')
     : '未ログイン（公開カタログのみ）';
 }
 
@@ -1033,7 +1042,7 @@ async function solve() {
       floorSay.textContent = text;
       say(text);
     } else {
-      const text = `この角の位置では床が決まりません（${out.reason}）。角を動かしてください`;
+      const text = `この角の位置では床を決定できません（${out.reason}）。角を動かしてください`;
       floorSay.textContent = text;
       say(text, true);
     }

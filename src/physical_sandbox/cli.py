@@ -332,7 +332,7 @@ def _cmd_stage(args) -> int:
                            machine_dirs=args.machine, lerobot_dirs=args.lerobot)
 
     def wrote(site, path):
-        print(f"wrote {path}: camera {args.camera!r}, residual {site.residual_px[args.camera]:.2f} px, "
+        print(f"wrote {path}: camera {made.camera!r}, residual {site.residual_px[made.camera]:.2f} px, "
               f"dimensions {site.dimensions}, confirmed by a person (決定 again overwrites it; Ctrl-C to finish)",
               flush=True)
 
@@ -479,7 +479,8 @@ def _parser() -> argparse.ArgumentParser:
                                       "a motion over it and compare two motions")
     st.add_argument("target", help="a picture (.jpg .jpeg .png) or a work folder made by an earlier stage")
     st.add_argument("--dir", help="the work folder (default: next to the picture, named after it)")
-    st.add_argument("--camera", default="camera", help="the camera's name in the site (default: camera)")
+    st.add_argument("--camera", default=None, help="the camera's name in the site (default: the one the work "
+                                                   "folder's floor was decided with, else camera)")
     st.add_argument("--machine", action="append", default=[], metavar="DIR",
                     help="a machine folder to offer on the stage (repeatable)")
     st.add_argument("--lerobot", action="append", default=[], metavar="DIR",

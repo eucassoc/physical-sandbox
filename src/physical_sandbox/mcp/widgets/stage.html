@@ -332,22 +332,23 @@ async function openMachine(urdf, id, { typed = false, keep = false } = {}) {
   }
 }
 
-// The select: a first line to say what it is for; the catalog's so101 when nothing is here yet
+// The select: a neutral first line that is selected (so the hint shows and nothing is pulled on its own); when no
+// machine is here yet, the catalog's so101 as a second line, so that choosing it fires `change` and pulls it
 function fillPick(selectUrdf) {
   pickEl.textContent = '';
-  const first = document.createElement('option');
-  first.value = '';
-  first.textContent = machines.length ? 'ロボットを選択してください' : `${CATALOG_FIRST}（公開カタログから取得）`;
-  if (!machines.length) first.value = `catalog:${CATALOG_FIRST}`;
-  pickEl.append(first);
-  machines.forEach((m, i) => {
+  const add = (value, text) => {
     const o = document.createElement('option');
-    o.value = String(i);
-    o.textContent = m.source === 'catalog' ? m.label : `${m.label}（${m.source === 'cache' ? 'キャッシュ' : 'フォルダ'}）`;
+    o.value = value;
+    o.textContent = text;
     pickEl.append(o);
+  };
+  add('', 'ロボットを選択してください');
+  if (!machines.length) add(`catalog:${CATALOG_FIRST}`, `${CATALOG_FIRST}（公開カタログから取得）`);
+  machines.forEach((m, i) => {
+    add(String(i), m.source === 'catalog' ? m.label : `${m.label}（${m.source === 'cache' ? 'キャッシュ' : 'フォルダ'}）`);
   });
   const at = machines.findIndex((m) => m.urdf === selectUrdf);
-  pickEl.value = at >= 0 ? String(at) : first.value;
+  pickEl.value = at >= 0 ? String(at) : '';
 }
 
 async function listMachines(selectUrdf = null) {

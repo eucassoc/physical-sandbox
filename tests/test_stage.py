@@ -349,3 +349,31 @@ def test_the_stage_html_has_the_machine_controls(served):
     for ident in ("machinePick", "catalogQ", "urdfPath", "px", "py", "yaw"):
         assert f'id="{ident}"' in html
     assert "floorPointJs" in html and "ps_machine_open" in html
+
+
+def test_a_typed_urdf_outside_the_listed_roots_can_be_placed_and_reopened_by_a_fresh_stage(
+        decided, still, tmp_path, home):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    typed, other = outside / "typed.urdf", outside / "other.urdf"
+    typed.write_text(URDF)
+    other.write_text(URDF)
+    assert "model" in call(decided, "ps_machine_open", {"urdf": str(typed), "id": "typed", "typed": True})
+    placed = call(decided, "ps_scene_place", {"id": "typed", "urdf": str(typed), "x": 1.0, "y": 0.5, "yaw": 0.0})
+    assert placed["scenePath"].endswith("scene.json") and (tmp_path / "w" / "scene.json").is_file()
+    fresh = StageServer(Stage(picture=still, work=tmp_path / "w"))
+    threading.Thread(target=fresh.serve_forever, daemon=True).start()
+    try:
+        assert "model" in call(fresh, "ps_machine_open", {"urdf": str(typed), "id": "typed"})
+        assert "error" in call(fresh, "ps_machine_open", {"urdf": str(other), "id": "other"})
+    finally:
+        fresh.shutdown()
+
+
+def test_an_unlisted_urdf_that_was_never_opened_cannot_be_placed(
+        decided, still, tmp_path, home):
+    stray = tmp_path / "elsewhere" / "stray.urdf"
+    stray.parent.mkdir()
+    stray.write_text(URDF)
+    assert "error" in call(decided, "ps_scene_place", {"id": "stray", "urdf": str(stray), "x": 0, "y": 0, "yaw": 0})
+    assert not (tmp_path / "w" / "scene.json").exists()

@@ -14,7 +14,7 @@ function figureRows(figures, when, esc) {
   const f = figures;
   const dash = (v, fmt) => (v === null || v === undefined ? '—' : fmt(v));
   // What the numbers cannot tell yet, in words a person reads (the server's names otherwise)
-  const UNKNOWN_NAMES = { clearance: '周りとのすき間', reach: '届いたか', world: '世界の食い違い', grasps: 'つかむ瞬間' };
+  const UNKNOWN_NAMES = { clearance: '周りとのすき間', reach: '届いたか', world: '置き場所の差（シミュレーターと現実）', grasps: 'つかむ瞬間' };
   const unknown = f.unknown ?? [];
   const rows = [];
   const row = (name, value) => rows.push(`<tr><th>${esc(name)}</th><td>${value}</td></tr>`);

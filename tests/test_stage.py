@@ -531,6 +531,14 @@ def test_motion_open_refuses_a_record_whose_joints_are_not_the_machines(placed, 
     assert "error" in call(placed, "ps_export", {"what": "replay", "spec": spec})
 
 
+def test_motion_open_refuses_a_dataset_of_another_robot_in_the_pages_words(placed, tmp_path):
+    other = make_dataset(tmp_path / "other", ["right_joint1", "right_gripper"], [np.zeros((4, 2))])
+    out = call(placed, "ps_motion_open", {"spec": f"lerobot:{other}#0", "slot": "b"})
+    assert "データセットの関節がロボットと合いません" in out["error"]
+    assert "right_joint1" in out["error"] and "turn" in out["error"]
+    assert "b" not in json.loads((tmp_path / "w" / "stage.json").read_text())
+
+
 def _export(server, spec):
     job = call(server, "ps_export", {"what": "replay", "spec": spec})["job"]
     st = {}

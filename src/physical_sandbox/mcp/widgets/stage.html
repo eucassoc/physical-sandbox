@@ -764,6 +764,7 @@ async function openMotion(spec, { keep = false } = {}) {
     updateExportButtons();
     motionSpecEl.value = spec;
     showCompareA(`A: ${out.records[0].label}`);
+    if (!bSpec) defaultBFrom(spec);
     tBar.set(keep ? tBar.frame : 0);
     requestAnimationFrame(() => { if (mine === tgen) drawMotion(); });   // a fresh WebGL canvas may first show black
     say(out.note ?? `動き「${out.records[0].label}」を読み込みました。再生できます`);
@@ -938,6 +939,17 @@ function setB(spec) {
   compareSpecEl.value = spec;
   updateCompareGo();
 }
+// B starts as A's own dataset at the next episode (a dataset of another robot would only be refused)
+function defaultBFrom(specA) {
+  if (!specA.startsWith('lerobot:') || !motionList) return;
+  const [dir, ep] = specA.slice('lerobot:'.length).split('#');
+  const i = motionList.lerobot.findIndex((d) => d.dir === dir);
+  if (i < 0) return;
+  comparePick.value = `d:${i}`;
+  compareEpisode.value = String((Number(ep) || 0) + 1);
+  pickB();
+}
+
 function pickB() {
   const v = comparePick.value;
   compareEpisodeLabel.hidden = !v.startsWith('d:');

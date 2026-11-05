@@ -467,6 +467,8 @@ class Stage:
             path, label = _split_label(spec)
             if not Path(path).expanduser().is_absolute() and (self.work / path).is_file():
                 spec = str(self.work / path) + (f"#{label}" if label is not None else "")
+        if spec.startswith("lerobot:") and len(scene.machines) == 1:
+            self._check_dataset_joints(spec, scene)
         notes: list[str] = []
         motion, lerobot = _load_motion(spec, scene, notes)
         if lerobot is not None:
@@ -488,6 +490,24 @@ class Stage:
             raise ValueError(f"記録の関節がロボットと合いません（記録: {', '.join(motion.joint_names)} ／ "
                              f"ロボット: {', '.join(placed.machine.joint_names)}）") from None
         return scene, motion, notes
+
+    @staticmethod
+    def _check_dataset_joints(spec: str, scene) -> None:
+        """A LeRobot dataset whose joints are not the placed machine's is refused with the names (in the page's
+        words); a dataset that cannot be read is left to the loader, which says what is wrong."""
+        from .lerobot import dataset_joint_names
+
+        directory = spec[len("lerobot:"):].rpartition("#")[0]
+        if not directory or not (Path(directory).expanduser() / "meta" / "info.json").is_file():
+            return
+        try:
+            names = dataset_joint_names(directory)
+        except (InputError, OSError, ValueError, KeyError, TypeError):
+            return
+        (_, placed), = scene.machines.items()
+        if names != list(placed.machine.joint_names):
+            raise ValueError(f"データセットの関節がロボットと合いません（データセット: {', '.join(names)} ／ "
+                             f"ロボット: {', '.join(placed.machine.joint_names)}）")
 
     def _motion_open(self, args: dict) -> dict:
         """One motion on the placed machine: what the compare screen draws (``screens.screen_data`` with one record)."""

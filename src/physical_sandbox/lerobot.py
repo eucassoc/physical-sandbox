@@ -125,13 +125,19 @@ def _episode_row(dataset_dir: Path, episode: int) -> dict:
     raise InputIndexError(f"episode {episode} is not in the dataset (it has {total} episodes)")
 
 
-def read_episode(dataset_dir, episode: int, *, machine, key: str, label, machine_name: str) -> Motion:
-    dataset_dir = Path(dataset_dir).expanduser()
-    info = _info(dataset_dir)
+def dataset_joint_names(dataset_dir, key: str = "observation.state") -> list[str]:
+    """The joint names of the dataset's ``key`` feature (a trailing ``.pos`` dropped), in the dataset's order."""
+    info = _info(Path(dataset_dir).expanduser())
     feat = info["features"].get(key)
     if feat is None:
         raise InputKeyError(f"feature {key!r} is not in the dataset; it has {sorted(info['features'])}")
-    ds_names = [n[:-4] if n.endswith(".pos") else n for n in (feat.get("names") or [])]
+    return [n[:-4] if n.endswith(".pos") else n for n in (feat.get("names") or [])]
+
+
+def read_episode(dataset_dir, episode: int, *, machine, key: str, label, machine_name: str) -> Motion:
+    dataset_dir = Path(dataset_dir).expanduser()
+    info = _info(dataset_dir)
+    ds_names = dataset_joint_names(dataset_dir, key)
     if ds_names != list(machine.joint_names):
         raise InputError(f"the dataset's joints {ds_names} are not the machine's joints {list(machine.joint_names)}")
     row = _episode_row(dataset_dir, episode)

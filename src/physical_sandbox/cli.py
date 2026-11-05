@@ -143,7 +143,7 @@ def _own_episode_span(a_lerobot, video, camera: str | None):
 
 
 def _cmd_compare(args) -> int:
-    from .compare import compare
+    from .comparison import compare
     from .render import render_overlay
     from .report import write_report
     from .scene import load_scene

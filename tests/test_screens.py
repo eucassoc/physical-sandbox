@@ -7,7 +7,7 @@ import json
 import numpy as np
 import pytest
 
-from physical_sandbox import compare as compare_mod
+from physical_sandbox import comparison as compare_mod
 from physical_sandbox import screens
 from physical_sandbox.motion import motion_from_numpy
 from physical_sandbox.scene import Scene

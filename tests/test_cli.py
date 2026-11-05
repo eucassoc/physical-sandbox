@@ -13,7 +13,7 @@ from physical_sandbox.errors import InputError
 from physical_sandbox.machine import load_machine
 from physical_sandbox.motion import motion_from_numpy, save_record
 from physical_sandbox.report import write_report
-from physical_sandbox.compare import compare
+from physical_sandbox.comparison import compare
 from physical_sandbox.scene import PlacedMachine, Scene, load_scene, save_scene
 from physical_sandbox.site import Site, load_site, save_site
 
@@ -184,7 +184,7 @@ def test_a_wrong_video_leaves_no_partial_report(files, capsys):
 
 def test_a_runtime_fault_is_exit_1_with_its_type(files, capsys, monkeypatch):
     tmp_path, _, still = files
-    import physical_sandbox.compare as cmp
+    import physical_sandbox.comparison as cmp
 
     def boom(*a, **k):
         raise ZeroDivisionError("kaboom")

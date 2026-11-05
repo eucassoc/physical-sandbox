@@ -4,7 +4,7 @@ import math
 import numpy as np
 import pytest
 
-from physical_sandbox.compare import Comparison, compare
+from physical_sandbox.comparison import Comparison, compare
 from physical_sandbox.machine import load_machine
 from physical_sandbox.motion import motion_from_numpy
 from physical_sandbox.scene import PlacedMachine, Scene
@@ -269,7 +269,7 @@ def _full_dtw_mean(pa, pb):
 
 
 def test_dtw_hand_computed_value():
-    from physical_sandbox.compare import _dtw_mean
+    from physical_sandbox.comparison import _dtw_mean
 
     pa = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], float)
     pb = np.array([[0, 0, 0], [2, 0, 1]], float)
@@ -280,7 +280,7 @@ def test_dtw_hand_computed_value():
 
 @pytest.mark.parametrize("n,m", [(12, 12), (15, 9), (7, 20)])
 def test_banded_dtw_equals_the_full_one_when_the_band_covers_the_path(n, m):
-    from physical_sandbox.compare import _dtw_mean
+    from physical_sandbox.comparison import _dtw_mean
 
     rng = np.random.default_rng(n * 100 + m)
     pa, pb = rng.normal(size=(n, 3)), rng.normal(size=(m, 3))
@@ -289,7 +289,7 @@ def test_banded_dtw_equals_the_full_one_when_the_band_covers_the_path(n, m):
 
 
 def test_a_narrow_band_can_only_cost_more():
-    from physical_sandbox.compare import _dtw_mean
+    from physical_sandbox.comparison import _dtw_mean
 
     rng = np.random.default_rng(3)
     pa, pb = rng.normal(size=(40, 3)), rng.normal(size=(40, 3))
@@ -299,7 +299,7 @@ def test_a_narrow_band_can_only_cost_more():
 def test_dtw_memory_stays_bounded_for_long_motions():
     import tracemalloc
 
-    from physical_sandbox.compare import _dtw_mean
+    from physical_sandbox.comparison import _dtw_mean
 
     t = np.linspace(0, 1, 4000)
     pa = np.column_stack([t, np.zeros_like(t), np.zeros_like(t)])
@@ -313,7 +313,7 @@ def test_dtw_memory_stays_bounded_for_long_motions():
 
 
 def test_dtw_refuses_a_band_matrix_over_the_limit(monkeypatch):
-    import physical_sandbox.compare as cmp
+    import physical_sandbox.comparison as cmp
 
     monkeypatch.setattr(cmp, "_MAX_DTW_CELLS", 1000)
     pa = np.zeros((500, 3))

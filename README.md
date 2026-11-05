@@ -251,6 +251,32 @@ Recordings come from numpy (`physical_sandbox.motion.motion_from_numpy`, then `s
 directly. [`examples/so101-pickplace`](examples/so101-pickplace) runs all of this on a real LeRobot dataset:
 the site from one frame, the arm placed on it, two episodes compared.
 
+### In a notebook
+
+The same comparison, on the work folder the stage left, as a Python call: `physical_sandbox.compare(folder, a, b)`
+(the motions are written as on the stage, `file.record.json`, `file.record.json#label` or `lerobot:<dataset>#<n>`,
+and `grip_threshold=` is the stage's threshold). Its result shows the stage's table when it is the last thing in a
+cell, and gives the numbers in the forms a notebook wants:
+
+```python
+import physical_sandbox as ps
+
+D = "~/.cache/huggingface/lerobot/hub/datasets--lerobot--svla_so101_pickplace/snapshots/<hash>"
+gaps = ps.compare("~/Desktop/desk", f"lerobot:{D}#0", f"lerobot:{D}#1")
+gaps                  # the stage's table (mm, degrees, seconds), the site line above it
+gaps.figure()         # the tool gap over time (what gaps.png draws), a matplotlib Figure
+gaps.to_dataframe()   # the rows of gaps.csv as pandas: item, value, unit, at_s, note
+gaps.to_dict()        # what gaps.json holds
+
+# One line per comparison makes a table over many episodes:
+import pandas as pd
+table = pd.DataFrame(ps.compare("~/Desktop/desk", f"lerobot:{D}#0", f"lerobot:{D}#{i}").row() for i in range(1, 50))
+table[["b", "tool_deviation.max", "shape_deviation", "duration.b"]]
+```
+
+`row()` is flat (`a`, `b`, then `item -> value` in metres, radians and seconds). A comparison takes about a
+second; the stage's video is not made here (export it on the stage, or run `psbx compare`).
+
 ### In Claude Desktop
 
 The `ps_compare` tool opens the same comparison as a screen in the chat: the site's picture with both machines

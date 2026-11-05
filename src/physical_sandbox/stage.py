@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from . import catalog, fit_screen, push, report, screens
-from .compare import compare
+from .comparison import compare
 from .errors import CatalogError, InputError
 from .fit_screen import A4_M, CHUNK, LOCAL_BRIDGE, decide_floor, default_corners, floor_grid, photo, photo_part
 from .machine import load_machine

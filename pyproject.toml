@@ -22,7 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 sam = ["ultralytics"]
 mcp = ["mcp>=2.3"]
-dev = ["pytest", "pillow", "jsonschema"]
+dev = ["pytest", "pillow", "jsonschema", "pandas"]
 
 [project.scripts]
 psbx = "physical_sandbox.cli:main"

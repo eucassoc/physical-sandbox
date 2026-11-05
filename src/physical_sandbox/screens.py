@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 
 from .camera import Camera
-from .compare import _grid, compare, grasps_of
+from .comparison import _grid, compare, grasps_of
 from .errors import InputError
 from .fit_screen import CHUNK, cache_dir, photo, write_atomic
 from .mcp.pack import is_key, pack_model

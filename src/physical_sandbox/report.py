@@ -6,7 +6,7 @@ import json
 import math
 from pathlib import Path
 
-from .compare import Comparison
+from .comparison import Comparison
 from .site import Site
 
 ESTIMATED_NOTE = "寸法は推定（未確認）"  # the dimensions are estimated (not confirmed)
@@ -67,22 +67,31 @@ def _cjk_font() -> str | None:
     return next((n for n in _CJK_FONTS if n in have), None)
 
 
+def _font_and_note(note: str | None) -> tuple[str | None, str | None]:
+    """The CJK font to draw with and the note to draw: without such a font the Japanese note is said in English
+    rather than drawn as empty boxes."""
+    font = _cjk_font()
+    if note and font is None:
+        note = "dimensions estimated (not confirmed)"
+    return font, note
+
+
 def _plot(d: dict, path: Path, note: str | None) -> None:
     import matplotlib
 
-    font = _cjk_font()
-    if note and font is None:  # no font for the Japanese note: say it in English rather than draw empty boxes
-        note = "dimensions estimated (not confirmed)"
+    font, note = _font_and_note(note)
     with matplotlib.rc_context({"font.sans-serif": [font] if font else ["DejaVu Sans"]}):
         _draw(d, path, note)
 
 
-def _draw(d: dict, path: Path, note: str | None) -> None:
+def figure(d: dict, note: str | None):
+    """The tool gap over time of ``Comparison.to_dict()`` as a matplotlib ``Figure`` (its own Agg canvas, so it
+    draws the same whatever backend pyplot would pick; a notebook still shows it inline)."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
     fig = Figure(figsize=(8, 4), dpi=120)
-    FigureCanvasAgg(fig)  # the non-interactive Agg canvas, whatever backend pyplot would pick
+    FigureCanvasAgg(fig)
     ax = fig.add_subplot(1, 1, 1)
     ax.plot(d["series"]["t"], d["series"]["tool_gap_m"], color="#444444", linewidth=1.5)
     ax.set_xlabel("time (s)")
@@ -92,7 +101,11 @@ def _draw(d: dict, path: Path, note: str | None) -> None:
     ax.set_ylim(bottom=0)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(path))
+    return fig
+
+
+def _draw(d: dict, path: Path, note: str | None) -> None:
+    figure(d, note).savefig(str(path))
 
 
 def write_report(comparison: Comparison, out_dir, *, site: Site) -> dict[str, Path]:

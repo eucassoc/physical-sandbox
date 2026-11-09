@@ -20,7 +20,19 @@ DATASET = Path(os.environ.get(
     "PS_LEROBOT_DATASET",
     "~/.cache/huggingface/lerobot/hub/datasets--lerobot--svla_so101_pickplace/snapshots/"
     "f641879e22172be7e8161d5e6c1503c2d2feb657")).expanduser()
-URDF = Path(os.environ.get("PS_SO101_URDF", "~/work/physical-sandbox-proto/robots/so101/so101.urdf")).expanduser()
+
+
+def _urdf() -> Path:
+    """``PS_SO101_URDF``, else the public catalog's ``physical-sandbox/so101`` (pulled into the cache if needed)."""
+    given = os.environ.get("PS_SO101_URDF")
+    if given:
+        return Path(given).expanduser()
+    from physical_sandbox import catalog
+
+    return catalog.urdf_path(catalog.pull("physical-sandbox/so101"))
+
+
+URDF = _urdf()
 W, H = 640, 480
 FOCAL_PX = 500.0      # a usual webcam (about 65 degrees across); the corners alone cannot pin it (see README)
 CORNER_WEIGHT = 5.0   # the tape corners are sharper than a gripper tip in a moving frame

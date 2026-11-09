@@ -17,7 +17,28 @@ dependencies = [
   "pyarrow",
   "matplotlib",
   "fast-simplification",
+  "huggingface_hub>=0.34",
 ]
+keywords = ["robotics", "lerobot", "sim-to-real", "augmented-reality", "urdf", "mujoco", "evaluation"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://physicalsandbox.com"
+Repository = "https://github.com/encassoc/physical-sandbox"
+Issues = "https://github.com/encassoc/physical-sandbox/issues"
 
 [project.optional-dependencies]
 sam = ["ultralytics"]

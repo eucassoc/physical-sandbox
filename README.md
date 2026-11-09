@@ -10,13 +10,16 @@ Everything runs on your machine: photos, videos and cut-outs never leave it.
 
 Five minutes, one photo of your own desk:
 
-1. Download a motion to play: `huggingface-cli download lerobot/svla_so101_pickplace --repo-type dataset`
+1. Download a motion to play: `hf download lerobot/svla_so101_pickplace --repo-type dataset` (`hf` comes with
+   psbx).
 2. Put an A4 sheet on a desk and take a photo of it, `desk.jpg`.
 3. `psbx stage desk.jpg`. Drag the four corners onto the sheet's corners, pick A4, press 決定 (Decide). The work
    folder is `desk/`, next to the photo.
 4. In the robot step pick `physical-sandbox/so101` (it is pulled from the public catalog; the page offers it as
    that one line only while no machine is cached, otherwise type `so101` in the catalog search box and take it
    from the hits), drag it beside the sheet, press 決定 (Decide).
+   Without the catalog (offline, or a model of your own): `psbx stage desk.jpg --machine DIR`, where `DIR` holds
+   the robot's URDF folder, and the robot step lists it.
 5. In the motion step pick `svla_so101_pickplace` from the list, episode 0: choosing from the list loads the
    motion (読み込む (Load) is for a path you typed). Press 再生 (Play): the arm moves on your desk. 動画に書き出す (Export video) writes the replay.
 6. In the compare step pick the same dataset, episode 1, as the second motion and press 比べる (Compare): the
@@ -27,10 +30,17 @@ The steps are described under [Stage](#stage).
 ## Install
 
 ```sh
+uv tool install physical-sandbox            # the psbx command, in its own environment
+pip install physical-sandbox                # or into a virtualenv of yours (python3 -m venv .venv first)
+pip install 'physical-sandbox[sam,mcp]'     # plus SAM 2.1 (cut out objects) and the MCP server (screens in the chat)
+```
+
+From a checkout of this repository:
+
+```sh
 python3.12 -m venv .venv
 .venv/bin/pip install -e .                  # the core: psbx stage, psbx site fit, psbx compare
-.venv/bin/pip install -e '.[sam,mcp]'       # plus SAM 2.1 (cut out objects) and the MCP server (screens in the chat)
-.venv/bin/pip install -e '.[sam,mcp,dev]'   # plus what the tests need
+.venv/bin/pip install -e '.[sam,mcp,dev]'   # plus the extras and what the tests need
 ```
 
 Python 3.10 or newer, macOS or Linux. The core includes everything the stage needs, mesh thinning

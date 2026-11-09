@@ -21,10 +21,10 @@ steps and scripts. Every file the script writes goes to `$OUT`.
 - An SO-101 URDF with its meshes. Set `PS_SO101_URDF` to it. The recommended source is the public
   `so101_new_calib.urdf` in TheRobotStudio's
   [SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) repository (under `Simulation/SO101/`, with its
-  `assets/` meshes). The script's default is a local copy of that same model,
-  `~/work/physical-sandbox-proto/robots/so101/so101.urdf` (its meshes converted to OBJ), and the numbers below
-  were chosen with it; another model may need another base placement.
-- `physical-sandbox` installed (the core is enough: `pip install -e .`).
+  `assets/` meshes). The script's default is `physical-sandbox/so101` from the public catalog (that same model
+  with its meshes converted to OBJ, pulled into `~/.cache/physical-sandbox` when it is not there yet), and the
+  numbers below were chosen with it; another model may need another base placement.
+- `physical-sandbox` installed (the core is enough: `pip install physical-sandbox`).
 
 ## Run it
 

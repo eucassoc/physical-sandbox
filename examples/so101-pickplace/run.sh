@@ -7,7 +7,8 @@
 set -eu
 
 DATASET="${PS_LEROBOT_DATASET:-$HOME/.cache/huggingface/lerobot/hub/datasets--lerobot--svla_so101_pickplace/snapshots/f641879e22172be7e8161d5e6c1503c2d2feb657}"
-URDF="${PS_SO101_URDF:-$HOME/work/physical-sandbox-proto/robots/so101/so101.urdf}"
+# The SO-101 model: PS_SO101_URDF, else the public catalog's physical-sandbox/so101 (pulled into the cache if needed).
+URDF="${PS_SO101_URDF:-$("${PYTHON:-python}" -c 'from physical_sandbox import catalog; print(catalog.urdf_path(catalog.pull("physical-sandbox/so101")))')}"
 OUT="${OUT:-out/so101}"
 PSBX="${PSBX:-psbx}"
 PYTHON="${PYTHON:-python}"

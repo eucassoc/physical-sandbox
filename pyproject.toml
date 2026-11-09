@@ -37,8 +37,8 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://physicalsandbox.com"
-Repository = "https://github.com/encassoc/physical-sandbox"
-Issues = "https://github.com/encassoc/physical-sandbox/issues"
+Repository = "https://github.com/eucassoc/physical-sandbox"
+Issues = "https://github.com/eucassoc/physical-sandbox/issues"
 
 [project.optional-dependencies]
 sam = ["ultralytics"]

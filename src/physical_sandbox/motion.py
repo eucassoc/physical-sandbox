@@ -82,6 +82,44 @@ def _device_ids(motions) -> list:
     return ids
 
 
+def _record_dict(entries, site_id: str) -> dict:
+    """The recording dict for ``entries``, a list of (motion, product, pose-or-None); the one place that
+    knows the shape, shared by ``save_record`` and ``record_edit.new_record``."""
+    ids, seen = [], {}
+    for m, product, _pose in entries:
+        base = product.split("/")[-1].split(":")[0] if ("/" in product or ":" in product) else product
+        seen[base] = seen.get(base, 0) + 1
+        ids.append(f"{base}-{seen[base]}")
+    devices, traces = [], []
+    for did, (m, product, pose) in zip(ids, entries):
+        dev = {"id": did, "product": product, "owner": "external", "parent": "site"}
+        if pose is not None:
+            dev["pose"] = pose
+        if m.label:
+            dev["displayName"] = m.label
+        if m.source:
+            dev["_source"] = m.source
+        devices.append(dev)
+        traces.append({"deviceId": did, "samples": joint_samples(m)})
+    return {
+        "schemaVersion": 3,
+        "siteFrameId": site_id,
+        "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "device": "physical-sandbox",
+        "frame": {"frameId": "site", "up": "+Y", "unit": "m"},
+        "markers": [{"id": "1", "x": 0.0, "y": 0.0, "z": 0.0}, {"id": "2", "x": 1.0, "y": 0.0, "z": 0.0}],
+        "equipment": {"site": {"id": site_id}, "devices": devices},
+        "names": {d: d for d in ids},
+        "traces": traces,
+    }
+
+
+def joint_samples(m: Motion) -> list:
+    """The trace samples of a motion: ``t`` and ``joints`` (name -> radians)."""
+    return [{"t": float(ti), "joints": {n: float(v) for n, v in zip(m.joint_names, row)}}
+            for ti, row in zip(m.t, m.q)]
+
+
 def save_record(motions, site_id: str, path) -> None:
     """Write the motions as a 0.4 recording (JSON) on the site frame ``site_id``.
 
@@ -96,29 +134,7 @@ def save_record(motions, site_id: str, path) -> None:
     for m in motions:
         if not _PRODUCT.match(m.machine):
             raise ValueError(f"machine {m.machine!r} must be lowercase letters, digits, - or _ (it names the product)")
-    ids = _device_ids(motions)
-    devices, traces = [], []
-    for did, m in zip(ids, motions):
-        dev = {"id": did, "product": m.machine, "owner": "external", "parent": "site"}
-        if m.label:
-            dev["displayName"] = m.label
-        if m.source:
-            dev["_source"] = m.source
-        devices.append(dev)
-        traces.append({"deviceId": did, "samples": [
-            {"t": float(ti), "joints": {n: float(v) for n, v in zip(m.joint_names, row)}}
-            for ti, row in zip(m.t, m.q)]})
-    record = {
-        "schemaVersion": 3,
-        "siteFrameId": site_id,
-        "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "device": "physical-sandbox",
-        "frame": {"frameId": "site", "up": "+Y", "unit": "m"},
-        "markers": [{"id": "1", "x": 0.0, "y": 0.0, "z": 0.0}, {"id": "2", "x": 1.0, "y": 0.0, "z": 0.0}],
-        "equipment": {"site": {"id": site_id}, "devices": devices},
-        "names": {d: d for d in ids},
-        "traces": traces,
-    }
+    record = _record_dict([(m, m.machine, None) for m in motions], site_id)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text_atomic(path, json.dumps(record, indent=1) + "\n")  # a failed write leaves the old file whole

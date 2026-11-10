@@ -46,16 +46,28 @@ def device_of(raw: dict, product_or_machine: str) -> str | None:
     return found[0] if len(found) == 1 and isinstance(found[0], str) else None
 
 
+def _moved_pose(pose, placement) -> dict:
+    """``pose`` moved to ``placement`` (x, y, yaw) on the floor: its z, roll and pitch stay (an arm standing on a
+    table stays up there). A pose that is not ``{xyz: [3 numbers], rpy: [3 numbers]}`` is replaced by one on the floor."""
+    def three(v) -> bool:
+        return isinstance(v, list) and len(v) == 3 and all(
+            isinstance(n, (int, float)) and not isinstance(n, bool) for n in v)
+    if not (isinstance(pose, dict) and three(pose.get("xyz")) and three(pose.get("rpy"))):
+        return _pose(placement)
+    x, y, yaw = (float(v) for v in placement)
+    return {**pose, "xyz": [x, y, pose["xyz"][2]], "rpy": [pose["rpy"][0], pose["rpy"][1], yaw]}
+
+
 def merge_into(raw: dict, *, device_id: str, motion: Motion | None, placement, site_id: str | None) -> dict:
-    """A deep copy of ``raw`` where only the device's pose, its trace and the site frame's name change;
-    ``None`` leaves that part as it was."""
+    """A deep copy of ``raw`` where only the device's place (x, y and yaw of its pose), its trace and the site
+    frame's name change; ``None`` leaves that part as it was."""
     out = copy.deepcopy(raw)
     devices = (out.get("equipment") or {}).get("devices") or []
     dev = next((d for d in devices if d.get("id") == device_id), None)
     if dev is None:
         raise ValueError(f"no device {device_id!r} in the record")
     if placement is not None:
-        dev["pose"] = _pose(placement)
+        dev["pose"] = _moved_pose(dev.get("pose"), placement)
     if motion is not None:
         traces = out.setdefault("traces", [])
         tr = next((t for t in traces if t.get("deviceId") == device_id), None)

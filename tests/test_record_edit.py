@@ -55,7 +55,7 @@ def test_merge_changes_only_the_chosen_device():
     expect = _pscom()
     expect["siteFrameId"] = "new"
     expect["equipment"]["site"]["id"] = "new"
-    expect["equipment"]["devices"][0]["pose"] = {"xyz": [3.0, 4.0, 0.0], "rpy": [0.0, 0.0, 1.0]}
+    expect["equipment"]["devices"][0]["pose"] = {"xyz": [3.0, 4.0, 9], "rpy": [0, 0, 1.0]}  # z, roll, pitch kept
     expect["traces"][0]["samples"] = [
         {"t": 0.0, "joints": {"a": 0.5, "b": 0.5}}, {"t": 1.0, "joints": {"a": 1.5, "b": 1.5}}]
     assert _dump(out) == _dump(expect)
@@ -91,3 +91,22 @@ def test_merged_record_still_loads(tmp_path):
     p.write_text(json.dumps(out))
     ms = load_record(p)
     assert len(ms) == 1 and ms[0].machine == "arm" and np.allclose(ms[0].q[0], [0.2, 0.2])
+
+
+def test_merge_moves_an_existing_pose_only_in_x_y_and_yaw():
+    raw = _pscom()
+    raw["equipment"]["devices"][0]["pose"] = {"xyz": [9, 9, 0.7], "rpy": [0.1, 0.2, 0.3]}
+    out = merge_into(raw, device_id="arm-1", motion=None, placement=(3, 4, 1.0), site_id=None)
+    assert out["equipment"]["devices"][0]["pose"] == {"xyz": [3.0, 4.0, 0.7], "rpy": [0.1, 0.2, 1.0]}
+    assert out["traces"] == raw["traces"]
+
+
+def test_merge_gives_a_device_without_a_usable_pose_one_on_the_floor():
+    for pose in (None, {"xyz": [1, 2]}, {"xyz": [1, 2, 3]}, "x"):
+        raw = _pscom()
+        if pose is None:
+            del raw["equipment"]["devices"][0]["pose"]
+        else:
+            raw["equipment"]["devices"][0]["pose"] = pose
+        out = merge_into(raw, device_id="arm-1", motion=None, placement=(3, 4, 1.0), site_id=None)
+        assert out["equipment"]["devices"][0]["pose"] == {"xyz": [3.0, 4.0, 0.0], "rpy": [0.0, 0.0, 1.0]}, pose

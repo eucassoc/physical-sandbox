@@ -273,7 +273,9 @@ class FakeCatalog:
             return self.reply(200, {"ok": True})
         return self.reply(404, {"error": "not-found"})
 
-    def start(self):
+    def start(self, port=0):
+        """Serve on ``port`` (0: any free one); a stopped fake starts again on its old port with ``start(fake.port)``
+        and keeps what it holds, like PS.com coming back."""
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -309,7 +311,7 @@ class FakeCatalog:
                 pass
 
         self.auth = None
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self.port = self.server.server_address[1]
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         return self

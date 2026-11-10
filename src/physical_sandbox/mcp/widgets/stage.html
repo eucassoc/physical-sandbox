@@ -34,6 +34,10 @@
   .motionbar input[type=number] { width: 5em; }
   .motionbar label { display: inline-flex; align-items: center; gap: 4px; }
   .playbar input[type=range] { flex: 1 1 200px; }
+  .savebar input[type=text] { font: inherit; padding: 3px 6px; border: 1px solid var(--muted); border-radius: 4px; background: transparent; color: var(--fg); min-width: 0; width: 12em; }
+  .savebar label { display: inline-flex; align-items: center; gap: 4px; }
+  .savebar .chip:disabled { opacity: .5; cursor: default; }
+  .unsent { margin: 4px 0 0; color: var(--err); font-weight: 600; overflow-wrap: anywhere; }
   .sw { display: inline-block; width: 22px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: 4px; }
   .sw.b { border-top-style: dashed; }
   .csite { margin-top: 8px; color: var(--muted); }
@@ -119,6 +123,18 @@
         <input type="range" id="tslider" min="0" max="0" step="1" value="0" disabled />
         <span id="tclock">0.0 / 0.0 s</span>
         <button class="decide" id="exportBtn" disabled>動画に書き出す</button>
+      </div>
+      <div class="bar savebar">
+        <button class="decide" id="saveOver" hidden disabled>上書き保存</button>
+        <label>名前 <input type="text" id="saveName" spellcheck="false" placeholder="英小文字・数字・-" title="PS.com での記録の名前（英小文字・数字・- の 2〜39 文字）" /></label>
+        <label>タイトル <input type="text" id="saveTitle" title="記録のタイトル（日本語も使えます）" /></label>
+        <button class="chip" id="saveNew" disabled>新しい記録として保存</button>
+        <button class="chip" id="recordExport" disabled title="記録のファイルを作業フォルダに書き出します">エクスポート</button>
+      </div>
+      <p class="hint" id="saveHint"></p>
+      <div id="unsentBox" hidden>
+        <div id="unsentLines"></div>
+        <div class="bar"><button class="chip" id="unsentSend">送り直す</button></div>
       </div>
     </div>
   </section>
@@ -745,13 +761,14 @@ function releaseMotion() {
 
 // Opens a motion by its spec. keep: the machine was placed again, so the same motion is read anew (the trail and
 // the tip move with it) while the frame and the shell stay.
-async function openMotion(spec, { keep = false } = {}) {
+async function openMotion(spec, { keep = false, done = null } = {}) {
   const mine = ++tgen;
   latestSpec = spec;
   tBar.stop();
   tready = false;
   tBar.lock();
   exportBtn.disabled = true;
+  updateSaveButtons();
   if (!keep) { releaseMotion(); tdata = null; tBar.reset(); drawMotion(); }
   say(`動き ${spec} を読み込んでいます…`);
   try {
@@ -761,16 +778,20 @@ async function openMotion(spec, { keep = false } = {}) {
     if (!await loadScreenData(out, tGl, [MOTION_COLOR], tHeld, () => mine === tgen)) return;
     tdata = out;
     tready = true;
+    aOpened = out.aOpened ?? null;
     tBar.unlock(out);
     updateExportButtons();
+    fillSaveFields(out.records[0].label);
     motionSpecEl.value = out.spec;
     showCompareA(`A: ${out.records[0].label}`);
     if (!bSpec) defaultBFrom(spec);
     tBar.set(keep ? tBar.frame : 0);
     requestAnimationFrame(() => { if (mine === tgen) drawMotion(); });   // a fresh WebGL canvas may first show black
-    say(out.note ?? `動き「${out.records[0].label}」を読み込みました。再生できます`);
+    say(done ?? out.note ?? `動き「${out.records[0].label}」を読み込みました。再生できます`);
   } catch (err) {
     if (mine === tgen) fail('動きを読み込めませんでした', err);
+  } finally {
+    if (mine === tgen) updateSaveButtons();
   }
 }
 
@@ -845,6 +866,139 @@ exportBtn.addEventListener('click', () => {
     done: (paths) => `動画を書き出しました: ${paths.join(', ')}`,
     failed: '動画を書き出せませんでした' });
 });
+
+// ---- Saving A: over the person's own PS.com record, as a new record, or as a file; the copies PS.com did not get ----
+
+const saveOverBtn = document.getElementById('saveOver');
+const saveNameEl = document.getElementById('saveName');
+const saveTitleEl = document.getElementById('saveTitle');
+const saveNewBtn = document.getElementById('saveNew');
+const recordExportBtn = document.getElementById('recordExport');
+const saveHint = document.getElementById('saveHint');
+const unsentBox = document.getElementById('unsentBox');
+const unsentLines = document.getElementById('unsentLines');
+const unsentSendBtn = document.getElementById('unsentSend');
+const NAME_RULE = /^[a-z0-9][a-z0-9-]{0,37}[a-z0-9]$/;   // psbx's catalog names
+
+let aOpened = null;      // what A opened from PS.com: { ref, version, latest, own }, or null
+let saving = false;      // a save, an export or a send is running
+let unsentList = [];     // the copies PS.com did not get: { name, ref, mode }
+let unsentTried = false; // the one send on load is done (or under way)
+
+// A label as a catalog name, as the server makes the default: dance:2 -> dance-2
+function catalogName(label) {
+  const name = String(label).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 39).replace(/-+$/, '');
+  return name.length >= 2 ? name : 'record';
+}
+
+function fillSaveFields(label) {
+  saveNameEl.value = catalogName(label);
+  saveTitleEl.value = label;
+}
+
+// 上書き保存 only for the person's own record opened from PS.com; signing in stays in the terminal
+function updateSaveButtons() {
+  const ready = Boolean(tdata && tready) && !saving;
+  saveOverBtn.hidden = !aOpened?.own;
+  saveOverBtn.disabled = !ready;
+  saveNewBtn.disabled = !ready;
+  recordExportBtn.disabled = !ready;
+  unsentSendBtn.disabled = saving;
+  saveHint.textContent = state?.login?.signedIn
+    ? '保存先は PS.com です。手元にファイルとして残すときは「エクスポート」を押してください'
+    : 'PS.com に保存するには、端末で psbx login を実行してサインインしてください。サインインしていないときは手元に残し、サインインした後に送ります';
+}
+
+function showUnsent() {
+  unsentLines.textContent = '';
+  for (const u of unsentList) {
+    const line = document.createElement('p');
+    line.className = 'unsent';
+    line.textContent = `PS.com 未保存: ${u.name}`;
+    unsentLines.append(line);
+  }
+  unsentBox.hidden = !unsentList.length;
+}
+
+async function saveRecord(mode) {
+  if (saving || !tdata || !tready) return;
+  const args = { mode };
+  if (mode === 'new') {
+    const name = saveNameEl.value.trim();
+    if (!NAME_RULE.test(name)) { say('名前は英小文字・数字・- の 2〜39 文字で、先頭と末尾は英小文字か数字にしてください', true); return; }
+    args.name = name;
+    args.title = saveTitleEl.value.trim();
+  }
+  saving = true;
+  updateSaveButtons();
+  say('PS.com に保存しています…');
+  try {
+    const out = await call('ps_record_save', args);
+    if (out.error) { say(out.error, true); return; }
+    if (!out.saved) {
+      if (!unsentList.some((u) => u.name === out.unsent)) unsentList.push({ name: out.unsent, mode });
+      showUnsent();
+      say(`PS.com に保存できなかったため、手元に残しました（${out.unsent}）。${out.reason}`, true);
+      return;
+    }
+    const text = out.note ? `${out.note}（バージョン ${out.version}）`
+      : `PS.com に保存しました: ${out.ref}（バージョン ${out.version}）`;
+    saving = false;
+    await openMotion(out.spec, { keep: true, done: text });   // A is now the record just saved
+  } catch (err) {
+    fail('保存できませんでした', err);
+  } finally {
+    saving = false;
+    updateSaveButtons();
+  }
+}
+
+async function exportRecord() {
+  if (saving || !tdata || !tready) return;
+  saving = true;
+  updateSaveButtons();
+  try {
+    const out = await call('ps_record_export', {});
+    say(out.error ? out.error : `記録を書き出しました: ${out.path}`, Boolean(out.error));
+  } catch (err) {
+    fail('記録を書き出せませんでした', err);
+  } finally {
+    saving = false;
+    updateSaveButtons();
+  }
+}
+
+// Sends the copies PS.com did not get; what stays is listed again in red
+async function sendUnsent() {
+  if (saving) return;
+  saving = true;
+  updateSaveButtons();
+  try {
+    const out = await call('ps_unsent_send', {});
+    unsentList = out.left ?? [];
+    showUnsent();
+    const lines = [...(out.notes ?? [])];
+    if (out.sent?.length) lines.unshift(`PS.com に送りました: ${out.sent.map((s) => `${s.ref}（バージョン ${s.version}）`).join('、')}`);
+    if (lines.length) say(lines.join('。'), unsentList.length > 0);
+  } catch (err) {
+    fail('PS.com に送れませんでした', err);
+  } finally {
+    saving = false;
+    updateSaveButtons();
+  }
+}
+
+// On load, once: after A has opened (so A's latest version is read before a copy of it is sent)
+function sendUnsentOnce() {
+  if (unsentTried || !unsentList.length) return;
+  unsentTried = true;
+  sendUnsent();
+}
+
+saveOverBtn.addEventListener('click', () => saveRecord('over'));
+saveNewBtn.addEventListener('click', () => saveRecord('new'));
+recordExportBtn.addEventListener('click', exportRecord);
+unsentSendBtn.addEventListener('click', sendUnsent);
 
 // ---- The compare step: A (the motion section's) against B, both shells over the photo, the figures, then the files ----
 
@@ -1018,7 +1172,8 @@ function openMotionSection() {
       if (state.motionA) await openMotion(state.motionA);   // before the comparison: both calls write stage.json
       if (state.motionA && state.motionB) await runCompare();
     })
-    .catch((err) => fail('動きの一覧を取得できませんでした', err));
+    .catch((err) => fail('動きの一覧を取得できませんでした', err))
+    .finally(sendUnsentOnce);
 }
 
 function showLogin(login) {
@@ -1148,6 +1303,13 @@ async function start() {
     decidedOnce = state.floor.decided;
     dirty = !state.floor.decided;
     showLogin(state.login);
+    aOpened = state.aOpened ?? null;
+    unsentList = state.unsent ?? [];
+    showUnsent();
+    updateSaveButtons();
+    // Without a placed machine on a decided floor the motion section does not open on its own: send now
+    if (!(state.floor.decided && state.machine)) sendUnsentOnce();
+    else setTimeout(sendUnsentOnce, 20000);   // or when A has not opened in a while
     showEdges();
     if (decidedOnce) openSections();
     updateDecide();

@@ -530,8 +530,11 @@ def _moved(handle, name, latest) -> str:
             f"新しい記録にするときは別の名前にしてください")
 
 
-def _push_record(base, token, handle, name, version, path: Path, url: str, *, machine_dir, work, log):
-    """(bytes, companions, their visibility, the version written, unchanged)."""
+def _push_record(base, token, handle, name, version, path: Path, url: str, *, machine_dir, work, log,
+                 companions_too: bool = True):
+    """(bytes, companions, their visibility, the version written, unchanged). Without ``companions_too`` the
+    products the record names are sent as they are (a record made from a PS.com record: its bare names are
+    PS.com's own products, not local machines)."""
     from .motion import load_record
 
     try:
@@ -544,7 +547,7 @@ def _push_record(base, token, handle, name, version, path: Path, url: str, *, ma
     devices = (record.get("equipment") or {}).get("devices") or []
     local = list(dict.fromkeys(d["product"] for d in devices
                                if isinstance(d, dict) and isinstance(d.get("product"), str)
-                               and d["product"] and "/" not in d["product"]))
+                               and d["product"] and "/" not in d["product"])) if companions_too else []
     names, companions, seen = {}, [], {}
     for i, product in enumerate(local):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,37}[a-z0-9]", product):
@@ -583,7 +586,8 @@ def _push_record(base, token, handle, name, version, path: Path, url: str, *, ma
 
 def push(ref: str, path: Path, *, private: bool = True, category: str | None = None, tags=(),
          machine_dir: Path | None = None, base: str | None = None, log=print,
-         interactive: bool = True, over: bool = False, over_base: str | None = None) -> PushResult:
+         interactive: bool = True, over: bool = False, over_base: str | None = None,
+         companions: bool = True) -> PushResult:
     """Upload a machine folder, an object (mesh + object.json) or a record to ``ref`` (handle/name[:version]).
 
     A machine or an object without a version is ``1``, or one more than the highest number already there.
@@ -592,7 +596,8 @@ def push(ref: str, path: Path, *, private: bool = True, category: str | None = N
     server numbers. ``over_base`` (with ``over``) is the version the record was made from: when the item's
     latest is another one nothing is written (PushError ``moved``, naming the latest). A record equal to the
     latest version writes nothing (``unchanged``). ``interactive=False`` (the MCP tool) never starts a login:
-    without a usable kept token it raises PushError("signin").
+    without a usable kept token it raises PushError("signin"). ``companions=False`` sends a record's bare
+    product names as they are instead of uploading those machines along with it.
     """
     base = (base or catalog._base()).rstrip("/")
     path = Path(path).expanduser()
@@ -625,7 +630,7 @@ def push(ref: str, path: Path, *, private: bool = True, category: str | None = N
         if kind == "record":
             size, companions, seen, written, unchanged = _push_record(
                 base, token, handle, name, version, path, url, work=work, log=log,
-                machine_dir=Path(machine_dir).expanduser() if machine_dir else None)
+                machine_dir=Path(machine_dir).expanduser() if machine_dir else None, companions_too=companions)
             return PushResult(f"{handle}/{name}:{written}", size, companions, shown, seen, written, unchanged)
         build = _object_upload if kind == "object" else _machine_upload
         upload = build(path, handle, name, version, category=category, tags=tags, work=work, log=log,

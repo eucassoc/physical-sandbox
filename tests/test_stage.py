@@ -953,3 +953,198 @@ def test_the_stage_html_has_the_motion_controls(served):
     for name in ("ps_motions_list", "ps_motion_open", "ps_compare_part", "ps_export", "ps_export_status"):
         assert name in html
     assert "PS.com の記録" in html and "'ps:'" in html  # the catalog group, and a typed handle/name is prefixed
+
+
+# ---- saving to PS.com, exporting, and the copies PS.com did not get ----
+
+def _stored(fake, handle, name, version):
+    return json.loads(fake.items[(handle, name)]["versions"][version]["raw"])
+
+
+def _record_puts(fake):
+    return [p for m, p in fake.calls if m == "PUT" and p.split("?")[0].endswith("/record")]
+
+
+def _site_id(tmp_path):
+    return load_site(tmp_path / "w" / "site.json").id
+
+
+@pytest.fixture
+def dance_kept(ps_com, tmp_path):
+    """ada/dance version 2 rewritten with a key psbx does not read, as PS.com would hold it."""
+    raw = json.loads(ps_com.items[("ada", "dance")]["versions"]["2"]["raw"])
+    raw["keepMe"] = {"by": "the app"}
+    ps_com.put_record("ada", "dance", "2", json.dumps(raw).encode(), "private")
+    return raw
+
+
+@pytest.fixture
+def mini_has_product(tmp_path):
+    """The cached machine ``mini`` with the product file push needs to bring it along to PS.com."""
+    shutil.copy(Path(__file__).parent / "fixtures" / "mini-robot" / "product.json",
+                tmp_path / "cache" / "machines" / "mini" / "product.json")
+
+
+def _place(server, cache_mini, x=0.5, y=0.2, yaw=0.3):
+    assert "scenePath" in call(server, "ps_scene_place", {"id": "mini", "urdf": cache_mini, "x": x, "y": y, "yaw": yaw})
+
+
+def test_save_over_writes_the_next_version_keeping_what_psbx_does_not_read(ps_com, placed, dance_kept, cache_mini,
+                                                                           tmp_path):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    _place(placed, cache_mini)
+    out = call(placed, "ps_record_save", {"mode": "over"})
+    assert out == {"saved": True, "ref": "ada/dance", "version": "3", "spec": "ps:ada/dance:3"}
+    assert _record_puts(ps_com)[-1] == "/api/catalog/ada/dance/record?base=2&visibility=private"
+    saved = _stored(ps_com, "ada", "dance", "3")
+    assert saved["keepMe"] == {"by": "the app"} and "basedOn" not in saved
+    (dev,) = saved["equipment"]["devices"]
+    assert dev["product"] == "so101"  # what the record names stays as it is: nothing is uploaded with it
+    assert dev["pose"] == {"xyz": [0.5, 0.2, 0.0], "rpy": [0.0, 0.0, 0.3]}
+    assert saved["siteFrameId"] == _site_id(tmp_path) and saved["traces"] == dance_kept["traces"]
+    kept = json.loads((tmp_path / "w" / "stage.json").read_text())
+    assert kept["a"] == "ps:ada/dance:3"
+    assert kept["aOpened"] == {"ref": "ada/dance", "version": "3", "latest": "3", "own": True}
+    out = call(placed, "ps_record_save", {"mode": "over"})  # the second save goes over the version just written
+    assert out["saved"] is True and out["ref"] == "ada/dance" and out["version"] == "3"  # the same bytes: no version
+    _place(placed, cache_mini, x=0.6)
+    assert call(placed, "ps_record_save", {"mode": "over"})["version"] == "4"
+
+
+def test_save_over_needs_the_persons_own_ps_com_record_in_a(ps_com, placed, tmp_path):
+    assert "動きを読み込んでから" in call(placed, "ps_record_save", {"mode": "over"})["error"]
+    assert "動きを読み込んでから" in call(placed, "ps_record_export", {})["error"]
+    call(placed, "ps_motion_open", {"spec": str(_record(tmp_path / "w" / "demo.record.json")), "slot": "a"})
+    assert "自分の記録だけ" in call(placed, "ps_record_save", {"mode": "over"})["error"]
+    call(placed, "ps_motion_open", {"spec": "ps:bob/walk:1", "slot": "a"})
+    assert "自分の記録だけ" in call(placed, "ps_record_save", {"mode": "over"})["error"]
+    assert "mode" in call(placed, "ps_record_save", {"mode": "sideways"})["error"]
+    assert _record_puts(ps_com) == []
+
+
+def test_save_new_from_a_ps_com_record_merges_it_and_says_what_it_came_from(ps_com, placed, dance_kept, tmp_path):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    out = call(placed, "ps_record_save", {"mode": "new", "name": "dance-copy", "title": "ダンスの写し"})
+    assert out == {"saved": True, "ref": "ada/dance-copy", "version": "1", "spec": "ps:ada/dance-copy:1"}
+    assert _record_puts(ps_com)[-1] == "/api/catalog/ada/dance-copy/record?new=1&visibility=private"
+    saved = _stored(ps_com, "ada", "dance-copy", "1")
+    assert saved["basedOn"] == "ada/dance:2" and saved["name"] == "ダンスの写し"
+    assert saved["keepMe"] == {"by": "the app"} and saved["equipment"]["devices"][0]["product"] == "so101"
+    assert ps_com.items[("ada", "dance-copy")]["visibility"] == "private"
+    assert json.loads((tmp_path / "w" / "stage.json").read_text())["aOpened"] == {
+        "ref": "ada/dance-copy", "version": "1", "latest": "1", "own": True}
+
+
+def test_save_new_from_a_file_brings_the_machine_and_its_place(ps_com, placed, mini_has_product, cache_mini,
+                                                              tmp_path):
+    call(placed, "ps_motion_open", {"spec": str(_record(tmp_path / "w" / "demo.record.json")), "slot": "a"})
+    _place(placed, cache_mini, x=0.1, y=-0.2, yaw=0.0)
+    out = call(placed, "ps_record_save", {"mode": "new"})  # the name and the title default to A's label
+    assert out["saved"] is True and out["ref"] == "ada/demo" and out["version"] == "1"
+    saved = _stored(ps_com, "ada", "demo", "1")
+    (dev,) = saved["equipment"]["devices"]
+    assert dev["product"] == "ada/mini:1" and ps_com.items[("ada", "mini")]["visibility"] == "private"
+    assert dev["pose"] == {"xyz": [0.1, -0.2, 0.0], "rpy": [0.0, 0.0, 0.0]}
+    assert saved["name"] == "demo" and "basedOn" not in saved and saved["siteFrameId"] == _site_id(tmp_path)
+    assert [list(s["joints"]) for s in saved["traces"][0]["samples"]][0] == ["turn"]
+
+
+def test_save_new_refuses_a_bad_name_and_a_name_that_is_there(ps_com, placed):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    assert "英小文字" in call(placed, "ps_record_save", {"mode": "new", "name": "Bad Name"})["error"]
+    assert "英小文字" in call(placed, "ps_record_save", {"mode": "new", "name": "x"})["error"]
+    out = call(placed, "ps_record_save", {"mode": "new", "name": "wave"})
+    assert "ada/wave はもうあります" in out["error"] and "--over" not in out["error"]
+    assert list(ps_com.items[("ada", "wave")]["versions"]) == ["1"]
+
+
+def test_a_record_saved_over_elsewhere_meanwhile_is_saved_as_new_and_said(ps_com, placed, tmp_path):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    _seed_record(ps_com, tmp_path, "ada", "dance", "3", 4, "private")  # saved over in the PS.com app meanwhile
+    out = call(placed, "ps_record_save", {"mode": "over"})
+    assert out["saved"] is True and out["ref"] == "ada/dance-2" and out["version"] == "1"
+    assert out["note"] == "ada/dance は別の場所で変わっていたため、ada/dance-2 として新しく保存しました"
+    assert list(ps_com.items[("ada", "dance")]["versions"]) == ["1", "2", "3"]  # nothing was written over
+    assert _stored(ps_com, "ada", "dance-2", "1")["basedOn"] == "ada/dance:2"
+    assert json.loads((tmp_path / "w" / "stage.json").read_text())["a"] == "ps:ada/dance-2:1"
+
+
+def test_offline_a_save_is_kept_shown_after_a_restart_and_sent_when_ps_com_is_back(ps_com, placed, cache_mini,
+                                                                                   tmp_path):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    _place(placed, cache_mini)
+    ps_com.stop()
+    out = call(placed, "ps_record_save", {"mode": "over"})
+    assert out["saved"] is False and out["unsent"] == "dance" and "PS.com に接続できませんでした" in out["reason"]
+    assert (tmp_path / "w" / "unsent" / "dance.record.json").is_file()
+    again = Stage(work=tmp_path / "w")  # the stage was closed and started again
+    assert again.first()["unsent"] == [{"name": "dance", "ref": "ada/dance", "mode": "over"}]
+    out = json.loads(again.call("ps_unsent_send", {}))  # still offline: it stays
+    assert out["sent"] == [] and [p["name"] for p in out["left"]] == ["dance"] and out["notes"]
+    ps_com.start(ps_com.port)
+    out = json.loads(again.call("ps_unsent_send", {}))
+    assert out == {"sent": [{"name": "dance", "ref": "ada/dance", "version": "3", "mode": "over"}], "left": [],
+                   "notes": []}
+    saved = _stored(ps_com, "ada", "dance", "3")
+    assert saved["equipment"]["devices"][0]["pose"] == {"xyz": [0.5, 0.2, 0.0], "rpy": [0.0, 0.0, 0.3]}
+    assert again.first()["unsent"] == [] and not list((tmp_path / "w" / "unsent").iterdir())
+    assert again.first()["aOpened"] == {"ref": "ada/dance", "version": "3", "latest": "3", "own": True}
+
+
+def test_an_unsent_save_over_that_moved_meanwhile_is_sent_as_new_with_the_note(ps_com, placed, tmp_path):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    ps_com.stop()
+    assert call(placed, "ps_record_save", {"mode": "over"})["unsent"] == "dance"
+    _seed_record(ps_com, tmp_path, "ada", "dance", "3", 4, "private")
+    ps_com.start(ps_com.port)
+    out = call(placed, "ps_unsent_send", {})
+    assert out["sent"] == [{"name": "dance", "ref": "ada/dance-2", "version": "1", "mode": "new"}]
+    assert out["notes"] == ["ada/dance は別の場所で変わっていたため、ada/dance-2 として新しく保存しました"]
+    assert list(ps_com.items[("ada", "dance")]["versions"]) == ["1", "2", "3"]
+
+
+def test_signed_out_a_save_is_kept_and_sent_under_the_handle_after_psbx_login(ps_com, placed, mini_has_product,
+                                                                              tmp_path):
+    call(placed, "ps_motion_open", {"spec": str(_record(tmp_path / "w" / "demo.record.json")), "slot": "a"})
+    push._forget(ps_com.url)
+    before = len(ps_com.calls)
+    out = call(placed, "ps_record_save", {"mode": "new", "name": "demo-run", "title": "デモ"})
+    assert out == {"saved": False, "unsent": "demo-run", "reason": "psbx login でログインすると送れます"}
+    out = call(placed, "ps_unsent_send", {})
+    assert out["sent"] == [] and out["notes"] == ["psbx login でログインすると送れます"]
+    assert out["left"] == [{"name": "demo-run", "ref": "demo-run", "mode": "new"}]
+    assert len(ps_com.calls) == before  # signed out: no request at all
+    push._keep(ps_com.url, "tok-1", 3600, handle="ada")
+    out = call(placed, "ps_unsent_send", {})
+    assert out["sent"] == [{"name": "demo-run", "ref": "ada/demo-run", "version": "1", "mode": "new"}]
+    assert _stored(ps_com, "ada", "demo-run", "1")["name"] == "デモ"
+
+
+def test_export_writes_the_record_as_a_save_builds_it_without_the_network(ps_com, placed, dance_kept, cache_mini,
+                                                                         tmp_path):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    _place(placed, cache_mini)
+    before = len(ps_com.calls)
+    out = call(placed, "ps_record_export", {})
+    assert out == {"path": str(tmp_path / "w" / "dance_2.record.json")}
+    written = json.loads(Path(out["path"]).read_text())
+    assert written["keepMe"] == {"by": "the app"}
+    assert written["equipment"]["devices"][0]["pose"] == {"xyz": [0.5, 0.2, 0.0], "rpy": [0.0, 0.0, 0.3]}
+    assert call(placed, "ps_record_export", {})["path"] == str(tmp_path / "w" / "dance_2-2.record.json")
+    spec = str(_record(tmp_path / "w" / "demo.record.json"))
+    call(placed, "ps_motion_open", {"spec": spec, "slot": "a"})
+    out = call(placed, "ps_record_export", {})
+    assert out["path"] == str(tmp_path / "w" / "demo-2.record.json")
+    (dev,) = json.loads(Path(out["path"]).read_text())["equipment"]["devices"]
+    assert dev["product"] == "mini" and dev["pose"]["xyz"] == [0.5, 0.2, 0.0]
+    assert len(ps_com.calls) == before
+
+
+def test_the_stage_html_has_the_save_controls(served):
+    html = get(served().url)[2]
+    for ident in ("saveOver", "saveName", "saveTitle", "saveNew", "recordExport", "unsentLines", "unsentSend"):
+        assert f'id="{ident}"' in html
+    for name in ("ps_record_save", "ps_record_export", "ps_unsent_send"):
+        assert name in html
+    for words in ("上書き保存", "新しい記録として保存", "エクスポート", "PS.com 未保存", "送り直す", "psbx login"):
+        assert words in html

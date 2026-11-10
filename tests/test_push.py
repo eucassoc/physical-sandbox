@@ -221,6 +221,14 @@ def test_a_record_naming_catalog_machines_needs_no_companion(tmp_path, catalog_s
     assert [m for m, p in writes(catalog_server)] == ["PUT"]
 
 
+def test_without_companions_a_records_bare_names_go_as_they_are(tmp_path, catalog_server):
+    rec = _record(tmp_path / "run.json", ["so101"])  # PS.com's own product: no local machine of that name
+    result = push("ada/run", rec, base=catalog_server.url, log=quiet, companions=False)
+    assert result.companions == [] and [m for m, p in writes(catalog_server)] == ["PUT"]
+    record = catalog_server.items[("ada", "run")]["versions"]["1"]["record"]
+    assert record["equipment"]["devices"][0]["product"] == "so101"
+
+
 def test_a_json_that_is_not_a_record_is_refused(tmp_path, catalog_server):
     p = tmp_path / "x.json"
     p.write_text(json.dumps({"schemaVersion": 3, "traces": []}))

@@ -5,6 +5,8 @@ plays a motion over the photo and compares two motions (``psbx stage``).
 serves the page on 127.0.0.1 with the same small server the floor-only screen uses (``fit_screen``). The page has
 four sections: the floor (fixed from four corners), the machine (placed on the floor), the motion (one record or
 LeRobot episode played over the photo) and the comparison of two motions, with exports of the replay and the report.
+The motion in A is saved to PS.com (over the person's own record, or as a new one) or exported as a record file; a
+save PS.com does not get is kept in the work folder (``unsent``) and sent again later.
 """
 from __future__ import annotations
 
@@ -14,15 +16,18 @@ import math
 import os
 import re
 import secrets
+import tempfile
 import threading
 import urllib.error
 from pathlib import Path
 
 import numpy as np
 
-from . import catalog, fit_screen, push, report, screens
+from . import catalog, fit_screen, push, record_edit, report, screens, unsent
+from ._atomic import write_text_atomic
 from .comparison import compare
 from .errors import CatalogError, InputError
+from .push import PushError
 from .fit_screen import A4_M, CHUNK, LOCAL_BRIDGE, decide_floor, default_corners, floor_grid, photo, photo_part
 from .machine import load_machine
 from .mcp.pack import model_part, pack_model
@@ -38,6 +43,9 @@ PS_PREFIX = "ps:"  # a motion spec naming a PS.com record: ps:<handle>/<name>[:<
 _QUICK_S = 5  # seconds a PS.com request of the motion step may wait: the page waits on it before anything else
 _REF_WORDS = "PS.com の記録は handle/name か handle/name:バージョン で指定してください"
 _UNREADABLE = (OSError, ValueError, KeyError, TypeError, AttributeError)  # a file that is not what it should be
+_NO_A = "動きを読み込んでから保存してください"
+_NOT_OWN = "上書き保存できるのは、PS.com から読み込んだ自分の記録だけです"
+_NAME_WORDS = "名前は英小文字・数字・- の 2〜39 文字で、先頭と末尾は英小文字か数字にしてください"
 
 
 def work_dir_for(picture: Path) -> Path:
@@ -87,6 +95,13 @@ def _safe_name(label: str) -> str:
     return re.sub(r"[^\w.-]", "_", label).lstrip(".") or "motion"
 
 
+def _catalog_name(label: str) -> str:
+    """A label as a catalog name (lowercase letters, digits and ``-``, 2 to 39 characters): ``dance:2`` ->
+    ``dance-2``; a label with too little of that (a Japanese one) is ``record``."""
+    name = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")[:39].rstrip("-")
+    return name if len(name) >= 2 else "record"
+
+
 def _record_stem(path: Path) -> str:
     """A record file's name without ``.record.json`` (else without its last suffix): ``demo.record.json`` -> ``demo``."""
     name = Path(path).name
@@ -120,6 +135,31 @@ def _number(args: dict, key: str) -> float:
     return float(value)
 
 
+def _shown(p: dict) -> dict:
+    """A kept copy as the page lists it."""
+    return {"name": p["name"], "ref": p["ref"], "mode": p["mode"]}
+
+
+def _joint_device(raw: dict, spec: str) -> str | None:
+    """The device of a record whose motion a spec reads: the one labelled ``#<label>`` in the spec, else the first
+    device that names a product and has a trace of joint angles (as ``load_record`` reads them)."""
+    _, sep, label = spec.partition("#")
+    try:
+        devices = {d.get("id"): d for d in raw["equipment"]["devices"] if isinstance(d, dict)}
+        for tr in raw.get("traces") or []:
+            dev = devices.get(tr.get("deviceId"))
+            samples = tr.get("samples") or []
+            if (dev is None or not isinstance(dev.get("product"), str) or not dev["product"] or not samples
+                    or not all(isinstance(s, dict) and isinstance(s.get("joints"), dict) and s["joints"]
+                               for s in samples)):
+                continue
+            if not sep or dev.get("displayName") == label:
+                return dev["id"] if isinstance(dev.get("id"), str) else None
+    except (KeyError, TypeError, AttributeError):
+        return None
+    return None
+
+
 class Stage:
     """A picture and the work folder that belongs to it. Exactly one of ``picture`` and ``work`` may be None:
     with only the folder, its ``stage.json`` or ``scene.json`` says which picture it is for."""
@@ -133,6 +173,7 @@ class Stage:
         self._jobs: dict[str, dict] = {}  # exports by job id; one runs at a time
         self._jobs_lock = threading.Lock()
         self._stage_lock = threading.Lock()  # stage.json is read, changed and written back: one call at a time
+        self._save_lock = threading.Lock()  # one save or send at a time: a kept copy is never sent twice
         if picture is None:
             self.work = Path(work)
             found = _picture_named_in(self.work)
@@ -213,6 +254,7 @@ class Stage:
                       "decided": floor is not None and site.confirmed_by_person},
             "machine": self._placed_machine(), "motionA": self._kept("a"), "motionB": self._kept("b"), "gripThreshold": self._kept_grip(),
             "aOpened": self._kept_opened(),
+            "unsent": [_shown(p) for p in unsent.pending(self.work)],
             "login": push.login_status(catalog._base()),  # the token file only: no request
             "workDir": str(self.work),
         }
@@ -243,6 +285,12 @@ class Stage:
             return json.dumps(self._compare(args))
         if name == "ps_compare_part":
             return screens.data_part(str(args["key"]), int(args["part"]), "ps_motion_open")
+        if name == "ps_record_save":
+            return json.dumps(self._record_save(args))
+        if name == "ps_record_export":
+            return json.dumps(self._record_export())
+        if name == "ps_unsent_send":
+            return json.dumps(self._unsent_send())
         if name == "ps_export":
             return json.dumps(self._export(args))
         if name == "ps_export_status":
@@ -688,6 +736,167 @@ class Stage:
         out["notes"] = notes
         self._update_stage_json(**self._a_keys(specs[0], opened_a), b=specs[1], gripThreshold=grip)
         return out
+
+    # ---- saving A to PS.com, exporting it, and the copies PS.com did not get ----
+
+    def _a_record(self) -> tuple[dict, dict | None, str]:
+        """``(record, opened, label)`` for the motion in A on the placed machine where it stands now, on the decided
+        site. A record opened from PS.com (``opened`` is ``aOpened``) is merged: only its device's place, its motion
+        and the site frame change. Anything else is a new record of the placed machine. Reads no network."""
+        spec = self._kept("a")
+        if spec is None:
+            raise ValueError(_NO_A)
+        _, motion, _, opened = self._load_motion(spec)
+        placed = self._placed_machine()  # the load needs exactly one
+        placement = (placed["placed"]["x"], placed["placed"]["y"], placed["placed"]["yaw"])
+        site_id = self._decided_site().id
+        if opened is None:
+            machine = self._machine_ref(placed)
+            try:
+                record = record_edit.new_record(motion, machine_ref=machine, placement=placement, site_id=site_id)
+            except ValueError as e:
+                raise ValueError(f"ロボット {machine!r} の名前は記録に使えません（{e}）") from None
+            return record, None, motion.label
+        folder = catalog.cached(f"{opened['ref']}:{opened['version']}")
+        if folder is None:
+            raise ValueError(f"記録 {opened['ref']}:{opened['version']} をもう一度読み込んでから保存してください")
+        raw = json.loads((folder / "record.json").read_text())
+        device = record_edit.device_of(raw, placed["id"]) or _joint_device(raw, spec)
+        if device is None:
+            raise ValueError("記録のどの機器に保存するか決められません")
+        record = record_edit.merge_into(raw, device_id=device, motion=motion, placement=placement, site_id=site_id)
+        return record, self._kept_opened() or opened, motion.label
+
+    @staticmethod
+    def _machine_ref(placed: dict) -> str:
+        """What a new record names the placed machine by: ``handle/name:version`` for a machine of the catalog's
+        cache, else its own name (push brings that machine along to PS.com)."""
+        try:
+            rel = Path(placed["urdf"]).resolve().relative_to((catalog.cache_root() / "catalog").resolve())
+            ref = f"{rel.parts[0]}/{rel.parts[1]}:{rel.parts[2]}"
+            catalog.parse_ref(ref)
+            return ref
+        except (ValueError, IndexError, InputError):
+            return placed["id"]
+
+    def _send(self, path: Path, ref: str, mode: str, base: str | None) -> str:
+        """``unsent``'s sender: push the record at ``path`` to ``ref`` (a ref kept while signed out has no handle:
+        the signed-in one's), private, never starting a login; the ref written. A record made here (new, not from a
+        PS.com record) brings its local machine along; one made from a PS.com record keeps the products it names."""
+        url = catalog._base()
+        if "/" not in ref:
+            handle = push.login_status(url)["handle"]
+            if not handle:
+                raise PushError("signin", 401)
+            ref = f"{handle}/{ref}"
+        try:
+            made_here = mode == "new" and "basedOn" not in json.loads(Path(path).read_text())
+        except (OSError, ValueError, TypeError):
+            made_here = True
+        placed = self._placed_machine()
+        try:
+            result = push.push(ref, path, private=True, machine_dir=Path(placed["urdf"]).parent if placed else None,
+                               log=lambda _: None, interactive=False, over=mode == "over",
+                               over_base=base if mode == "over" else None, companions=made_here)
+        except InputError as e:
+            if mode == "new" and str(e) == push._EXISTS.format(ref=ref):
+                raise PushError("taken", 409, note=f"{ref} はもうあります") from e
+            raise
+        return result.ref
+
+    def _now_a(self, ref: str, version: str, label: str | None) -> str:
+        """A holds ``ref`` at ``version`` from now on (what was just saved there); the new spec."""
+        spec = f"{PS_PREFIX}{ref}:{version}" + (f"#{label}" if label else "")
+        self._update_stage_json(a=spec, aOpened={"ref": ref, "version": version, "latest": version, "own": True})
+        return spec
+
+    def _keep_unsent(self, record: dict, ref: str, mode: str, base: str | None, reason: str) -> dict:
+        return {"saved": False, "unsent": unsent.keep(self.work, record, ref=ref, mode=mode, base=base),
+                "reason": reason}
+
+    def _record_save(self, args: dict) -> dict:
+        """上書き保存 (``mode: over``: the person's own PS.com record in A, as its next version, made from the
+        version they saw as the latest) or 新しい記録として保存 (``mode: new``: under ``name``, titled ``title``).
+        Signed out or offline the record is kept in ``unsent`` (``saved: false``). A record saved over elsewhere
+        meanwhile goes as a new one under ``<name>-2`` with a ``note``."""
+        mode = args.get("mode")
+        if mode not in ("over", "new"):
+            raise ValueError("mode must be 'over' or 'new'")
+        with self._save_lock:
+            spec = self._kept("a")
+            if spec is None:
+                raise ValueError(_NO_A)
+            if mode == "over":
+                kept = self._kept_opened()
+                if not (kept and kept.get("own") is True):
+                    raise ValueError(_NOT_OWN)
+            record, opened, label = self._a_record()
+            url = catalog._base()
+            if mode == "over":
+                ref, base = opened["ref"], opened["latest"]
+            else:
+                name = args.get("name") or _catalog_name(label)
+                if not isinstance(name, str) or not re.fullmatch(catalog._NAME, name):
+                    raise ValueError(_NAME_WORDS)
+                title = args.get("title")
+                record["name"] = title.strip() if isinstance(title, str) and title.strip() else label
+                if opened is not None:
+                    record["basedOn"] = f"{opened['ref']}:{opened['version']}"
+                handle = push.login_status(url)["handle"]
+                ref, base = (f"{handle}/{name}" if handle else name), None
+            login = push.login_status(url)
+            if not login["signedIn"] or not login["handle"]:
+                return self._keep_unsent(record, ref, mode, base, unsent.SIGN_IN)
+            with tempfile.TemporaryDirectory(prefix="psbx-save-") as tmp:
+                path = Path(tmp) / "record.json"
+                path.write_text(json.dumps(record, ensure_ascii=False))
+                try:
+                    written, _, note = unsent.send_one(path, ref, mode, base, self._send)
+                except PushError as e:
+                    if e.code == "signin":
+                        return self._keep_unsent(record, ref, mode, base, unsent.SIGN_IN)
+                    if e.code == "taken":
+                        raise ValueError(f"{ref} はもうあります。別の名前を指定してください") from None
+                    raise ValueError(f"PS.com に保存できませんでした（{e.note or e}）") from None
+                except CatalogError as e:  # not a PushError: PS.com could not be reached
+                    return self._keep_unsent(record, ref, mode, base, f"{unsent.OFFLINE}（{e}）")
+            ref, _, version = written.partition(":")
+            label_part = spec.partition("#")[2] if opened is not None and "#" in spec else None
+            out = {"saved": True, "ref": ref, "version": version, "spec": self._now_a(ref, version, label_part)}
+            if note:
+                out["note"] = note
+            return out
+
+    def _record_export(self) -> dict:
+        """エクスポート: A as a record file in the work folder, built as a save builds it
+        (``<label>.record.json``; beside an existing one ``<label>-2.record.json``...). Reads no network."""
+        record, opened, label = self._a_record()
+        if opened is None:
+            record["name"] = label
+        stem = _safe_name(label)
+        path, k = self.work / f"{stem}.record.json", 1
+        while path.exists():
+            k += 1
+            path = self.work / f"{stem}-{k}.record.json"
+        write_text_atomic(path, json.dumps(record, ensure_ascii=False, indent=1) + "\n")
+        return {"path": str(path)}
+
+    def _unsent_send(self) -> dict:
+        """Send the kept copies (signed out: none is tried); ``{sent, left, notes}``. A copy saved over A's record
+        makes A that version."""
+        with self._save_lock:
+            waiting = unsent.pending(self.work)
+            if not waiting:
+                return {"sent": [], "left": [], "notes": []}
+            login = push.login_status(catalog._base())
+            if not login["signedIn"] or not login["handle"]:
+                return {"sent": [], "left": [_shown(p) for p in waiting], "notes": [unsent.SIGN_IN]}
+            sent, left, notes = unsent.send_all(self.work, self._send)
+            opened, spec = self._kept_opened(), self._kept("a") or ""
+            for s in sent:
+                if opened is not None and s["mode"] == "over" and s["ref"] == opened["ref"]:
+                    self._now_a(s["ref"], s["version"], spec.partition("#")[2] or None)
+            return {"sent": sent, "left": [_shown(p) for p in left], "notes": notes}
 
     def _export(self, args: dict) -> dict:
         """Start writing a file set in the work folder (one export at a time); answers the job id. ``replay``: one

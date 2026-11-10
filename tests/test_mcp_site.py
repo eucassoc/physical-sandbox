@@ -706,3 +706,19 @@ def test_scene_place_says_when_a_catalog_item_has_no_machine(placed_world, monke
     monkeypatch.setattr(catalog, "cached", lambda ref: item)
     with pytest.raises(CatalogError):
         server.ps_scene_place(siteDir=str(placed_world), machine="acme/run", x=0, y=0, yaw=0)
+
+
+def test_scene_place_writes_only_a_json_file_inside_the_site_folder(placed_world, tmp_path_factory):
+    from physical_sandbox.errors import InputError
+
+    elsewhere = tmp_path_factory.mktemp("elsewhere") / "keep.json"
+    elsewhere.write_text("mine")
+    for bad in (str(elsewhere), str(placed_world / ".." / elsewhere.parent.name / "keep.json"),
+                str(placed_world / "scene.txt"), "../keep.json"):
+        with pytest.raises(InputError, match="scenePath"):
+            place(placed_world, scenePath=bad)
+    assert elsewhere.read_text() == "mine" and not (placed_world / "scene.txt").exists()
+    # a relative scenePath is taken in the site folder, not in whatever folder the server was started from
+    out = place(placed_world, scenePath="sub/other.json")
+    assert out["scenePath"] == str(placed_world.resolve() / "sub" / "other.json")
+    assert (placed_world / "sub" / "other.json").is_file()

@@ -225,3 +225,28 @@ def test_the_served_screens_carry_no_marker():
     for name, three in (("fit-floor.html", False), ("compare.html", True)):
         html = fit_screen.widget_html(name, "", three)
         assert "/*__LIB:" not in html and "/*__THREE__*/" not in html
+
+
+def test_a_call_larger_than_the_screen_ever_sends_is_refused_unread(served):
+    import http.client
+    from urllib.parse import urlsplit
+
+    from physical_sandbox.fit_screen import MAX_CALL_BYTES
+
+    s = served()
+    url = urlsplit(s.url)
+
+    def answer(length: str) -> int:
+        # only the headers are sent: an answer at all shows the body was never waited for
+        conn = http.client.HTTPConnection(url.hostname, url.port, timeout=5)
+        conn.putrequest("POST", url.path + "call")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", length)
+        conn.endheaders()
+        try:
+            return conn.getresponse().status
+        finally:
+            conn.close()
+    assert answer(str(MAX_CALL_BYTES + 1)) == 413
+    assert answer("-5") == 400 and answer("lots") == 400
+    assert call(s, "ps_floor_solve", {"width": 640, "height": 480, "corners": [], "edgesM": [0.297, 0.21]})  # still serving

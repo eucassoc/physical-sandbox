@@ -381,6 +381,22 @@ def _finite(name: str, value) -> float:
     return float(value)
 
 
+def _scene_path_in(site_dir: str, scene_path: str | None) -> Path:
+    """Where ps_scene_place writes: siteDir/scene.json, or the .json file scenePath names inside siteDir (a relative
+    one is taken in siteDir). It replaces the file there, so a path anywhere else is refused: what the agent
+    passes may come from a page or a file it read, and must not overwrite the person's other files."""
+    from ..errors import InputError
+
+    folder = Path(site_dir).expanduser().resolve()
+    if not scene_path:
+        return folder / "scene.json"
+    given = Path(scene_path).expanduser()
+    path = (given if given.is_absolute() else folder / given).resolve()
+    if not path.is_relative_to(folder) or path.suffix.lower() != ".json":
+        raise InputError(f"scenePath {scene_path!r}: the scene file has to be a .json file inside siteDir ({folder})")
+    return path
+
+
 def ps_scene_place(siteDir: str, machine: str, x: float, y: float, yaw: float, scenePath: str | None = None,
                    urdf: str | None = None) -> str:
     from .. import catalog
@@ -405,7 +421,7 @@ def ps_scene_place(siteDir: str, machine: str, x: float, y: float, yaw: float, s
     fit = _read_json(_work(siteDir) / "fit.json")
     picture = fit.get("imagePath") if isinstance(fit, dict) else None  # the picture the floor was fixed on
     placed = PlacedMachine(load_machine(path), str(path), x, y, yaw, confirmed_by_person=False)
-    scene_path = Path(scenePath).expanduser() if scenePath else Path(siteDir).expanduser() / "scene.json"
+    scene_path = _scene_path_in(siteDir, scenePath)
     save_placement(scene_path, site.id, {mid: placed}, picture=picture if isinstance(picture, str) else None)
     return _json({"scenePath": str(scene_path), "machine": mid, "x": x, "y": y, "yaw": yaw})
 
@@ -511,7 +527,8 @@ server.tool(description="Check a machine folder (URDF, meshes, product.json, pro
 server.tool(description="Whether the site in siteDir is decided (confirmed by the person), with its residual in "
                         "pixels, its object names and whether its lengths are measured or estimated.")(ps_site_status)
 server.tool(description="Place a machine on a site, in the site's floor frame in metres, and write the scene file "
-                        "(default siteDir/scene.json; ps_compare's scenePath). machine is a catalog ref "
+                        "(default siteDir/scene.json; ps_compare's scenePath; a scenePath has to be a .json file inside siteDir). "
+                        "machine is a catalog ref "
                         "(handle/name[:version]; pulled first when it is not on this computer) or, with urdf (a "
                         "machine file on this computer), the id to give that machine. x and y are the base's "
                         "position on the floor in metres, yaw its turn in radians. It replaces any machine the "

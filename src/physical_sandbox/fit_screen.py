@@ -287,6 +287,10 @@ class FitServer:
         return out
 
 
+# The largest call body read: the screens send corners, boxes and names, a few kilobytes at most
+MAX_CALL_BYTES = 1 << 20
+
+
 def _handler_for(screen):
     """The HTTP handler for any screen object with ``token``, ``html()``, ``first()`` and ``call(name, args)``."""
     prefix = f"/{screen.token}/"
@@ -321,7 +325,15 @@ def _handler_for(screen):
                 self._send("not found", "text/plain", 404)
                 return
             try:
-                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = -1
+            if length < 0 or length > MAX_CALL_BYTES:  # not read at all: the screen never sends more
+                self.close_connection = True
+                self._send("bad length" if length < 0 else "too large", "text/plain", 400 if length < 0 else 413)
+                return
+            try:
+                req = json.loads(self.rfile.read(length))
                 out = {"text": screen.call(str(req["name"]), dict(req["args"]))}
             except Exception as e:  # noqa: BLE001 - whatever went wrong is shown in the screen's bottom line
                 out = {"error": f"{type(e).__name__}: {e}"}

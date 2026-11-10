@@ -84,6 +84,20 @@ names the camera in the site (default: the one the folder's floor was decided wi
 dataset folder (both repeatable), `--port` fixes the port, `--no-browser` only prints the address, for a machine
 you reach over SSH (forward the port).
 
+Slot A can open a record from PS.com: your own records are listed under 「PS.com の記録」, and anyone's public
+one is opened by typing `handle/name[:version]`. Three buttons save what the page has:
+
+- **上書き保存 (Save over)**, for your own record when signed in: the next version under the same name. The
+  parts of the record that psbx does not edit (other devices, markers, and so on) are kept as they were.
+- **新しい記録として保存 (Save as new)**: a name and a title, and a new record on PS.com.
+- **エクスポート (Export)**: writes `<work>/<name>.record.json` in the work folder.
+
+When you are offline or signed out, the save waits in `<work>/unsent/` and the page shows it in red as
+「PS.com 未保存」. It is sent on the next start, after the next save, or with 再送信する (Send again). If the
+record was saved over elsewhere after you opened it, the save becomes a new record and the page says so. Signing
+in stays in the terminal (`psbx login`). A machine you place is written into the record as `device.pose`
+(`xyz: [x, y, 0]`, `rpy: [0, 0, yaw]`) in the site's own frame, which is the ROS frame PS.com reads.
+
 One folder is one site: a folder fixed on another picture is refused. `stage.json` in the folder keeps what the
 page had (the picture, the machine, motions A and B, the grasp threshold), so `psbx stage desk/` reopens where
 you left off.
@@ -196,6 +210,20 @@ The first push signs in: it prints a 6-digit code to enter at `<PS.com>/vr`, and
 step). You push under your own handle, decided once on PS.com at `/catalog/me`. Everything is private (only
 you see it) unless you add `--public`. A version that is already there is refused (`taken`); without a
 version, push takes 1, or one more than the highest number there.
+
+A record is saved in two ways, here as on the stage and in the PS.com app:
+
+```sh
+psbx push <handle>/run-1 record.json              # a new name creates it; a name that exists is refused
+psbx push <handle>/run-1 record.json --over       # save over: the next version under the same name
+psbx push <handle>/run-1 record.json --over 3     # the same, only if the latest version is still 3
+```
+
+Saving over never changes a version that is written: it makes the next one, the list still shows one row, and
+the earlier versions stay (the record page on PS.com has a version picker once there are two). With
+`--over BASE`, a record that was saved over elsewhere in the meantime is refused as `moved`, not overwritten.
+A ref that names a version (`run-1:2`) that already exists is refused. `ps_catalog_push` in Claude Desktop takes
+`over` and `base` for the same two things.
 
 A record whose devices name a local machine (`"product": "so101"`) takes that machine along: when
 `<handle>/so101` is not in the catalog, it goes up **privately** as `<handle>/so101:1` from

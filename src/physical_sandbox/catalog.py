@@ -58,13 +58,13 @@ def _user_agent() -> str:
     return f"psbx/{__version__}"
 
 
-def _get(url: str, token: str | None = None) -> bytes:
+def _get(url: str, token: str | None = None, timeout: float = _TIMEOUT) -> bytes:
     try:
         headers = {"User-Agent": _user_agent()}
         if token:
             headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read()
     except urllib.error.HTTPError as e:
         code = ""
@@ -77,21 +77,24 @@ def _get(url: str, token: str | None = None) -> bytes:
         raise _Offline(f"{url}: {getattr(e, 'reason', None) or e}") from e
 
 
-def _get_json(url: str, token: str | None = None):
+def _get_json(url: str, token: str | None = None, timeout: float = _TIMEOUT):
     try:
-        return json.loads(_get(url, token).decode())
+        return json.loads(_get(url, token, timeout).decode())
     except ValueError as e:
         raise CatalogError(f"{url}: not JSON") from e
 
 
-def search(q: str = "", *, category=None, tag=None, kind=None, base: str | None = None,
-           token: str | None = None) -> list[dict]:
-    """The catalog's items for a query. With a ``token`` the signed-in person's private items are included."""
+def search(q: str = "", *, category=None, tag=None, kind=None, owner=None, limit: int | None = None,
+           base: str | None = None, token: str | None = None, timeout: float = _TIMEOUT) -> list[dict]:
+    """The catalog's items for a query. With a ``token`` the signed-in person's private items are included.
+    ``owner`` is a handle, or ``"me"`` for the signed-in person's items only (it needs the token); ``limit`` is how
+    many items at most (the server's default when None)."""
     base = (base or _base()).rstrip("/")
-    params = {k: v for k, v in (("q", q), ("category", category), ("tag", tag), ("kind", kind)) if v}
+    params = {k: v for k, v in (("q", q), ("category", category), ("tag", tag), ("kind", kind), ("owner", owner),
+                                ("limit", limit)) if v}
     url = f"{base}/api/catalog/search?{urllib.parse.urlencode(params)}"
     try:
-        items = _get_json(url, token)["items"]
+        items = _get_json(url, token, timeout)["items"]
         return [{**item, "private": item.get("visibility") == "private"} for item in items]
     except (KeyError, TypeError, AttributeError) as e:
         raise CatalogError(f"{url}: no items in the answer") from e
@@ -130,9 +133,9 @@ def _safe_rel(path: str) -> str:
     return path
 
 
-def _resolve_latest(handle: str, name: str, base: str, token: str | None = None) -> str:
+def _resolve_latest(handle: str, name: str, base: str, token: str | None = None, timeout: float = _TIMEOUT) -> str:
     try:
-        v = _get_json(f"{base}/api/catalog/{handle}/{name}", token)["item"]["latest_version"]
+        v = _get_json(f"{base}/api/catalog/{handle}/{name}", token, timeout)["item"]["latest_version"]
     except _Offline as e:
         c = cached(f"{handle}/{name}")
         if c is not None:
@@ -147,13 +150,16 @@ def _resolve_latest(handle: str, name: str, base: str, token: str | None = None)
     return v
 
 
-def pull(ref: str, *, base: str | None = None, force: bool = False, token: str | None = None) -> Path:
+def pull(ref: str, *, base: str | None = None, force: bool = False, token: str | None = None,
+         timeout: float = _TIMEOUT) -> Path:
+    """The folder of one version in the cache (downloaded and checked when it is not there yet). ``latest`` asks the
+    server which version that is (offline: the one resolved last). ``timeout`` is for each request."""
     base = (base or _base()).rstrip("/")  # PS_CATALOG_URL is read at call time, so it can change after import
     handle, name, version = parse_ref(ref)
     parent = _name_dir(handle, name)
     if version == "latest":
         # latest moves, so ask the server; the cached marker is only the offline fallback
-        version = _resolve_latest(handle, name, base, token)
+        version = _resolve_latest(handle, name, base, token, timeout)
         resolved_latest = True
     else:
         resolved_latest = False
@@ -167,14 +173,14 @@ def pull(ref: str, *, base: str | None = None, force: bool = False, token: str |
         shutil.rmtree(partial, ignore_errors=True)
         partial.mkdir(parents=True)
         root = f"{base}/api/catalog/{handle}/{name}/{version}"
-        manifest_bytes = _get(f"{root}/manifest", token)
+        manifest_bytes = _get(f"{root}/manifest", token, timeout)
         try:
             files = json.loads(manifest_bytes.decode())["files"]
         except (ValueError, KeyError, TypeError) as e:
             raise CatalogError(f"{root}/manifest: not a manifest") from e
         for f in files:
             rel = _safe_rel(f["path"])
-            data = _get(f"{root}/files/{urllib.parse.quote(rel)}", token)
+            data = _get(f"{root}/files/{urllib.parse.quote(rel)}", token, timeout)
             if hashlib.sha256(data).hexdigest() != str(f["sha256"]).lower():
                 raise CatalogError(f"{handle}/{name}:{version}: sha256 of {rel} does not match the manifest")
             out = partial / rel

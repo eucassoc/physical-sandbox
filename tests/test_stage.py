@@ -571,8 +571,36 @@ def test_motions_list_carries_the_signed_in_persons_ps_com_records(ps_com, place
     assert sorted(out["catalog"], key=lambda r: r["spec"]) == [
         {"spec": "ps:ada/dance:2", "label": "ada/dance:2", "own": True},
         {"spec": "ps:ada/wave:1", "label": "ada/wave:1", "own": True}]
-    assert ("GET", "/api/catalog/search?kind=record") in ps_com.calls
+    assert ("GET", "/api/catalog/search?kind=record&owner=me&limit=500") in ps_com.calls  # the person's own only
     assert ps_com.headers[-1]["Authorization"] == "Bearer tok-1"
+
+
+def test_the_own_records_are_listed_under_many_newer_public_records_of_others(ps_com, placed, tmp_path):
+    for i in range(60):  # more than a search answers by default, all newer than ada's
+        _seed_record(ps_com, tmp_path, "bob", f"run-{i}", "1", 4, "public")
+    specs = sorted(r["spec"] for r in call(placed, "ps_motions_list", {})["catalog"])
+    assert specs == ["ps:ada/dance:2", "ps:ada/wave:1"]
+
+
+def test_a_server_that_does_not_answer_holds_the_list_and_the_open_only_briefly(ps_com, placed, monkeypatch):
+    import socket
+
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:1", "slot": "a"})  # cached while the server answers
+    silent = socket.socket()
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(8)  # connections wait in the backlog: nobody ever answers
+    url = f"http://127.0.0.1:{silent.getsockname()[1]}"
+    monkeypatch.setattr(stage, "_QUICK_S", 0.5)
+    monkeypatch.setenv("PS_CATALOG_URL", url)
+    push._keep(url, "tok-1", 3600, handle="ada")
+    try:
+        started = time.monotonic()
+        assert call(placed, "ps_motions_list", {})["catalog"] == []
+        out = call(placed, "ps_motion_open", {"spec": "ps:ada/dance:1", "slot": "a"})
+        assert time.monotonic() - started < 5
+        assert out["aOpened"] == {"ref": "ada/dance", "version": "1", "latest": "1", "own": True}
+    finally:
+        silent.close()
 
 
 def test_motions_list_has_no_ps_com_records_signed_out_or_offline(ps_com, placed, monkeypatch):
@@ -651,11 +679,30 @@ def test_a_missing_or_bad_ps_com_record_is_an_error_in_the_pages_words(ps_com, p
     out = call(placed, "ps_motion_open", {"spec": "ps:ada/nothing:1", "slot": "a"})
     assert "PS.com に記録 ada/nothing:1 が見つかりません" in out["error"]
     assert "見つかりません" in call(placed, "ps_motion_open", {"spec": "ps:ada/dance:9", "slot": "a"})["error"]
-    assert "handle/name" in call(placed, "ps_motion_open", {"spec": "ps:Not A Ref", "slot": "a"})["error"]
+    assert "handle/name:バージョン" in call(placed, "ps_motion_open", {"spec": "ps:Not A Ref", "slot": "a"})["error"]
     push._forget(ps_com.url)  # another person's private record is not found, with the hint to sign in
     out = call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
     assert "見つかりません" in out["error"] and "psbx login" in out["error"]
     assert "a" not in json.loads((tmp_path / "w" / "stage.json").read_text())
+
+
+def test_offline_a_ps_com_spec_without_a_version_and_nothing_cached_says_it_cannot_connect(ps_com, placed,
+                                                                                          monkeypatch):
+    monkeypatch.setenv("PS_CATALOG_URL", "http://127.0.0.1:9")
+    out = call(placed, "ps_motion_open", {"spec": "ps:ada/dance", "slot": "a"})
+    assert "PS.com に接続できず、記録 ada/dance を取得できませんでした" in out["error"]
+
+
+def test_a_record_the_ps_com_app_wrote_opens_into_a(ps_com, placed, tmp_path):
+    """A schemaVersion 3 record as the PS.com app writes it (ps-com tests/api-recordings.test.js's PROJECT_V3, with
+    an arm whose trace carries joints): the mover's position-only trace is skipped, the arm is read onto the
+    placed machine."""
+    body = (Path(__file__).parent / "fixtures" / "app-record-v3.json").read_bytes()
+    ps_com.put_record("ada", "yard", "1", body, "private")
+    out = call(placed, "ps_motion_open", {"spec": "ps:ada/yard:1", "slot": "a"})
+    assert "error" not in out and _seconds(out) == pytest.approx(1.2)
+    assert "so101" in out["note"] and "mini" in out["note"] and out["records"][0]["label"] == "yard:1"
+    assert out["aOpened"] == {"ref": "ada/yard", "version": "1", "latest": "1", "own": True}
 
 
 def test_a_ps_com_item_that_is_not_a_record_is_refused(ps_com, placed):

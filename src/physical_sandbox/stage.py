@@ -35,6 +35,8 @@ from .sources import open_source
 
 STAGE_FORMAT = "physical-sandbox.stage/1"
 PS_PREFIX = "ps:"  # a motion spec naming a PS.com record: ps:<handle>/<name>[:<version>][#<label>]
+_QUICK_S = 5  # seconds a PS.com request of the motion step may wait: the page waits on it before anything else
+_REF_WORDS = "PS.com の記録は handle/name か handle/name:バージョン で指定してください"
 _UNREADABLE = (OSError, ValueError, KeyError, TypeError, AttributeError)  # a file that is not what it should be
 
 
@@ -486,7 +488,7 @@ class Stage:
         if not token or not handle:
             return []
         try:
-            items = catalog.search(kind="record", token=token)
+            items = catalog.search(kind="record", owner="me", limit=500, token=token, timeout=_QUICK_S)
         except (CatalogError, InputError):
             return []
         out = []
@@ -512,7 +514,7 @@ class Stage:
         try:
             handle, name, version = catalog.parse_ref(body.strip())
         except InputError:
-            raise ValueError("PS.com の記録は handle/name か handle/name:version で指定してください") from None
+            raise ValueError(_REF_WORDS) from None
         base = catalog._base()
         token, login = push.kept_token(base), push.login_status(base)
 
@@ -521,7 +523,7 @@ class Stage:
                 hint = "" if login["signedIn"] else \
                     "（非公開の記録は、端末で psbx login を実行してサインインしてから読み込んでください）"
                 return ValueError(f"PS.com に記録 {what} が見つかりません{hint}")
-            if isinstance(e, catalog._Offline):
+            if isinstance(e, catalog._Offline) or isinstance(e.__cause__, catalog._Offline):  # nothing cached either
                 return ValueError(f"PS.com に接続できず、記録 {what} を取得できませんでした（{e}）")
             return ValueError(f"PS.com から記録 {what} を取得できませんでした（{e}）")
 
@@ -531,7 +533,7 @@ class Stage:
         latest = None
         if ask_latest and version != "latest":
             try:
-                item = catalog._get_json(f"{base}/api/catalog/{handle}/{name}", token)["item"]
+                item = catalog._get_json(f"{base}/api/catalog/{handle}/{name}", token, _QUICK_S)["item"]
             except catalog._Offline:
                 item = None  # the cache may still hold the version asked for
             except CatalogError as e:
@@ -544,7 +546,8 @@ class Stage:
                 latest = item.get("latest_version")
                 latest = latest if isinstance(latest, str) and latest else None
         try:  # without a version, pull asks PS.com for the latest (offline: the one it read last)
-            folder = catalog.pull(f"{handle}/{name}" + ("" if version == "latest" else f":{version}"), token=token)
+            folder = catalog.pull(f"{handle}/{name}" + ("" if version == "latest" else f":{version}"), token=token,
+                                  timeout=_QUICK_S)
         except CatalogError as e:
             raise refused(e, body.strip()) from None
         version = folder.name

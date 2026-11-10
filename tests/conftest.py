@@ -72,6 +72,7 @@ class FakeCatalog:
         self.vr_starts = 0
         self.items = {}  # (handle, name) -> {kind, visibility, versions: {version: {...}}}
         self.calls = []
+        self.updates = 0
         self.fail_put = None  # an error code every PUT of a file answers with (400)
 
     def manifest(self):
@@ -124,22 +125,28 @@ class FakeCatalog:
         return self.auth == f"Bearer {self.token}" and handle == self.handle
 
     def search(self, mini, query):
-        """``t/mini`` (a machine) and the stored items with a finished version, filtered by ``kind`` as PS.com does:
-        public ones, and the signed-in person's private ones."""
+        """``t/mini`` (a machine) and the stored items with a finished version, newest first, filtered as PS.com
+        does: by ``kind``; public ones and the signed-in person's private ones, or with ``owner=me`` only the
+        signed-in person's (401 signed out); at most ``limit`` (default 50)."""
         from urllib.parse import parse_qs
 
-        kind = {k: v[-1] for k, v in parse_qs(query).items()}.get("kind")
-        found = [mini] if kind in (None, "machine") else []
-        for (handle, name), item in self.items.items():
+        q = {k: v[-1] for k, v in parse_qs(query).items()}
+        kind, mine = q.get("kind"), q.get("owner") == "me"
+        if mine and self.need_auth():
+            return self.need_auth()
+        found = [mini] if kind in (None, "machine") and not mine else []
+        stored = sorted(self.items.items(), key=lambda kv: kv[1].get("updated", 0), reverse=True)
+        for (handle, name), item in stored:
             finished = [v for v, x in item["versions"].items() if x["finished"]]
             if not finished or (kind is not None and item["kind"] != kind):
                 continue
-            if item["visibility"] != "public" and not self.signed_in_as(handle):
+            if (mine or item["visibility"] != "public") and not self.signed_in_as(handle):
                 continue
             found.append({"handle": handle, "name": name, "kind": item["kind"], "visibility": item["visibility"],
                           "display": item.get("display") or {},
                           "latest_version": item.get("latest") or max(finished, key=_version_key)})
-        return self.reply(200, {"items": found})
+        limit = int(q["limit"]) if q.get("limit", "").isdigit() else 50
+        return self.reply(200, {"items": found[:limit]})
 
     def stored_get(self, handle, name, rest):
         item = self.items[(handle, name)]
@@ -173,6 +180,8 @@ class FakeCatalog:
         item["versions"][version] = {"record": record, "raw": body, "finished": True, "bytes": len(body),
                                      "manifest": manifest}
         item["latest"] = version
+        self.updates += 1
+        item["updated"] = self.updates  # search lists the newest first
         return self.reply(201 if created else 200, {"name": f"{handle}/{name}", "version": version,
                                                     "bytes": len(body), "unchanged": False})
 

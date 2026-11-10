@@ -136,3 +136,19 @@ def test_search_marks_private_items(catalog_server):
     items = catalog.search("mini", base=catalog_server.url)
     assert all(isinstance(i["private"], bool) for i in items)
     assert items[0]["private"] == (items[0].get("visibility") == "private")
+
+
+def test_search_sends_owner_and_limit_and_owner_me_needs_the_token(catalog_server):
+    catalog.search(kind="record", owner="me", limit=500, base=catalog_server.url, token="tok-1")
+    assert catalog_server.paths[-1] == "/api/catalog/search?kind=record&owner=me&limit=500"
+    with pytest.raises(CatalogError, match="401"):
+        catalog.search(kind="record", owner="me", base=catalog_server.url)
+
+
+def test_the_timeout_reaches_every_request(catalog_server, cache, monkeypatch):
+    seen = []
+    real = catalog.urllib.request.urlopen
+    monkeypatch.setattr(catalog.urllib.request, "urlopen", lambda req, timeout: seen.append(timeout) or real(req))
+    catalog.search("mini", base=catalog_server.url, timeout=2)
+    catalog.pull("t/mini", base=catalog_server.url, timeout=3)
+    assert seen[0] == 2 and len(seen) > 2 and set(seen[1:]) == {3}

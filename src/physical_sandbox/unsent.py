@@ -22,7 +22,7 @@ from .push import PushError
 
 FOLDER = "unsent"
 SIGN_IN = "psbx login でログインすると送れます"
-OFFLINE = "PS.com に接続できませんでした。接続できるようになったら送り直してください"
+OFFLINE = "PS.com に接続できませんでした。接続できるようになったら「再送信する」を押してください"
 MOVED = "{ref} は別の場所で変わっていたため、{new} として新しく保存しました"
 TAKEN = "{ref} はもうあったため、{new} として保存しました"
 _NAME_MAX = 39  # a catalog name is at most 39 characters

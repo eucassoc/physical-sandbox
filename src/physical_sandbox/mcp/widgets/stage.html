@@ -134,7 +134,7 @@
       <p class="hint" id="saveHint"></p>
       <div id="unsentBox" hidden>
         <div id="unsentLines"></div>
-        <div class="bar"><button class="chip" id="unsentSend">送り直す</button></div>
+        <div class="bar"><button class="chip" id="unsentSend">再送信する</button></div>
       </div>
     </div>
   </section>
@@ -1226,7 +1226,7 @@ swapButton.addEventListener('click', () => {
   readEdges('長さを入れ替えました');
 });
 
-const floorOk = (stepM) => `床（薄い格子、${stepLabel(stepM)} ごと）が地面に合っていれば「決定」を、ずれていれば橙の角をつかんで指定し直してください`;
+const floorOk = (stepM) => `床（薄い格子、${stepLabel(stepM)} ごと）が地面に合っていれば「決定」を、ずれていれば橙の角をつかんで、合う位置に指定してください`;
 
 // Solve on the server, at most one call in flight
 async function solve() {

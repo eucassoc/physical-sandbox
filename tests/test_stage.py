@@ -1146,9 +1146,10 @@ def test_the_stage_html_has_the_save_controls(served):
         assert f'id="{ident}"' in html
     for name in ("ps_record_save", "ps_record_export", "ps_unsent_send"):
         assert name in html
-    for words in ("上書き保存", "新しい記録として保存", "エクスポート", "PS.com 未保存", "送り直す", "psbx login"):
+    for words in ("上書き保存", "新しい記録として保存", "エクスポート", "PS.com 未保存", "再送信する", "psbx login"):
         assert words in html
     assert "aOpened?.own && state?.login?.signedIn" in html  # 上書き保存 is hidden while signed out
+    assert "直す" not in html and "直し" not in html  # 再送信する, never 送り直す
 
 
 def test_two_offline_saves_over_keep_one_copy_and_make_one_version(ps_com, placed, cache_mini, tmp_path):

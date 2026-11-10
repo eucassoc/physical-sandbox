@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import pytest
 
-from physical_sandbox import push, stage
+from physical_sandbox import push, stage, unsent
 from physical_sandbox.cli import main
 from physical_sandbox.errors import InputError
 from physical_sandbox.motion import motion_from_numpy, save_record
@@ -1011,6 +1011,25 @@ def test_save_over_writes_the_next_version_keeping_what_psbx_does_not_read(ps_co
     assert call(placed, "ps_record_save", {"mode": "over"})["version"] == "4"
 
 
+def test_save_over_of_a_ps_com_app_record_keeps_its_trace_and_its_height(ps_com, placed, cache_mini, tmp_path):
+    """A record the PS.com app wrote: trace samples carry position and yaw beside the joints, and the arm stands
+    0.7 m up, tilted. Moving the arm in x/y on the stage changes only its x, y and yaw."""
+    raw = json.loads(ps_com.items[("ada", "dance")]["versions"]["2"]["raw"])
+    (dev,) = raw["equipment"]["devices"]
+    dev["pose"] = {"xyz": [0.1, 0.1, 0.7], "rpy": [0.05, -0.05, 0.0]}
+    for k, sample in enumerate(raw["traces"][0]["samples"]):
+        sample["position"], sample["yaw"] = [0.1 * k, 0.0, 0.7], 0.25
+    ps_com.put_record("ada", "dance", "2", json.dumps(raw).encode(), "private")
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    _place(placed, cache_mini, x=0.5, y=0.2, yaw=0.3)
+    out = call(placed, "ps_record_save", {"mode": "over"})
+    assert out["saved"] is True and out["version"] == "3"
+    saved = _stored(ps_com, "ada", "dance", "3")
+    (dev,) = saved["equipment"]["devices"]
+    assert dev["pose"] == {"xyz": [0.5, 0.2, 0.7], "rpy": [0.05, -0.05, 0.3]}
+    assert saved["traces"] == raw["traces"]  # the samples' position and yaw are still there
+
+
 def test_save_over_needs_the_persons_own_ps_com_record_in_a(ps_com, placed, tmp_path):
     assert "動きを読み込んでから" in call(placed, "ps_record_save", {"mode": "over"})["error"]
     assert "動きを読み込んでから" in call(placed, "ps_record_export", {})["error"]
@@ -1047,6 +1066,31 @@ def test_save_new_from_a_file_brings_the_machine_and_its_place(ps_com, placed, m
     assert dev["pose"] == {"xyz": [0.1, -0.2, 0.0], "rpy": [0.0, 0.0, 0.0]}
     assert saved["name"] == "demo" and "basedOn" not in saved and saved["siteFrameId"] == _site_id(tmp_path)
     assert [list(s["joints"]) for s in saved["traces"][0]["samples"]][0] == ["turn"]
+
+
+def test_a_server_error_keeps_the_save_as_unsent_like_offline(ps_com, placed, cache_mini, tmp_path):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    _place(placed, cache_mini)
+    ps_com.fail_record = (503, {})
+    out = call(placed, "ps_record_save", {"mode": "over"})
+    assert out == {"saved": False, "unsent": "dance", "reason": unsent.SERVER_DOWN}
+    assert list(ps_com.items[("ada", "dance")]["versions"]) == ["1", "2"]
+    ps_com.fail_record = None
+    out = call(placed, "ps_unsent_send", {})
+    assert [(s["ref"], s["version"]) for s in out["sent"]] == [("ada/dance", "3")] and out["left"] == []
+
+
+@pytest.mark.parametrize("status,error,words", [
+    (429, "limit", "記録の数が上限に達しています"),
+    (409, "renaming", "ハンドルの変更中です"),
+    (409, "not-a-record", "その名前は記録以外に使われています"),
+])
+def test_a_save_refused_by_ps_com_says_why_in_words(ps_com, placed, status, error, words):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    ps_com.fail_record = (status, {"error": error})
+    out = call(placed, "ps_record_save", {"mode": "new", "name": "fresh"})
+    assert "PS.com に保存できませんでした（" in out["error"] and words in out["error"]
+    assert error not in out["error"]
 
 
 def test_save_new_refuses_a_bad_name_and_a_name_that_is_there(ps_com, placed):
@@ -1230,3 +1274,11 @@ def test_a_save_over_online_replaces_a_waiting_save_over_of_the_same_record(ps_c
     assert out["saved"] is True and out["version"] == "3" and "note" not in out and "unsentSend" not in out
     assert list(ps_com.items[("ada", "dance")]["versions"]) == ["1", "2", "3"] and ("ada", "dance-2") not in ps_com.items
     assert placed.stage.first()["unsent"] == []
+
+
+def test_the_stage_has_one_word_for_signing_in():
+    """One word for signing in on the stage, as its status line (ログイン中／未ログイン) and unsent.SIGN_IN say."""
+    import physical_sandbox.stage as stage_module
+    src = Path(stage_module.__file__)
+    for path in (src, src.parent / "mcp" / "widgets" / "stage.html", src.parent / "unsent.py"):
+        assert "サインイン" not in path.read_text(), path.name

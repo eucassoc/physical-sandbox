@@ -480,7 +480,7 @@ def _machine_folder(product: str, machine_dir: Path | None, only_one: bool) -> P
         if c.is_dir() and _find_model(c) is not None:
             return c
     raise InputError(f"no machine {product!r} here ({', '.join(str(c) for c in candidates)}): "
-                     f"--machine-dir で機体の URDF の場所を指定してください")
+                     f"--machine-dir でロボットの URDF の場所を指定してください")
 
 
 def _companion(base, token, handle, product, folder, *, work: Path, log) -> tuple[str, bool, str]:
@@ -528,7 +528,7 @@ def _record_url(base, handle, name, version, existing, *, private, over, over_ba
 
 
 def _moved(handle, name, latest) -> str:
-    shown = f"バージョン {latest}" if latest else "別のバージョン"
+    shown = f"バージョン {latest} " if latest else "別のバージョン"  # a number is set off by spaces on both sides
     again = f"--over {latest}" if latest else "--over"
     return (f"{handle}/{name} はほかの所で保存され、最新は{shown}になっています。何も保存していません。"
             f"最新を確かめてから上書き保存するときは {again} を付けてください。"

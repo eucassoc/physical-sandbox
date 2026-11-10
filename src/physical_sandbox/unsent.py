@@ -23,10 +23,36 @@ from .push import PushError
 FOLDER = "unsent"
 SIGN_IN = "psbx login でログインすると送れます"
 OFFLINE = "PS.com に接続できませんでした。接続できるようになったら「再送信する」を押してください"
+SERVER_DOWN = "PS.com が応答できませんでした。しばらくしてから「再送信する」を押してください"
 MOVED = "{ref} は別の場所で変わっていたため、{new} として新しく保存しました"
 TAKEN = "{ref} はもうあったため、{new} として保存しました"
 _NAME_MAX = 39  # a catalog name is at most 39 characters
 _TRIES = 50  # suffixes tried for a free name
+
+
+# What PS.com's refusals mean, by (error, HTTP status) and else by error alone
+_REFUSALS = {
+    ("limit", 429): "記録の数が上限に達しています",
+    ("limit", 413): "保存できる容量の上限に達しています",
+    ("too-large", 413): "記録が大きすぎます",
+    ("renaming", 409): "ハンドルの変更中です。しばらくしてからもう一度お試しください",
+    ("not-a-record", 409): "その名前は記録以外に使われています。別の名前を指定してください",
+}
+
+
+def server_down(e: PushError) -> bool:
+    """Whether PS.com failed on its side (HTTP 5xx): nothing was refused, the copy is kept as when offline."""
+    return e.status >= 500
+
+
+def refusal_words(e: PushError) -> str:
+    """A refusal said in words for the person: a known ``error`` in a sentence (with the note on what was left
+    behind, when there is one), anything else as the server or push said it."""
+    words = _REFUSALS.get((e.code, e.status)) or next(
+        (w for (code, _), w in _REFUSALS.items() if code == e.code), None)
+    if words is None:
+        return e.note or str(e)
+    return f"{words}。{e.note}" if e.note else words
 
 
 def _name_of(ref: str) -> str:
@@ -139,8 +165,9 @@ def drop_over(work: Path, ref: str) -> None:
 
 def send_all(work: Path, sender) -> tuple[list[dict], list[dict], list[str]]:
     """Send every kept copy (see ``send_one``; a taken new name also goes under a free suffix); ``(sent, left,
-    notes)``. ``sent`` is ``[{name, ref, version, mode}]`` as written; ``left`` is what stays kept (``pending``'s entries). Offline (CatalogError) or signed out
-    on the server, the rest is not tried: every copy stays. Another refusal keeps that copy with the reason."""
+    notes)``. ``sent`` is ``[{name, ref, version, mode}]`` as written; ``left`` is what stays kept (``pending``'s
+    entries). Offline (CatalogError), a server error (HTTP 5xx) or signed out on the server, the rest is not tried:
+    every copy stays. Another refusal keeps that copy with the reason in words."""
     folder = Path(work) / FOLDER
     sent, left, notes = [], [], []
     waiting = pending(work)
@@ -153,8 +180,12 @@ def send_all(work: Path, sender) -> tuple[list[dict], list[dict], list[str]]:
                 left += waiting[i:]
                 notes.append(SIGN_IN)
                 break
+            if server_down(e):  # PS.com failed on its side: as when offline, the rest is not tried
+                left += waiting[i:]
+                notes.append(SERVER_DOWN)
+                break
             left.append(p)
-            notes.append(f"{p['name']} を送れませんでした（{e.note or e}）")
+            notes.append(f"{p['name']} を送れませんでした（{refusal_words(e)}）")
             continue
         except CatalogError:  # not a PushError: PS.com could not be reached
             left += waiting[i:]

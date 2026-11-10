@@ -821,7 +821,7 @@ function fillMotionPick() {
     const o = document.createElement('option');
     o.disabled = true;
     o.textContent = state?.login?.signedIn ? 'PS.com に記録がないか、接続できません'
-      : '端末で psbx login を実行してサインインすると表示します';
+      : '端末で psbx login を実行してログインすると表示します';
     group.append(o);
   }
   motionPick.append(group);
@@ -906,7 +906,7 @@ function updateSaveButtons() {
   unsentSendBtn.disabled = saving;
   saveHint.textContent = state?.login?.signedIn
     ? '保存先は PS.com です。手元にファイルとして残すときは「エクスポート」を押してください'
-    : 'PS.com に保存するには、端末で psbx login を実行してサインインしてください。サインインしていないときは手元に残し、サインインした後に送ります';
+    : 'PS.com に保存するには、端末で psbx login を実行してログインしてください。ログインしていないときは手元に残し、ログインした後に送信します';
 }
 
 function showUnsent() {

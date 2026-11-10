@@ -569,7 +569,7 @@ class Stage:
         def refused(e: CatalogError, what: str) -> ValueError:
             if isinstance(e.__cause__, urllib.error.HTTPError) and e.__cause__.code == 404:
                 hint = "" if login["signedIn"] else \
-                    "（非公開の記録は、端末で psbx login を実行してサインインしてから読み込んでください）"
+                    "（非公開の記録は、端末で psbx login を実行してログインしてから読み込んでください）"
                 return ValueError(f"PS.com に記録 {what} が見つかりません{hint}")
             if isinstance(e, catalog._Offline) or isinstance(e.__cause__, catalog._Offline):  # nothing cached either
                 return ValueError(f"PS.com に接続できず、記録 {what} を取得できませんでした（{e}）")
@@ -741,8 +741,9 @@ class Stage:
 
     def _a_record(self) -> tuple[dict, dict | None, str]:
         """``(record, opened, label)`` for the motion in A on the placed machine where it stands now, on the decided
-        site. A record opened from PS.com (``opened`` is ``aOpened``) is merged: only its device's place, its motion
-        and the site frame change. Anything else is a new record of the placed machine. Reads no network."""
+        site. A record opened from PS.com (``opened`` is ``aOpened``) is merged: only its device's place (x, y, yaw)
+        and the site frame change; its motion is the record's own (the stage cannot edit it), so its trace stays as
+        it was. Anything else is a new record of the placed machine. Reads no network."""
         spec = self._kept("a")
         if spec is None:
             raise ValueError(_NO_A)
@@ -764,7 +765,7 @@ class Stage:
         device = record_edit.device_of(raw, placed["id"]) or _joint_device(raw, spec)
         if device is None:
             raise ValueError("記録のどの機器に保存するかを特定できません")
-        record = record_edit.merge_into(raw, device_id=device, motion=motion, placement=placement, site_id=site_id)
+        record = record_edit.merge_into(raw, device_id=device, motion=None, placement=placement, site_id=site_id)
         return record, self._kept_opened() or opened, motion.label
 
     @staticmethod
@@ -873,9 +874,11 @@ class Stage:
                 except PushError as e:
                     if e.code == "signin":
                         return self._keep_unsent(record, ref, mode, base, unsent.SIGN_IN)
+                    if unsent.server_down(e):  # PS.com failed on its side: kept as when offline
+                        return self._keep_unsent(record, ref, mode, base, unsent.SERVER_DOWN)
                     if e.code == "taken":
                         raise ValueError(f"{ref} はもうあります。別の名前を指定してください") from None
-                    raise ValueError(f"PS.com に保存できませんでした（{e.note or e}）") from None
+                    raise ValueError(f"PS.com に保存できませんでした（{unsent.refusal_words(e)}）") from None
                 except CatalogError as e:  # not a PushError: PS.com could not be reached
                     return self._keep_unsent(record, ref, mode, base, f"{unsent.OFFLINE}（{e}）")
             ref, _, version = written.partition(":")

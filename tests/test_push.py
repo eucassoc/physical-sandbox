@@ -205,7 +205,7 @@ def test_a_changed_machine_goes_up_as_the_next_version(tmp_path, catalog_server)
 
 def test_the_machine_cache_is_searched_and_a_missing_machine_says_machine_dir(tmp_path, catalog_server):
     rec = _record(tmp_path / "run.json", ["mini"])
-    with pytest.raises(InputError, match="--machine-dir で機体の URDF の場所を指定してください"):
+    with pytest.raises(InputError, match="--machine-dir でロボットの URDF の場所を指定してください"):
         push("ada/run:1", rec, base=catalog_server.url, log=quiet)
     _machine_dir(tmp_path / "cache" / "machines", "mini")
     assert push("ada/run:1", rec, base=catalog_server.url, log=quiet).companions == ["ada/mini:1"]
@@ -494,7 +494,7 @@ def test_over_a_base_that_moved_is_refused_and_names_the_latest(tmp_path, catalo
     with pytest.raises(PushError) as e:
         push("ada/run", rec, over=True, over_base="1", base=catalog_server.url, log=quiet)
     assert e.value.code == "moved" and e.value.status == 409
-    assert "バージョン 2" in e.value.note and "--over 2" in e.value.note
+    assert "最新はバージョン 2 になっています" in e.value.note and "--over 2" in e.value.note
     assert list(catalog_server.items[("ada", "run")]["versions"]) == ["1", "2"]
 
 

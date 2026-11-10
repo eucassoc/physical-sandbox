@@ -74,6 +74,7 @@ class FakeCatalog:
         self.calls = []
         self.updates = 0
         self.fail_put = None  # an error code every PUT of a file answers with (400)
+        self.fail_record = None  # (status, body) every PUT of a record answers with
 
     def manifest(self):
         files = [{"path": p, "bytes": len(b), "sha256": hashlib.sha256(b).hexdigest()} for p, b in FILES.items()]
@@ -224,6 +225,8 @@ class FakeCatalog:
         parts = path.split("/")
         if len(parts) < 6 or parts[:3] != ["", "api", "catalog"]:
             return self.reply(404, {"error": "not-found"})
+        if self.fail_record and method == "PUT" and parts[-1] == "record":
+            return self.reply(*self.fail_record)
         if len(parts) == 6 and parts[5] == "record" and method == "PUT":
             if parts[3] != self.handle:
                 return self.reply(404, {"error": "not-found"})

@@ -89,7 +89,7 @@ def test_a_record_saved_over_elsewhere_goes_as_new_under_the_first_free_suffix(t
 def test_a_refusal_keeps_the_copy_with_the_reason_and_the_next_one_still_goes(tmp_path):
     unsent.keep(tmp_path, RECORD, ref="ada/dance", mode="new", base=None)
     unsent.keep(tmp_path, RECORD, ref="ada/walk", mode="new", base=None)
-    sender = Sender(**{"ada/dance": PushError("too-large", 413, note="記録が大きすぎます")})
+    sender = Sender(**{"ada/dance": PushError("too-large", 413)})
     sent, left, notes = unsent.send_all(tmp_path, sender)
     assert [s["name"] for s in sent] == ["walk"] and [p["name"] for p in left] == ["dance"]
     assert notes == ["dance を送れませんでした（記録が大きすぎます）"]
@@ -161,3 +161,31 @@ def test_drop_over_forgets_only_the_saves_over_that_ref(tmp_path):
     unsent.keep(tmp_path, RECORD, ref="ada/walk", mode="over", base="1")
     unsent.drop_over(tmp_path, "ada/dance")
     assert [(p["ref"], p["mode"]) for p in unsent.pending(tmp_path)] == [("ada/dance", "new"), ("ada/walk", "over")]
+
+
+def test_a_server_error_keeps_every_copy_and_tries_no_more_like_offline(tmp_path):
+    unsent.keep(tmp_path, RECORD, ref="ada/dance", mode="over", base="2")
+    unsent.keep(tmp_path, RECORD, ref="ada/walk", mode="new", base=None)
+    sender = Sender(**{"ada/dance": PushError("HTTP 503", 503)})
+    sent, left, notes = unsent.send_all(tmp_path, sender)
+    assert sent == [] and [p["name"] for p in left] == ["dance", "walk"]
+    assert len(sender.calls) == 1 and notes == [unsent.SERVER_DOWN]
+    assert "再送信する" in unsent.SERVER_DOWN
+    assert len(unsent.pending(tmp_path)) == 2
+
+
+@pytest.mark.parametrize("error,status,words", [
+    ("limit", 429, "記録の数が上限に達しています"),
+    ("limit", 413, "保存できる容量の上限に達しています"),
+    ("too-large", 413, "記録が大きすぎます"),
+    ("renaming", 409, "ハンドルの変更中です。しばらくしてからもう一度お試しください"),
+    ("not-a-record", 409, "その名前は記録以外に使われています。別の名前を指定してください"),
+])
+def test_a_refusal_is_said_in_words_not_by_its_code(error, status, words):
+    assert unsent.refusal_words(PushError(error, status)) == words
+    assert unsent.refusal_words(PushError(error, status, note="機器は送信済みです")) == f"{words}。機器は送信済みです"
+
+
+def test_an_unknown_refusal_keeps_what_the_server_said():
+    assert unsent.refusal_words(PushError("bad-record", 400)) == "bad-record"
+    assert unsent.refusal_words(PushError("taken", 409, note="ada/x はもうあります")) == "ada/x はもうあります"

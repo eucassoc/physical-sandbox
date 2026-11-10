@@ -110,6 +110,17 @@ def test_tool_list_marks_the_screen_and_hides_the_screen_only_tools(env):
     assert "ui" not in (tools["ps_scene_place"].get("_meta") or {})
 
 
+def test_the_push_tool_takes_over_and_base_and_says_what_they_do(env):
+    async def go():
+        async with started(env) as client:
+            return {t.name: t for t in (await client.list_tools()).tools}
+    tool = run(go())["ps_catalog_push"]
+    props = tool.input_schema["properties"]
+    assert {"ref", "path", "private", "over", "base"} <= set(props)
+    assert props["over"].get("default") is False and props["base"].get("default") is None
+    assert "over" in tool.description and "base" in tool.description
+
+
 def test_machine_check_over_stdio_says_what_is_missing(env, tmp_path):
     import shutil
     from pathlib import Path

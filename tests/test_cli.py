@@ -625,6 +625,77 @@ def test_catalog_search_json_and_table(catalog_server, monkeypatch, capsys):
     assert capsys.readouterr().out.split() == ["t/mini", "1", "arm", "Mini", "arm"]
 
 
+# ---- psbx push --over ----
+
+@pytest.fixture
+def signed_in(catalog_server, tmp_path, monkeypatch):
+    """The fake catalog as PS_CATALOG_URL, signed in at the first poll without waiting."""
+    from physical_sandbox import push as push_mod
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PS_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
+    monkeypatch.setattr(push_mod, "POLL_S", 0)
+    return catalog_server
+
+
+def _pushable_record(path):
+    save_record([motion_from_numpy(np.zeros((3, 1)), fps=10, joint_names=["pan"], machine="m")], "site-1", path)
+    data = json.loads(path.read_text())
+    data["equipment"]["devices"][0]["product"] = "physical-sandbox/so101:1"
+    path.write_text(json.dumps(data))
+    return path
+
+
+def _noted(path, note):
+    data = json.loads(path.read_text())
+    data["note"] = note
+    path.write_text(json.dumps(data))
+
+
+def test_push_over_saves_the_next_version_and_over_base_is_sent(signed_in, tmp_path, capsys):
+    rec = _pushable_record(tmp_path / "run.json")
+    assert main(["push", "ada/run", str(rec)]) == 0
+    _noted(rec, "second")
+    assert main(["push", "ada/run", str(rec)]) == 2
+    assert "上書き保存するときは --over を付けてください" in capsys.readouterr().err
+    assert main(["push", "ada/run", str(rec), "--over"]) == 0
+    assert "uploaded ada/run:2" in capsys.readouterr().out
+    _noted(rec, "third")
+    assert main(["push", "ada/run", str(rec), "--over", "2"]) == 0
+    puts = [p for m, p in signed_in.calls if m == "PUT"]
+    assert puts[-1] == "/api/catalog/ada/run/record?base=2&visibility=private"
+    assert list(signed_in.items[("ada", "run")]["versions"]) == ["1", "2", "3"]
+
+
+def test_push_over_a_moved_base_says_the_latest(signed_in, tmp_path, capsys):
+    rec = _pushable_record(tmp_path / "run.json")
+    assert main(["push", "ada/run", str(rec)]) == 0
+    _noted(rec, "second")
+    assert main(["push", "ada/run", str(rec), "--over"]) == 0
+    _noted(rec, "third")
+    assert main(["push", "ada/run", str(rec), "--over", "1"]) == 1
+    err = capsys.readouterr().err
+    assert "moved" in err and "バージョン 2" in err
+
+
+def test_push_over_the_same_bytes_says_nothing_changed(signed_in, tmp_path, capsys):
+    rec = _pushable_record(tmp_path / "run.json")
+    assert main(["push", "ada/run", str(rec)]) == 0
+    capsys.readouterr()
+    assert main(["push", "ada/run", str(rec), "--over"]) == 0
+    out = capsys.readouterr().out
+    assert "ada/run:1 is unchanged" in out and "uploaded ada/run" not in out
+    assert list(signed_in.items[("ada", "run")]["versions"]) == ["1"]
+
+
+def test_push_a_taken_record_version_says_to_change_it(signed_in, tmp_path, capsys):
+    rec = _pushable_record(tmp_path / "run.json")
+    assert main(["push", "ada/run:1", str(rec)]) == 0
+    assert main(["push", "ada/run:1", str(rec)]) == 1
+    assert "そのバージョンはもうあります。バージョンを変えてください" in capsys.readouterr().err
+
+
 # ---- a record made for another stand of the robot ----
 
 @pytest.fixture

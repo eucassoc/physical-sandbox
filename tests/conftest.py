@@ -1,6 +1,7 @@
 """Shared fixtures: a fake PS.com catalog server."""
 import hashlib
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -32,6 +33,14 @@ def _version_key(v):
     return (0, int(v), "") if v.isdigit() else (1, 0, v)
 
 
+def _next_version(names):
+    numbers = [int(v) for v in names if v.isdigit()]
+    return str(max(numbers) + 1) if numbers else "1"
+
+
+_VERSION = re.compile(r"^[a-z0-9][a-z0-9.-]{0,31}$")
+
+
 FILES = {"mini.urdf": URDF.encode(), "notes.txt": b"two links, one joint\n"}
 
 
@@ -39,8 +48,11 @@ class FakeCatalog:
     """Serves the catalog API for ``t/mini`` (version 1). ``bad`` corrupts one sha256 in the manifest.
 
     It also takes uploads: the device-code login (``/api/vr/*``, approved at the first poll), ``/api/handle``,
-    machine/object versions (POST manifest, PUT files, POST finish) and records (PUT .../record), kept in
-    ``items``. Every request is logged in ``calls`` as (method, path with query).
+    machine/object versions (POST manifest, PUT files, POST finish) and records, kept in ``items``. Records
+    follow PS.com: a version is never written over (``PUT .../{v}/record`` on a stored one is 409 ``taken``);
+    ``PUT .../{name}/record`` writes the next version, takes ``base`` (409 ``moved`` when the latest is another)
+    and ``new=1`` (409 ``taken`` when the item exists), and answers ``unchanged`` without writing when the bytes
+    equal the latest version's. Every request is logged in ``calls`` as (method, path with query).
     """
 
     def __init__(self, bad=False):
@@ -110,14 +122,58 @@ class FakeCatalog:
         item = self.items[(handle, name)]
         finished = {v: x for v, x in item["versions"].items() if x["finished"]}
         if not rest:
+            latest = item.get("latest") or (max(finished, key=_version_key) if finished else None)
             body = {"item": {"handle": handle, "name": name, "kind": item["kind"], "visibility": item["visibility"],
-                             "latest_version": max(finished, key=_version_key) if finished else None},
+                             "latest_version": latest},
                     "versions": [{"version": v, "bytes": x["bytes"], "finished_at": "2026-11-01"}
                                  for v, x in finished.items()]}
             return self.reply(200, body)
         if len(rest) == 2 and rest[1] == "manifest" and rest[0] in finished:
             return self.reply(200, finished[rest[0]]["manifest"])
+        if rest[1:] == ["files", "record.json"] and "raw" in finished.get(rest[0], {}):
+            return 200, "application/json", finished[rest[0]]["raw"]
         return self.reply(404, {"error": "not-found"})
+
+    def put_record(self, handle, name, version, body, visibility):
+        """Store ``body`` as ``version`` of the record ``handle/name`` (the item made when it is new)."""
+        try:
+            record = json.loads(body)
+        except ValueError:
+            return self.reply(400, {"error": "bad-record"})
+        created = (handle, name) not in self.items
+        item = self.items.setdefault((handle, name), {"kind": "record", "visibility": visibility, "versions": {}})
+        manifest = {"format": "physical-sandbox-catalog/1", "name": f"{handle}/{name}", "version": version,
+                    "kind": "record", "files": [{"path": "record.json", "bytes": len(body),
+                                                 "sha256": hashlib.sha256(body).hexdigest()}]}
+        item["versions"][version] = {"record": record, "raw": body, "finished": True, "bytes": len(body),
+                                     "manifest": manifest}
+        item["latest"] = version
+        return self.reply(201 if created else 200, {"name": f"{handle}/{name}", "version": version,
+                                                    "bytes": len(body), "unchanged": False})
+
+    def put_next_record(self, handle, name, query, body):
+        """``PUT .../{name}/record``: the next version, with ``base``, ``new`` and ``unchanged`` as PS.com."""
+        from urllib.parse import parse_qs
+
+        q = {k: v[-1] for k, v in parse_qs(query).items()}
+        base = q.get("base")
+        if base is not None and not _VERSION.match(base):
+            return self.reply(400, {"error": "base"})
+        item = self.items.get((handle, name))
+        visibility = "public" if q.get("visibility") == "public" else "private"
+        if item is None:
+            return self.put_record(handle, name, "1", body, visibility)
+        if item["kind"] != "record":
+            return self.reply(409, {"error": "not-a-record"})
+        if q.get("new") == "1":
+            return self.reply(409, {"error": "taken"})
+        latest = item.get("latest")
+        if latest and item["versions"][latest].get("raw") == body:
+            return self.reply(200, {"name": f"{handle}/{name}", "version": latest, "bytes": len(body),
+                                    "unchanged": True})
+        if base is not None and latest != base:
+            return self.reply(409, {"error": "moved", "latest": latest})
+        return self.put_record(handle, name, _next_version(list(item["versions"])), body, visibility)
 
     def write(self, method, raw_path, body):
         path, _, query = raw_path.partition("?")
@@ -134,6 +190,10 @@ class FakeCatalog:
         parts = path.split("/")
         if len(parts) < 6 or parts[:3] != ["", "api", "catalog"]:
             return self.reply(404, {"error": "not-found"})
+        if len(parts) == 6 and parts[5] == "record" and method == "PUT":
+            if parts[3] != self.handle:
+                return self.reply(404, {"error": "not-found"})
+            return self.put_next_record(parts[3], parts[4], query, body)
         handle, name, version, rest = parts[3], parts[4], parts[5], parts[6:]
         if handle != self.handle:
             return self.reply(404, {"error": "not-found"})
@@ -154,15 +214,9 @@ class FakeCatalog:
         if method == "PUT" and rest == ["record"]:
             if item is not None and item["kind"] != "record":
                 return self.reply(409, {"error": "not-a-record"})
-            try:
-                record = json.loads(body)
-            except ValueError:
-                return self.reply(400, {"error": "bad-record"})
-            item = self.items.setdefault((handle, name), {"kind": "record", "visibility": visibility,
-                                                          "versions": {}})
-            item["versions"][version] = {"record": record, "finished": True, "bytes": len(body),
-                                         "manifest": {"files": []}}
-            return self.reply(200, {"name": f"{handle}/{name}", "version": version})
+            if item is not None and item["versions"].get(version, {}).get("finished"):
+                return self.reply(409, {"error": "taken"})
+            return self.put_record(handle, name, version, body, visibility)
         upload = (item or {}).get("versions", {}).get(version)
         if upload is None:
             return self.reply(404, {"error": "not-found"})

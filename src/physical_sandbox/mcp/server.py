@@ -186,19 +186,21 @@ def ps_catalog_pull(ref: str) -> str:
     return _json({"dir": str(d), "urdf": urdf})
 
 
-def ps_catalog_push(ref: str, path: str, private: bool = True) -> str:
+def ps_catalog_push(ref: str, path: str, private: bool = True, over: bool = False, base: str | None = None) -> str:
     from ..push import PushError, push
 
     said: list[str] = []
     try:
         # never a login from here: the code to enter would not reach the person
-        result = push(ref, Path(path).expanduser(), private=private, log=said.append, interactive=False)
+        result = push(ref, Path(path).expanduser(), private=private, log=said.append, interactive=False,
+                      over=over, over_base=base)
     except PushError as e:
         if e.code != "signin":
             raise
         return _json({"error": "signin", "message": "not signed in to PS.com: run `psbx login` in a terminal once, "
                                                     "then ask again"})
-    return _json({"ref": result.ref, "bytes": result.bytes, "companions": result.companions,
+    return _json({"ref": result.ref, "version": result.version, "unchanged": result.unchanged,
+                  "bytes": result.bytes, "companions": result.companions,
                   "private": result.visibility == "private", "visibility": result.visibility,
                   "log": said})
 
@@ -520,7 +522,12 @@ server.tool(description="Download a catalog item (handle/name[:version]) into th
                         "and its URDF file.")(ps_catalog_pull)
 server.tool(description="Upload a machine folder, an object (one mesh and object.json) or a record (.json) to the "
                         "PS.com catalog as handle/name[:version], private unless private is false. A record's "
-                        "machines that the catalog does not have go up with it, privately.")(ps_catalog_push)
+                        "machines that the catalog does not have go up with it, privately. A record version is "
+                        "never written over: give a ref without a version, and a new record is made; when the "
+                        "record is there already, over true saves it over, as the next version (the versions "
+                        "before stay; the same contents as the latest make no version and answer unchanged). "
+                        "base, only with over, is the version the record was made from: when the latest is "
+                        "another one, nothing is saved and the error names the latest.")(ps_catalog_push)
 server.tool(description="Check a machine folder (URDF, meshes, product.json, profile.json) or an object (one mesh "
                         "and object.json) before pushing it to the catalog: ok, and one line per check.")(
     ps_machine_check)

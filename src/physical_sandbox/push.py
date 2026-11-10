@@ -4,7 +4,9 @@ A machine folder (URDF, meshes, ``product.json``, ``profile.json``) or an object
 is checked with ``machine check``, turned into a display bundle, and uploaded with its manifest: POST the
 manifest, PUT every file, POST finish. A record (schemaVersion 3) is PUT as one JSON body; the machines it
 names by a bare local name (``so101``) go up with it, privately, as ``<handle>/<name>:<version>`` when the
-catalog does not have them yet, and the record's ``devices[].product`` is rewritten to those names.
+catalog does not have them yet, and the record's ``devices[].product`` is rewritten to those names. A record
+version is never written over: without a version the record is saved as a new item, or (``over``) as the next
+version of the item that is there; the server numbers it, and the same bytes as the latest make no version.
 
 Signing in uses the headset's device-code flow (``/api/vr/start`` and ``/api/vr/poll``) and keeps the token in
 ``~/.config/physical-sandbox/ps-com-token.json``, the same file ps-com's ``tools/catalog-login.mjs`` keeps.
@@ -44,13 +46,16 @@ class PushResult:
     companions: list[str] = field(default_factory=list)  # machines uploaded along with a record
     visibility: str = "private"  # what the item really is: a new version inherits an existing item's
     companion_visibility: dict = field(default_factory=dict)  # companion ref -> its real visibility
+    version: str = ""  # the version written (for an unchanged record: the latest, which has these bytes)
+    unchanged: bool = False  # a record equal to the latest version: nothing was written
 
 
 class PushError(CatalogError):
     """The server said no: ``code`` is the API's ``error`` (``taken``, ``bad-manifest``, ...), ``status`` the HTTP code."""
 
-    def __init__(self, code: str, status: int = 0, problems=(), note: str = ""):
+    def __init__(self, code: str, status: int = 0, problems=(), note: str = "", latest: str | None = None):
         self.code, self.status, self.problems, self.note = code, status, list(problems), note
+        self.latest = latest  # with ``moved``: the item's latest version
         super().__init__(code + (": " + "; ".join(self.problems) if self.problems else "")
                          + (f" ({note})" if note else ""))
 
@@ -59,7 +64,7 @@ def _noted(e: CatalogError, note: str) -> CatalogError:
     """The same failure with a sentence added on what was left behind."""
     if isinstance(e, PushError):
         both = f"{e.note}; {note}" if e.note else note
-        return PushError(e.code, e.status, e.problems, both)
+        return PushError(e.code, e.status, e.problems, both, e.latest)
     return CatalogError(f"{e} ({note})")
 
 
@@ -84,8 +89,11 @@ def _call(method: str, url: str, *, token: str | None = None, body: bytes | None
             info = json.loads(e.read().decode())
         except Exception:  # noqa: BLE001 - the body is only a hint
             pass
-        code = info.get("error") if isinstance(info, dict) else None
-        raise PushError(str(code or f"HTTP {e.code}"), e.code, (info or {}).get("problems") or ()) from e
+        if not isinstance(info, dict):
+            info = {}
+        latest = info.get("latest")
+        raise PushError(str(info.get("error") or f"HTTP {e.code}"), e.code, info.get("problems") or (),
+                        latest=str(latest) if latest else None) from e
     except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
         raise CatalogError(f"{url}: {getattr(e, 'reason', None) or e}") from e
     try:
@@ -492,7 +500,38 @@ def _companion(base, token, handle, product, folder, *, work: Path, log) -> tupl
     return ref, True, shown
 
 
-def _push_record(base, token, handle, name, version, path: Path, *, private, machine_dir, work, log):
+_TAKEN = "そのバージョンはもうあります。バージョンを変えてください"
+_EXISTS = ("{ref} はもうあります。上書き保存するときは --over を付けてください。"
+           "新しい記録にするときは別の名前にしてください")
+
+
+def _record_url(base, handle, name, version, existing, *, private, over, over_base) -> str:
+    """Where a record goes: exactly ``version``, or the next version of a new item, or over the existing one."""
+    query = {}
+    if version != "latest":
+        root = f"{base}/api/catalog/{handle}/{name}/{version}/record"
+    else:
+        root = f"{base}/api/catalog/{handle}/{name}/record"
+        if existing is None:
+            query["new"] = "1"  # saving over nothing is a first save, and the server refuses it if one appeared
+        elif not over:
+            raise InputError(_EXISTS.format(ref=f"{handle}/{name}"))
+        elif over_base is not None:
+            query["base"] = over_base
+    query["visibility"] = "private" if private else "public"
+    return f"{root}?{urllib.parse.urlencode(query)}"
+
+
+def _moved(handle, name, latest) -> str:
+    shown = f"バージョン {latest}" if latest else "別のバージョン"
+    again = f"--over {latest}" if latest else "--over"
+    return (f"{handle}/{name} はほかの所で保存され、最新は{shown}になっています。何も保存していません。"
+            f"最新を確かめてから上書き保存するときは {again} を付けてください。"
+            f"新しい記録にするときは別の名前にしてください")
+
+
+def _push_record(base, token, handle, name, version, path: Path, url: str, *, machine_dir, work, log):
+    """(bytes, companions, their visibility, the version written, unchanged)."""
     from .motion import load_record
 
     try:
@@ -525,21 +564,35 @@ def _push_record(base, token, handle, name, version, path: Path, *, private, mac
         if isinstance(d, dict) and d.get("product") in names:
             d["product"] = names[d["product"]]
     body = json.dumps(record, ensure_ascii=False).encode()
-    visibility = "private" if private else "public"
-    _call("PUT", f"{base}/api/catalog/{handle}/{name}/{version}/record?visibility={visibility}", token=token,
-          body=body, content_type="application/json")
-    return len(body), companions, seen
+    try:
+        answer = _call("PUT", url, token=token, body=body, content_type="application/json")
+    except PushError as e:
+        if e.code == "taken":
+            note = _TAKEN if version != "latest" else _EXISTS.format(ref=f"{handle}/{name}")
+            raise PushError("taken", e.status, e.problems, note) from e
+        if e.code == "moved":
+            raise PushError("moved", e.status, e.problems, _moved(handle, name, e.latest), e.latest) from e
+        raise
+    answer = answer if isinstance(answer, dict) else {}
+    written = str(answer.get("version") or version)
+    size = answer.get("bytes") if isinstance(answer.get("bytes"), int) else len(body)
+    return size, companions, seen, written, answer.get("unchanged") is True
 
 
 # ---- push ----
 
 def push(ref: str, path: Path, *, private: bool = True, category: str | None = None, tags=(),
          machine_dir: Path | None = None, base: str | None = None, log=print,
-         interactive: bool = True) -> PushResult:
+         interactive: bool = True, over: bool = False, over_base: str | None = None) -> PushResult:
     """Upload a machine folder, an object (mesh + object.json) or a record to ``ref`` (handle/name[:version]).
 
-    Without a version it is ``1``, or one more than the highest number already there. ``interactive=False``
-    (the MCP tool) never starts a login: without a usable kept token it raises PushError("signin").
+    A machine or an object without a version is ``1``, or one more than the highest number already there.
+    A record is never written over: with a version it is exactly that version (``taken`` when it is there);
+    without one it is a new item, and when the item is there only ``over`` saves it, as the next version the
+    server numbers. ``over_base`` (with ``over``) is the version the record was made from: when the item's
+    latest is another one nothing is written (PushError ``moved``, naming the latest). A record equal to the
+    latest version writes nothing (``unchanged``). ``interactive=False`` (the MCP tool) never starts a login:
+    without a usable kept token it raises PushError("signin").
     """
     base = (base or catalog._base()).rstrip("/")
     path = Path(path).expanduser()
@@ -547,25 +600,35 @@ def push(ref: str, path: Path, *, private: bool = True, category: str | None = N
         raise InputError(f"{path}: no such file or folder")
     handle, name, version = catalog.parse_ref(ref)
     kind = _kind_of(path)
+    if over_base is not None and not over:
+        raise InputError("元にしたバージョンは --over と一緒に指定してください")
+    if over and kind != "record":
+        raise InputError("--over は記録（.json）を保存するときだけ使えます")
+    if over and version != "latest":
+        raise InputError(f"--over はバージョンを付けない名前と一緒に使ってください（{ref}）")
+    if over_base is not None and not re.fullmatch(catalog._VERSION, over_base):
+        raise InputError(f"{over_base!r} はバージョンとして使えません")
     if kind != "record":
         _checked(path)  # before signing in: a folder that cannot go up should not ask for a code
     token, mine = _signed_in(base, log, interactive)
     if handle != mine:
         raise InputError(f"you can push only under your handle {mine!r}, not {handle!r}")
     existing = _item(base, token, handle, name)
-    if version == "latest":
+    if kind == "record":
+        url = _record_url(base, handle, name, version, existing, private=private, over=over, over_base=over_base)
+    elif version == "latest":
         version = _next_version(existing)
     shown = _real_visibility(existing, private, f"{handle}/{name}", log)
     tags = list(tags or ())
     with tempfile.TemporaryDirectory(prefix="psbx-push-") as tmp:
         work = Path(tmp)
         if kind == "record":
-            size, companions, seen = _push_record(base, token, handle, name, version, path, private=private,
-                                            machine_dir=Path(machine_dir).expanduser() if machine_dir else None,
-                                            work=work, log=log)
-            return PushResult(f"{handle}/{name}:{version}", size, companions, shown, seen)
+            size, companions, seen, written, unchanged = _push_record(
+                base, token, handle, name, version, path, url, work=work, log=log,
+                machine_dir=Path(machine_dir).expanduser() if machine_dir else None)
+            return PushResult(f"{handle}/{name}:{written}", size, companions, shown, seen, written, unchanged)
         build = _object_upload if kind == "object" else _machine_upload
         upload = build(path, handle, name, version, category=category, tags=tags, work=work, log=log,
                        checked=True)
         _send(base, token, upload, private=private)
-        return PushResult(f"{handle}/{name}:{version}", upload.bytes, [], shown)
+        return PushResult(f"{handle}/{name}:{version}", upload.bytes, [], shown, version=version)

@@ -13,7 +13,7 @@ from physical_sandbox import push as push_mod
 from physical_sandbox.cli import main
 from physical_sandbox.errors import CatalogError, InputError
 from physical_sandbox.motion import motion_from_numpy, save_record
-from physical_sandbox.push import login, push
+from physical_sandbox.push import PushError, login, push
 
 MINI = Path(__file__).parent / "fixtures" / "mini-robot"
 
@@ -103,7 +103,7 @@ def test_the_cli_says_to_change_the_version_on_taken(mini, catalog_server, monke
     monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
     assert main(["push", "ada/mini:1", str(mini)]) == 0
     assert main(["push", "ada/mini:1", str(mini)]) == 1
-    assert "その版はあります。版を変えてください" in capsys.readouterr().err
+    assert "そのバージョンはもうあります。バージョンを変えてください" in capsys.readouterr().err
 
 
 def test_the_cli_pushes_privately_unless_public(mini, catalog_server, monkeypatch):
@@ -401,3 +401,172 @@ def test_the_cli_login_says_the_handle_and_keeps_it(catalog_server, monkeypatch,
     assert main(["login"]) == 0
     assert f"signed in as ada; the token is kept in {push_mod.token_file()}" in capsys.readouterr().out
     assert push_mod.login_status(catalog_server.url) == {"signedIn": True, "handle": "ada"}
+
+
+# ---- a record is saved as new or over, never in place ----
+
+def _catalog_record(path: Path) -> Path:
+    """A record whose only machine is already a catalog name, so nothing goes up with it."""
+    rec = _record(path, ["mini"])
+    data = json.loads(rec.read_text())
+    data["equipment"]["devices"][0]["product"] = "physical-sandbox/so101:1"
+    rec.write_text(json.dumps(data))
+    return rec
+
+
+def _change(rec: Path, title: str) -> None:
+    data = json.loads(rec.read_text())
+    data["note"] = title
+    rec.write_text(json.dumps(data))
+
+
+def record_puts(fake):
+    return [p for m, p in fake.calls if m == "PUT" and "/record" in p]
+
+
+def test_a_new_record_without_a_version_asks_for_a_new_item(tmp_path, catalog_server):
+    rec = _catalog_record(tmp_path / "run.json")
+    result = push("ada/run", rec, base=catalog_server.url, log=quiet)
+    assert record_puts(catalog_server) == ["/api/catalog/ada/run/record?new=1&visibility=private"]
+    assert result.ref == "ada/run:1" and result.version == "1" and result.unchanged is False
+    assert result.bytes == len(catalog_server.items[("ada", "run")]["versions"]["1"]["raw"])
+
+
+def test_a_record_that_is_there_is_not_saved_without_over(tmp_path, catalog_server):
+    machines = tmp_path / "machines"
+    _machine_dir(machines, "mini")
+    rec = _record(tmp_path / "run.json", ["mini"])
+    push("ada/run", rec, machine_dir=machines, base=catalog_server.url, log=quiet)
+    before = list(catalog_server.calls)
+    _change(rec, "second")
+    with pytest.raises(InputError) as e:
+        push("ada/run", rec, machine_dir=machines, base=catalog_server.url, log=quiet)
+    assert str(e.value) == ("ada/run はもうあります。上書き保存するときは --over を付けてください。"
+                            "新しい記録にするときは別の名前にしてください")
+    assert [c for c in catalog_server.calls[len(before):] if c[0] != "GET"] == []  # no machine went up either
+    assert list(catalog_server.items[("ada", "run")]["versions"]) == ["1"]
+
+
+def test_over_saves_the_next_version_and_keeps_the_one_before(tmp_path, catalog_server):
+    rec = _catalog_record(tmp_path / "run.json")
+    push("ada/run", rec, base=catalog_server.url, log=quiet)
+    first = catalog_server.items[("ada", "run")]["versions"]["1"]["raw"]
+    _change(rec, "second")
+    result = push("ada/run", rec, over=True, base=catalog_server.url, log=quiet)
+    assert result.ref == "ada/run:2" and result.version == "2" and result.unchanged is False
+    assert record_puts(catalog_server)[-1] == "/api/catalog/ada/run/record?visibility=private"
+    versions = catalog_server.items[("ada", "run")]["versions"]
+    assert versions["1"]["raw"] == first and versions["2"]["record"]["note"] == "second"
+
+
+def test_over_with_the_same_bytes_makes_no_version(tmp_path, catalog_server):
+    rec = _catalog_record(tmp_path / "run.json")
+    push("ada/run", rec, base=catalog_server.url, log=quiet)
+    result = push("ada/run", rec, over=True, base=catalog_server.url, log=quiet)
+    assert result.unchanged is True and result.version == "1" and result.ref == "ada/run:1"
+    assert list(catalog_server.items[("ada", "run")]["versions"]) == ["1"]
+
+
+def test_over_a_base_that_is_still_the_latest_saves_the_next_version(tmp_path, catalog_server):
+    rec = _catalog_record(tmp_path / "run.json")
+    push("ada/run", rec, base=catalog_server.url, log=quiet)
+    _change(rec, "second")
+    result = push("ada/run", rec, over=True, over_base="1", base=catalog_server.url, log=quiet)
+    assert result.version == "2"
+    assert record_puts(catalog_server)[-1] == "/api/catalog/ada/run/record?base=1&visibility=private"
+
+
+def test_over_a_base_that_moved_is_refused_and_names_the_latest(tmp_path, catalog_server):
+    rec = _catalog_record(tmp_path / "run.json")
+    push("ada/run", rec, base=catalog_server.url, log=quiet)
+    _change(rec, "elsewhere")
+    push("ada/run", rec, over=True, base=catalog_server.url, log=quiet)  # saved over somewhere else: 2
+    _change(rec, "mine")
+    with pytest.raises(PushError) as e:
+        push("ada/run", rec, over=True, over_base="1", base=catalog_server.url, log=quiet)
+    assert e.value.code == "moved" and e.value.status == 409
+    assert "バージョン 2" in e.value.note and "--over 2" in e.value.note
+    assert list(catalog_server.items[("ada", "run")]["versions"]) == ["1", "2"]
+
+
+def test_over_base_without_over_is_refused_before_anything_is_sent(tmp_path, catalog_server):
+    rec = _catalog_record(tmp_path / "run.json")
+    with pytest.raises(InputError, match="--over"):
+        push("ada/run", rec, over_base="1", base=catalog_server.url, log=quiet)
+    assert catalog_server.calls == []
+
+
+def test_over_a_bad_base_is_refused_before_anything_is_sent(tmp_path, catalog_server):
+    rec = _catalog_record(tmp_path / "run.json")
+    with pytest.raises(InputError, match="Bad Base"):
+        push("ada/run", rec, over=True, over_base="Bad Base", base=catalog_server.url, log=quiet)
+    assert catalog_server.calls == []
+
+
+def test_over_with_a_version_or_for_a_machine_is_refused(tmp_path, mini, catalog_server):
+    rec = _catalog_record(tmp_path / "run.json")
+    with pytest.raises(InputError, match="--over"):
+        push("ada/run:3", rec, over=True, base=catalog_server.url, log=quiet)
+    with pytest.raises(InputError, match="--over"):
+        push("ada/mini", mini, over=True, base=catalog_server.url, log=quiet)
+    assert catalog_server.calls == []
+
+
+def test_over_a_record_that_is_not_there_makes_it(tmp_path, catalog_server):
+    rec = _catalog_record(tmp_path / "run.json")
+    result = push("ada/run", rec, over=True, base=catalog_server.url, log=quiet)
+    assert result.version == "1"
+    assert record_puts(catalog_server) == ["/api/catalog/ada/run/record?new=1&visibility=private"]
+
+
+def test_a_record_version_that_is_there_is_never_written_over(tmp_path, catalog_server):
+    rec = _catalog_record(tmp_path / "run.json")
+    push("ada/run:1", rec, base=catalog_server.url, log=quiet)
+    first = catalog_server.items[("ada", "run")]["versions"]["1"]["raw"]
+    _change(rec, "second")
+    with pytest.raises(PushError) as e:
+        push("ada/run:1", rec, base=catalog_server.url, log=quiet)
+    assert e.value.code == "taken" and "そのバージョンはもうあります。バージョンを変えてください" in e.value.note
+    assert catalog_server.items[("ada", "run")]["versions"]["1"]["raw"] == first
+
+
+def test_over_brings_new_machines_along_as_before(tmp_path, catalog_server):
+    machines = tmp_path / "machines"
+    _machine_dir(machines, "mini")
+    rec = _record(tmp_path / "run.json", ["mini"])
+    push("ada/run", rec, machine_dir=machines, base=catalog_server.url, log=quiet)
+    _change(rec, "second")
+    result = push("ada/run", rec, over=True, machine_dir=machines, base=catalog_server.url, log=quiet)
+    assert result.version == "2" and result.companions == []  # the same machine is used again
+    record = catalog_server.items[("ada", "run")]["versions"]["2"]["record"]
+    assert record["equipment"]["devices"][0]["product"] == "ada/mini:1"
+
+
+def test_a_saved_record_can_be_pulled_back(tmp_path, catalog_server):
+    from physical_sandbox import catalog
+
+    rec = _catalog_record(tmp_path / "run.json")
+    push("ada/run", rec, base=catalog_server.url, log=quiet)
+    d = catalog.pull("ada/run:1", base=catalog_server.url, token="tok-1")
+    manifest = json.loads((d / "manifest.json").read_text())
+    assert manifest["kind"] == "record" and [f["path"] for f in manifest["files"]] == ["record.json"]
+    assert (d / "record.json").read_bytes() == catalog_server.items[("ada", "run")]["versions"]["1"]["raw"]
+
+
+def test_a_machine_push_says_its_version(mini, catalog_server):
+    result = push("ada/mini", mini, base=catalog_server.url, log=quiet)
+    assert result.version == "1" and result.unchanged is False
+
+
+def test_the_mcp_tool_saves_a_record_over_a_base(tmp_path, catalog_server, monkeypatch):
+    from physical_sandbox.mcp.server import ps_catalog_push
+
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
+    login(catalog_server.url, log=quiet)
+    rec = _catalog_record(tmp_path / "run.json")
+    assert json.loads(ps_catalog_push("ada/run", str(rec)))["version"] == "1"
+    _change(rec, "second")
+    out = json.loads(ps_catalog_push("ada/run", str(rec), over=True, base="1"))
+    assert out["ref"] == "ada/run:2" and out["version"] == "2" and out["unchanged"] is False
+    assert record_puts(catalog_server)[-1] == "/api/catalog/ada/run/record?base=1&visibility=private"
+    assert json.loads(ps_catalog_push("ada/run", str(rec), over=True))["unchanged"] is True

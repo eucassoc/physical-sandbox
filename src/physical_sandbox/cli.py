@@ -369,16 +369,21 @@ def _cmd_push(args) -> int:
     from .errors import CatalogError
     from .push import push
 
+    over = args.over is not False
     try:
         result = push(args.ref, Path(args.path), private=not args.public, category=args.category, tags=args.tag or [],
-                      machine_dir=Path(args.machine_dir) if args.machine_dir else None, log=print)
+                      machine_dir=Path(args.machine_dir) if args.machine_dir else None, log=print, over=over,
+                      over_base=args.over if isinstance(args.over, str) else None)
     except CatalogError as e:
         if getattr(e, "code", None) == "taken":
-            raise CatalogError("taken: その版はあります。版を変えてください") from e
+            raise CatalogError(f"taken: {e.note or 'そのバージョンはもうあります。バージョンを変えてください'}") from e
         raise
     for ref in result.companions:
         print(f"uploaded {ref} ({result.companion_visibility.get(ref, 'private')})")
-    print(f"uploaded {result.ref} ({result.visibility}, {result.bytes} bytes)")
+    if result.unchanged:
+        print(f"{result.ref} is unchanged: the same as the latest version, so nothing was uploaded")
+    else:
+        print(f"uploaded {result.ref} ({result.visibility}, {result.bytes} bytes)")
     return 0
 
 
@@ -500,7 +505,8 @@ def _parser() -> argparse.ArgumentParser:
 
     pu = sub.add_parser("push", help="upload a machine folder, an object (mesh + object.json) or a record to the "
                                      "catalog as handle/name[:version]")
-    pu.add_argument("ref", help="handle/name[:version]; without a version: 1, or one more than the highest")
+    pu.add_argument("ref", help="handle/name[:version]; without a version: 1, or one more than the highest (a "
+                                "record without a version is a new one, or with --over the next version)")
     pu.add_argument("path", help="the machine folder (or its URDF), the object's folder or mesh, or a record .json")
     pu.add_argument("--public", action="store_true", help="publish it: anyone can see it (default: private, only you)")
     pu.add_argument("--private", action="store_true", help=argparse.SUPPRESS)  # the default; kept as a no-op
@@ -510,6 +516,10 @@ def _parser() -> argparse.ArgumentParser:
     pu.add_argument("--machine-dir", help="for a record: where the machines it names are (DIR/<product>/), when "
                                           "the catalog does not have them (default: "
                                           "~/.cache/physical-sandbox/machines/)")
+    pu.add_argument("--over", nargs="?", const=True, default=False, metavar="BASE",
+                    help="for a record that is there already: save it over, as the next version (the versions "
+                         "before stay). BASE, the version the record was made from, stops the save when someone "
+                         "saved over it meanwhile. Put it after REF and PATH")
     pu.set_defaults(run=_cmd_push)
 
     lg = sub.add_parser("login", help="sign in to PS.com with a code entered at /vr (push does this when needed)")

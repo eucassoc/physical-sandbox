@@ -173,9 +173,9 @@ def load_scene(path, site: Site) -> Scene:
 
     A scene file is treated as untrusted: its records must be plain relative paths that stay inside the
     scene folder. A machine's urdf is looked up in the scene folder first, then as written, and may point
-    outside the folder on purpose (robot folders are shared, e.g. ``../robots/arm.urdf``). The urdf and the
-    meshes it names are read and copied into the cache, so a scene from an untrusted source can make this
-    tool read the files its urdf points at (nothing is sent anywhere).
+    outside the folder on purpose (robot folders are shared, e.g. ``../robots/arm.urdf``). The meshes that urdf
+    names are read only from inside the urdf's own folder (``machine.inside``), so a scene from an untrusted
+    source can make this tool open a urdf file it names, but not read other files through it.
     """
     path = Path(path)
     data = json.loads(path.read_text())

@@ -35,12 +35,13 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from urllib.parse import unquote
 
 import numpy as np
 
 from ._atomic import write_text_atomic
 from .errors import InputError
-from .machine import _find_mesh
+from .machine import _find_mesh, inside
 
 MAGIC = b"RBM1"
 HAS_UV = 1
@@ -117,27 +118,64 @@ def _obj_corner(token: str) -> tuple[int, int, int]:
     return tuple(int(f) - 1 if f else -1 for f in fields)
 
 
-def _obj_texture(obj_path: Path, text: str) -> Path | None:
-    """The image the OBJ's material applies (mtllib -> map_Kd), or None. Names are never guessed."""
+_IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")  # PNG, JPEG: what a material image is drawn from
+
+
+def _obj_texture(obj_path: Path, text: str, root: Path) -> Path | None:
+    """The image the OBJ's material applies (mtllib -> map_Kd), or None. Names are never guessed.
+
+    The library and the image must lie inside ``root`` (OutsideFolder otherwise), and the image must be a PNG or
+    JPEG: it is copied byte for byte into the bundle, and the bundle is what ``psbx push`` uploads."""
     library = next((ln.split(None, 1)[1].strip() for ln in text.splitlines()
                     if ln.startswith("mtllib ") and len(ln.split(None, 1)) == 2), None)
     if library is None or not (obj_path.parent / library).is_file():
         return None
-    mtl = obj_path.parent / library
+    mtl = inside(root, obj_path.parent / library, f"{obj_path.name}: mtllib {library!r}")
     for line in mtl.read_text(errors="replace").splitlines():
         if line.strip().startswith("map_Kd "):
-            image = mtl.parent / line.strip().split(None, 1)[1].strip()
+            ref = line.strip().split(None, 1)[1].strip()
+            image = mtl.parent / ref
             if not image.is_file():
                 raise FileNotFoundError(f"{mtl}: no image for map_Kd, {image}")
+            image = inside(root, image, f"{mtl.name}: map_Kd {ref!r}")
+            with image.open("rb") as f:
+                head = f.read(8)
+            if not head.startswith(_IMAGE_MAGIC):
+                raise InputError(f"{mtl.name}: map_Kd {ref!r} is not a PNG or JPEG")
             return image
     return None
 
 
-def read_obj(path) -> Mesh:
+def _gltf_references_inside(path: Path, root: Path) -> None:
+    """Every buffer and image a glTF or GLB names by ``uri`` (other than ``data:``) lies inside ``root``.
+
+    Checked before the file is loaded: a buffer outside would be read as vertices, and the vertices are bundled
+    and uploaded. A file whose JSON cannot be read is skipped with a warning (it is not loaded at all)."""
+    try:
+        blob = path.read_bytes()
+        if blob[:4] == b"glTF":
+            length, kind = struct.unpack_from("<I4s", blob, 12)
+            if kind != b"JSON":
+                raise ValueError("the first chunk is not JSON")
+            doc = json.loads(blob[20:20 + length])
+        else:
+            doc = json.loads(blob)
+    except (OSError, ValueError, struct.error) as e:
+        raise _Unreadable(f"{path.name}: its glTF JSON could not be read ({e}); this visual is skipped") from None
+    for key in ("buffers", "images"):
+        entries = doc.get(key) if isinstance(doc, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            uri = entry.get("uri") if isinstance(entry, dict) else None
+            if isinstance(uri, str) and not uri.startswith("data:"):
+                inside(root, path.parent / unquote(uri), f"{path.name}: {key[:-1]} {uri!r}")
+
+
+def read_obj(path, root=None) -> Mesh:
     """An OBJ with its UVs and normals, its three index streams collapsed into the one a GPU wants.
 
     Faces with more than three corners are fan-triangulated. A corner without a UV or normal gets (0, 0) or
-    (0, 0, 1) when the file has any.
+    (0, 0, 1) when the file has any. Its material files are read only from inside ``root`` (default: the OBJ's
+    own folder).
     """
     path = Path(path)
     text = path.read_text(errors="replace")
@@ -173,7 +211,7 @@ def read_obj(path) -> Mesh:
     if normals:
         table = np.vstack([np.array(normals, np.float64), [[0.0, 0.0, 1.0]]])
         out_n = table[np.where(uniq[:, 2] >= 0, uniq[:, 2], len(normals))]
-    return Mesh(pos, index.reshape(-1, 3), out_uv, out_n, _obj_texture(path, text))
+    return Mesh(pos, index.reshape(-1, 3), out_uv, out_n, _obj_texture(path, text, Path(root or path.parent)))
 
 
 def _node_transform(node) -> np.ndarray:
@@ -262,20 +300,26 @@ def _trimesh():
     return trimesh
 
 
-def read_mesh(path) -> Mesh:
-    """Any mesh a URDF may point at: STL, OBJ, DAE; GLB, glTF and 3MF when trimesh is installed."""
+def read_mesh(path, root=None) -> Mesh:
+    """Any mesh a URDF may point at: STL, OBJ, DAE; GLB, glTF and 3MF when trimesh is installed.
+
+    The files a mesh names in turn (an OBJ's material and image, a glTF's buffers and images) are read only from
+    inside ``root`` (default: the mesh's own folder)."""
     path = Path(path)
+    root = Path(root or path.parent)
     suffix = path.suffix.lower()
     if suffix == ".stl":
         return Mesh(*read_stl(path))
     if suffix == ".obj":
-        return read_obj(path)
+        return read_obj(path, root)
     if suffix == ".dae":
         return Mesh(*read_dae(path))
     if suffix in (".glb", ".gltf", ".3mf"):
         trimesh = _trimesh()
         if trimesh is None:
             raise _Unreadable(f"{path.name}: {suffix} needs trimesh (pip install trimesh); this visual is skipped")
+        if suffix != ".3mf":  # a 3MF is one zip and names no other file
+            _gltf_references_inside(path, root)
         loaded = trimesh.load(str(path), force="mesh")
         return Mesh(np.asarray(loaded.vertices, np.float64), np.asarray(loaded.faces, np.int64))
     raise _Unreadable(f"{path.name}: the mesh format {suffix!r} is not read; this visual is skipped")
@@ -563,7 +607,7 @@ def make_bundle(urdf_path: Path, *, product: dict, profile: dict | None, name: s
             key = (source, scale)
             if key not in names:
                 try:
-                    mesh = read_mesh(source)
+                    mesh = read_mesh(source, urdf_path.parent)
                 except _Unreadable as e:
                     warnings.append(str(e))
                     names[key] = ""

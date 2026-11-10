@@ -141,6 +141,7 @@ def check(path: Path) -> CheckResult:
 
 def _check_urdf(urdf: Path, result: CheckResult) -> None:
     from .bundle import _trimesh
+    from .errors import OutsideFolder
     from .machine import _find_mesh, load_machine
 
     result.add(True, f"URDF: {urdf.name}")
@@ -154,6 +155,10 @@ def _check_urdf(urdf: Path, result: CheckResult) -> None:
     for ref in refs:
         try:
             found = _find_mesh(urdf.parent, ref)
+        except OutsideFolder as e:
+            missing += 1
+            result.add(False, str(e))
+            continue
         except FileNotFoundError:
             missing += 1
             result.add(False, f"mesh {ref!r} not found next to {urdf.name} (nor under meshes/)")

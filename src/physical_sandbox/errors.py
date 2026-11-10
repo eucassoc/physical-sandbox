@@ -19,3 +19,10 @@ class InputIndexError(InputError, IndexError):
 
 class CatalogError(Exception):
     """The catalog server or the network failed (not a wrong input): ``psbx`` exits 1."""
+
+
+class OutsideFolder(InputError):
+    """A file a machine or object names (a mesh, a material, an image, a buffer) lies outside its folder.
+
+    A folder from someone else may name any path on this computer; only files inside it are read, so that nothing
+    the person never put there is cached, bundled or uploaded."""

@@ -25,8 +25,24 @@ def _cache_root() -> Path:
     return Path(os.environ.get("PS_CACHE_DIR", "~/.cache/physical-sandbox")).expanduser()
 
 
+def inside(root: Path, path: Path, what: str) -> Path:
+    """``path`` with its links resolved, when it lies inside ``root``; else OutsideFolder naming ``what``.
+
+    A machine folder may come from someone else and name any path on this computer (an absolute path, ``..``, a
+    link that leads out); only what is inside the folder is read, cached, bundled or uploaded."""
+    from .errors import OutsideFolder
+
+    real = Path(path).resolve()
+    if not real.is_relative_to(Path(root).resolve()):
+        raise OutsideFolder(f"{what} leads outside {root} (to {real}); only files inside the machine's folder are "
+                            "read: copy the file into the folder and name it from there")
+    return real
+
+
 def _find_mesh(urdf_dir: Path, name: str) -> Path:
-    """Resolve a URDF mesh reference: as written, with .obj for .stl, then under ``meshes/``."""
+    """Resolve a URDF mesh reference: as written, with .obj for .stl, then under ``meshes/``.
+
+    The file found must lie inside ``urdf_dir`` (OutsideFolder otherwise, even when it exists)."""
     ref = name
     if "://" in name:  # package://pkg/path -> path (the package folder is not known here)
         ref = name.split("://", 1)[1]
@@ -44,7 +60,7 @@ def _find_mesh(urdf_dir: Path, name: str) -> Path:
             candidates.append(urdf_dir / "meshes" / v)
     for c in candidates:
         if c.is_file():
-            return c
+            return inside(urdf_dir, c, f"mesh {name!r}")
     raise FileNotFoundError(f"mesh {name!r} not found next to {urdf_dir} (tried {[str(c) for c in candidates]})")
 
 

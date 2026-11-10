@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import threading
+import urllib.error
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,7 @@ from .site import Site, load_site
 from .sources import open_source
 
 STAGE_FORMAT = "physical-sandbox.stage/1"
+PS_PREFIX = "ps:"  # a motion spec naming a PS.com record: ps:<handle>/<name>[:<version>][#<label>]
 _UNREADABLE = (OSError, ValueError, KeyError, TypeError, AttributeError)  # a file that is not what it should be
 
 
@@ -208,6 +210,7 @@ class Stage:
             "floor": {"corners": corners, "edgesM": edges, "measured": measured,
                       "decided": floor is not None and site.confirmed_by_person},
             "machine": self._placed_machine(), "motionA": self._kept("a"), "motionB": self._kept("b"), "gripThreshold": self._kept_grip(),
+            "aOpened": self._kept_opened(),
             "login": push.login_status(catalog._base()),  # the token file only: no request
             "workDir": str(self.work),
         }
@@ -255,8 +258,9 @@ class Stage:
 
     # ---- the machine step ----
 
-    def _update_stage_json(self, **keys) -> None:
-        """Add ``keys`` to ``stage.json``, keeping every other key it has (it is made when it is not there)."""
+    def _update_stage_json(self, _drop=(), **keys) -> None:
+        """Add ``keys`` to ``stage.json`` and remove the keys named in ``_drop``, keeping every other key it has
+        (it is made when it is not there)."""
         with self._stage_lock:
             try:
                 d = json.loads(self.stage_path.read_text())
@@ -265,6 +269,8 @@ class Stage:
             if not isinstance(d, dict):
                 d = {"format": STAGE_FORMAT, "picture": str(self.picture)}
             d.update(keys)
+            for key in _drop:
+                d.pop(key, None)
             self.work.mkdir(parents=True, exist_ok=True)
             fit_screen.write_atomic(self.stage_path, json.dumps(d, indent=2).encode())
 
@@ -276,6 +282,24 @@ class Stage:
             return None
         value = d.get(key) if isinstance(d, dict) else None
         return value if isinstance(value, str) and value else None
+
+    def _kept_opened(self) -> dict | None:
+        """``aOpened`` of ``stage.json`` (what slot A opened from PS.com) while slot A is a ``ps:`` spec, else None."""
+        a = self._kept("a")
+        if a is None or not a.startswith(PS_PREFIX):
+            return None
+        try:
+            opened = json.loads(self.stage_path.read_text()).get("aOpened")
+        except (OSError, ValueError, AttributeError):
+            return None
+        return opened if isinstance(opened, dict) else None
+
+    def _a_keys(self, spec: str, opened: dict | None) -> dict:
+        """The ``stage.json`` change for slot A holding ``spec``: ``aOpened`` is written with a ``ps:`` spec and
+        removed otherwise."""
+        if opened is None:
+            return {"a": spec, "_drop": ("aOpened",)}
+        return {"a": spec, "aOpened": opened}
 
     def _kept_grip(self) -> float | None:
         """The grip threshold ``stage.json`` keeps (a finite number), or None for the automatic one."""
@@ -452,18 +476,111 @@ class Stage:
                 continue
             lerobot.append({"dir": str(folder), "name": _dataset_name(folder),
                             "episodes": total if isinstance(total, int) and not isinstance(total, bool) else None})
-        return {"records": records, "lerobot": lerobot}
+        return {"records": records, "lerobot": lerobot, "catalog": self._catalog_records()}
 
-    def _load_motion(self, spec: str):
-        """``(scene, motion, notes)`` for a motion spec (a record file with ``#label``, or ``lerobot:<dir>#<n>``) on
-        the one machine the scene places. A bad spec raises ``InputError`` (the page shows it)."""
+    def _catalog_records(self) -> list[dict]:
+        """The signed-in person's records on PS.com (``[{spec, label, own}]``, ``spec`` at the latest version).
+        Signed out, offline or refused: none, and nothing to show (the page lists the rest as usual)."""
+        base = catalog._base()
+        token, handle = push.kept_token(base), push.login_status(base)["handle"]
+        if not token or not handle:
+            return []
+        try:
+            items = catalog.search(kind="record", token=token)
+        except (CatalogError, InputError):
+            return []
+        out = []
+        for item in items:
+            ref = f"{item.get('handle')}/{item.get('name')}:{item.get('latest_version')}"
+            if item.get("handle") != handle or item.get("kind") != "record":
+                continue
+            try:
+                catalog.parse_ref(ref)
+            except InputError:  # no finished version, or names the server should not have given
+                continue
+            display = item.get("display") if isinstance(item.get("display"), dict) else {}
+            title = display.get("ja") or display.get("en")
+            out.append({"spec": PS_PREFIX + ref, "label": f"{title}（{ref}）" if title else ref, "own": True})
+        return out
+
+    def _catalog_record(self, spec: str, ask_latest: bool) -> tuple[Path, str | None, dict]:
+        """A ``ps:<handle>/<name>[:<version>][#<label>]`` spec as ``(record.json in the catalog cache, label,
+        opened)``; ``opened`` is ``{spec, ref, version, latest, own}`` with ``spec`` at the version read (a spec
+        without one is the latest). ``ask_latest`` reads the item's latest version from PS.com (offline: the version
+        read); otherwise ``latest`` is the version read. Errors are in the page's words."""
+        body, sep, label = spec[len(PS_PREFIX):].partition("#")
+        try:
+            handle, name, version = catalog.parse_ref(body.strip())
+        except InputError:
+            raise ValueError("PS.com の記録は handle/name か handle/name:version で指定してください") from None
+        base = catalog._base()
+        token, login = push.kept_token(base), push.login_status(base)
+
+        def refused(e: CatalogError, what: str) -> ValueError:
+            if isinstance(e.__cause__, urllib.error.HTTPError) and e.__cause__.code == 404:
+                hint = "" if login["signedIn"] else \
+                    "（非公開の記録は、端末で psbx login を実行してサインインしてから読み込んでください）"
+                return ValueError(f"PS.com に記録 {what} が見つかりません{hint}")
+            if isinstance(e, catalog._Offline):
+                return ValueError(f"PS.com に接続できず、記録 {what} を取得できませんでした（{e}）")
+            return ValueError(f"PS.com から記録 {what} を取得できませんでした（{e}）")
+
+        def not_a_record() -> ValueError:
+            return ValueError(f"{handle}/{name} は記録ではありません")
+
+        latest = None
+        if ask_latest and version != "latest":
+            try:
+                item = catalog._get_json(f"{base}/api/catalog/{handle}/{name}", token)["item"]
+            except catalog._Offline:
+                item = None  # the cache may still hold the version asked for
+            except CatalogError as e:
+                raise refused(e, body.strip()) from None
+            except (KeyError, TypeError):
+                raise ValueError(f"PS.com から記録 {body.strip()} を取得できませんでした（答えの形が違います）") from None
+            if isinstance(item, dict):
+                if item.get("kind") != "record":
+                    raise not_a_record()
+                latest = item.get("latest_version")
+                latest = latest if isinstance(latest, str) and latest else None
+        try:  # without a version, pull asks PS.com for the latest (offline: the one it read last)
+            folder = catalog.pull(f"{handle}/{name}" + ("" if version == "latest" else f":{version}"), token=token)
+        except CatalogError as e:
+            raise refused(e, body.strip()) from None
+        version = folder.name
+        try:
+            kind = json.loads((folder / "manifest.json").read_text()).get("kind")
+        except (OSError, ValueError, AttributeError):
+            kind = None
+        path = (folder / "record.json").resolve()
+        try:  # a ps: spec opens only a file of the catalog cache
+            path.relative_to((catalog.cache_root() / "catalog").resolve())
+        except ValueError:
+            raise ValueError(f"{handle}/{name}:{version} は記録ではありません") from None
+        if kind != "record" or not path.is_file():
+            raise not_a_record()
+        ref = f"{handle}/{name}"
+        opened = {"spec": f"{PS_PREFIX}{ref}:{version}" + (f"#{label}" if sep else ""), "ref": ref,
+                  "version": version, "latest": latest or version,
+                  "own": bool(login["signedIn"]) and login["handle"] == handle}
+        return path, (label if sep else None), opened
+
+    def _load_motion(self, spec: str, ask_latest: bool = False):
+        """``(scene, motion, notes, opened)`` for a motion spec (a record file with ``#label``, ``lerobot:<dir>#<n>``
+        or ``ps:<handle>/<name>[:<version>]``) on the one machine the scene places. ``opened`` is None except for a
+        ``ps:`` spec (see ``_catalog_record``). A bad spec raises ``InputError`` (the page shows it)."""
         from .cli import _check_motion, _load_motion, _split_label
 
         site = self._decided_site()
         if self._placed_machine() is None:
             raise ValueError("ロボットを置いてから動きを読み込んでください")
         scene = load_scene(self.scene_path, site)
-        if not spec.startswith("lerobot:"):
+        opened = stem = None
+        if spec.startswith(PS_PREFIX):
+            path, label, opened = self._catalog_record(spec, ask_latest)
+            spec = str(path) + (f"#{label}" if label is not None else "")
+            stem = f"{opened['ref'].split('/', 1)[1]}:{opened['version']}"
+        elif not spec.startswith("lerobot:"):
             path, label = _split_label(spec)
             if not Path(path).expanduser().is_absolute() and (self.work / path).is_file():
                 spec = str(self.work / path) + (f"#{label}" if label is not None else "")
@@ -477,10 +594,12 @@ class Stage:
         else:
             # A record file's motion is named by the file (two records of one robot are both "SO-101" inside):
             # ``<stem>``, or ``<stem>-<label>`` when the file holds several motions.
+            # A PS.com record is named by its name and version (its file is always record.json).
             path = Path(_split_label(spec)[0]).expanduser()
             several = len(load_record(path)) > 1
             own = motion.label or motion.machine
-            motion = dataclasses.replace(motion, label=f"{_record_stem(path)}-{own}" if several else _record_stem(path))
+            stem = stem or _record_stem(path)
+            motion = dataclasses.replace(motion, label=f"{stem}-{own}" if several else stem)
         placed = scene.machines.get(motion.machine)
         try:
             _check_motion(scene, motion)
@@ -489,7 +608,7 @@ class Stage:
                 raise
             raise ValueError(f"記録の関節がロボットと合いません（記録: {', '.join(motion.joint_names)} ／ "
                              f"ロボット: {', '.join(placed.machine.joint_names)}）") from None
-        return scene, motion, notes
+        return scene, motion, notes, opened
 
     @staticmethod
     def _check_dataset_joints(spec: str, scene) -> None:
@@ -517,12 +636,18 @@ class Stage:
         if not isinstance(spec, str) or not spec.strip():
             raise ValueError("spec must be a record file or lerobot:<dir>#<episode>")
         spec = spec.strip()
-        scene, motion, notes = self._load_motion(spec)
+        scene, motion, notes, opened = self._load_motion(spec, ask_latest=slot == "a")
+        if opened is not None:
+            spec = opened.pop("spec")  # with the version read: a later start opens the same bytes
         with open_source(self.picture) as source:
             out = screens.screen_data(scene.site, scene, self.camera, [motion], source)
         out["note"] = notes[0] if notes else None
         out["spec"] = spec
-        self._update_stage_json(**{slot: spec})
+        if slot == "a":
+            out["aOpened"] = opened
+            self._update_stage_json(**self._a_keys(spec, opened))
+        else:
+            self._update_stage_json(b=spec)
         return out
 
     def _grip(self, args: dict) -> float | None:
@@ -531,9 +656,10 @@ class Stage:
             return None
         return _number(args, "gripThreshold")
 
-    def _two_motions(self, args: dict):
-        """``(scene, a, b, notes)`` for the compare calls' ``a`` and ``b`` specs: both load on the placed machine and
-        fit each other (an ``InputError`` or ``ValueError`` says why not)."""
+    def _two_motions(self, args: dict, ask_latest: bool = False):
+        """``(scene, a, b, specs, notes, opened_a)`` for the compare calls' ``a`` and ``b`` specs: both load on the
+        placed machine and fit each other (an ``InputError`` or ``ValueError`` says why not). A ``ps:`` spec comes
+        back with the version read; ``opened_a`` is what A opened from PS.com (None for another spec)."""
         from .cli import _check_motions
 
         specs = []
@@ -542,19 +668,22 @@ class Stage:
             if not isinstance(spec, str) or not spec.strip():
                 raise ValueError(f"{key} must be a record file or lerobot:<dir>#<episode>")
             specs.append(spec.strip())
-        scene, a, notes_a = self._load_motion(specs[0])
-        _, b, notes_b = self._load_motion(specs[1])
+        scene, a, notes_a, opened_a = self._load_motion(specs[0], ask_latest=ask_latest)
+        _, b, notes_b, opened_b = self._load_motion(specs[1])
         _check_motions(scene, a, b)
-        return scene, a, b, specs, notes_a + notes_b
+        for i, opened in enumerate((opened_a, opened_b)):
+            if opened is not None:
+                specs[i] = opened.pop("spec")
+        return scene, a, b, specs, notes_a + notes_b, opened_a
 
     def _compare(self, args: dict) -> dict:
         """Two motions side by side on the placed machine: the compare screen's data plus the read-over notes."""
         grip = self._grip(args)
-        scene, a, b, specs, notes = self._two_motions(args)
+        scene, a, b, specs, notes, opened_a = self._two_motions(args, ask_latest=True)
         with open_source(self.picture) as source:
             out = screens.screen_data(scene.site, scene, self.camera, [a, b], source, grip_threshold=grip)
         out["notes"] = notes
-        self._update_stage_json(a=specs[0], b=specs[1], gripThreshold=grip)
+        self._update_stage_json(**self._a_keys(specs[0], opened_a), b=specs[1], gripThreshold=grip)
         return out
 
     def _export(self, args: dict) -> dict:
@@ -567,7 +696,7 @@ class Stage:
             spec = args.get("spec")
             if not isinstance(spec, str) or not spec.strip():
                 raise ValueError("spec must be a record file or lerobot:<dir>#<episode>")
-            scene, motion, _ = self._load_motion(spec.strip())
+            scene, motion, _, _ = self._load_motion(spec.strip())
             out = self.work / f"replay-{_safe_name(motion.label)}.mp4"
 
             def produce(progress) -> list[Path]:
@@ -576,7 +705,7 @@ class Stage:
                 return [out]
         else:
             grip = self._grip(args)
-            scene, a, b, _, _ = self._two_motions(args)
+            scene, a, b, _, _, _ = self._two_motions(args)
             site = self._decided_site()
             folder = self.work / "compare" / f"{_safe_name(a.label)}-vs-{_safe_name(b.label)}"
 

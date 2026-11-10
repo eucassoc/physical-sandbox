@@ -105,7 +105,7 @@
       <div class="bar motionbar">
         <select id="motionPick" title="読み込む動き"></select>
         <label id="episodeLabel" hidden>エピソード <input type="number" id="episode" min="0" step="1" value="0" /></label>
-        <input type="text" id="motionSpec" placeholder="記録ファイルのパス、または lerobot:フォルダ#エピソード番号" />
+        <input type="text" id="motionSpec" placeholder="記録ファイルのパス、PS.com の記録（handle/name:バージョン）、または lerobot:フォルダ#エピソード番号" />
         <button class="chip" id="motionOpen">読み込む</button>
       </div>
       <p class="hint" id="motionEmpty"></p>
@@ -720,7 +720,7 @@ const tPlay = document.getElementById('tplay');
 const tClock = document.getElementById('tclock');
 const exportBtn = document.getElementById('exportBtn');
 
-let motionList = { records: [], lerobot: [] };   // what ps_motions_list answered
+let motionList = { records: [], lerobot: [], catalog: [] };   // what ps_motions_list answered
 let motionStarted = false;
 let latestSpec = null;   // the spec of the newest open, loaded or still loading
 let tdata = null;        // what ps_motion_open answered, with the data parts joined in once they arrive
@@ -757,12 +757,13 @@ async function openMotion(spec, { keep = false } = {}) {
   try {
     const out = await call('ps_motion_open', { spec, slot: 'a' });
     if (mine !== tgen) return;
+    latestSpec = out.spec;   // a PS.com record comes back with the version read
     if (!await loadScreenData(out, tGl, [MOTION_COLOR], tHeld, () => mine === tgen)) return;
     tdata = out;
     tready = true;
     tBar.unlock(out);
     updateExportButtons();
-    motionSpecEl.value = spec;
+    motionSpecEl.value = out.spec;
     showCompareA(`A: ${out.records[0].label}`);
     if (!bSpec) defaultBFrom(spec);
     tBar.set(keep ? tBar.frame : 0);
@@ -786,8 +787,29 @@ function fillMotionPick() {
     motionList.records.forEach((r, i) => add(`r:${i}`, `${r.label}（記録）`));
     motionList.lerobot.forEach((d, i) => add(`d:${i}`, `${d.name}（LeRobot）`));
   }
+  // A only: the signed-in person's records on PS.com (signing in stays in the terminal)
+  const group = document.createElement('optgroup');
+  group.label = 'PS.com の記録';
+  (motionList.catalog ?? []).forEach((r, i) => {
+    const o = document.createElement('option');
+    o.value = `c:${i}`;
+    o.textContent = r.label;
+    group.append(o);
+  });
+  if (!group.children.length) {
+    const o = document.createElement('option');
+    o.disabled = true;
+    o.textContent = state?.login?.signedIn ? 'PS.com に記録がないか、接続できません'
+      : '端末で psbx login を実行してサインインすると表示します';
+    group.append(o);
+  }
+  motionPick.append(group);
   motionEmpty.textContent = motionList.lerobot.length ? '' : MOTION_EMPTY;
 }
+
+// A typed PS.com record (handle/name or handle/name:version) is opened as ps:handle/name[:version]
+const PS_REF = /^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*(:[a-z0-9][a-z0-9.-]*)?(#.*)?$/;
+const typedSpec = (text) => (PS_REF.test(text) ? 'ps:' + text : text);
 
 async function listMotions() {
   motionList = await call('ps_motions_list', {});
@@ -799,6 +821,7 @@ function openPicked() {
   episodeLabel.hidden = !v.startsWith('d:');
   if (v === '') return;
   if (v.startsWith('r:')) { openMotion(motionList.records[Number(v.slice(2))].spec); return; }
+  if (v.startsWith('c:')) { openMotion(motionList.catalog[Number(v.slice(2))].spec); return; }
   const d = motionList.lerobot[Number(v.slice(2))];
   if (d.episodes) episodeEl.max = String(d.episodes - 1);
   else episodeEl.removeAttribute('max');
@@ -810,8 +833,8 @@ motionPick.addEventListener('change', openPicked);
 episodeEl.addEventListener('change', openPicked);
 document.getElementById('motionOpen').addEventListener('click', () => {
   const spec = motionSpecEl.value.trim();
-  if (!spec) { say('記録ファイルのパスを入力してください', true); return; }
-  openMotion(spec);
+  if (!spec) { say('記録ファイルのパス、または PS.com の記録（handle/name）を入力してください', true); return; }
+  openMotion(typedSpec(spec));
 });
 motionSpecEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('motionOpen').click(); });
 

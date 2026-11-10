@@ -134,5 +134,5 @@ def compare(folder, a: str, b: str, *, grip_threshold: float | None = None, step
     if not folder.is_dir():
         raise InputError(f"{str(folder)!r}: no such work folder")
     stage = Stage(work=folder)
-    scene, ma, mb, _, notes = stage._two_motions({"a": a, "b": b})
+    scene, ma, mb, _, notes, _ = stage._two_motions({"a": a, "b": b})
     return Gaps(_compare(scene, ma, mb, step_s=step_s, grip_threshold=grip_threshold), stage._decided_site(), notes)

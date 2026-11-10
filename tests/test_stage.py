@@ -539,6 +539,139 @@ def test_motion_open_refuses_a_dataset_of_another_robot_in_the_pages_words(place
     assert "b" not in json.loads((tmp_path / "w" / "stage.json").read_text())
 
 
+# ---- PS.com records in the motion slot ----
+
+def _seed_record(fake, tmp_path, handle, name, version, frames, visibility):
+    """A record of ``frames`` frames for machine ``so101`` (not the placed ``mini``), stored in the fake catalog."""
+    path = tmp_path / f"{handle}-{name}-{version}.record.json"
+    q = np.linspace(0, 1, frames).reshape(-1, 1)
+    save_record([motion_from_numpy(q, fps=10, joint_names=["turn"], machine="so101", label=name)], "site", path)
+    fake.put_record(handle, name, version, path.read_bytes(), visibility)
+
+
+def _seconds(out):
+    """How long the opened motion lasts: which version was read (the seeded ones differ in length)."""
+    return out["figures"]["duration_s"]["a"]
+
+
+@pytest.fixture
+def ps_com(placed, catalog_server, monkeypatch, tmp_path):
+    """Ada's two records (dance in versions 1 and 2, wave) and bob's public walk; signed in as ada."""
+    monkeypatch.setenv("PS_CATALOG_URL", catalog_server.url)
+    _seed_record(catalog_server, tmp_path, "ada", "dance", "1", 6, "private")
+    _seed_record(catalog_server, tmp_path, "ada", "dance", "2", 8, "private")
+    _seed_record(catalog_server, tmp_path, "ada", "wave", "1", 5, "public")
+    _seed_record(catalog_server, tmp_path, "bob", "walk", "1", 7, "public")
+    push._keep(catalog_server.url, "tok-1", 3600, handle="ada")
+    return catalog_server
+
+
+def test_motions_list_carries_the_signed_in_persons_ps_com_records(ps_com, placed):
+    out = call(placed, "ps_motions_list", {})
+    assert sorted(out["catalog"], key=lambda r: r["spec"]) == [
+        {"spec": "ps:ada/dance:2", "label": "ada/dance:2", "own": True},
+        {"spec": "ps:ada/wave:1", "label": "ada/wave:1", "own": True}]
+    assert ("GET", "/api/catalog/search?kind=record") in ps_com.calls
+    assert ps_com.headers[-1]["Authorization"] == "Bearer tok-1"
+
+
+def test_motions_list_has_no_ps_com_records_signed_out_or_offline(ps_com, placed, monkeypatch):
+    push._forget(ps_com.url)
+    before = len(ps_com.calls)
+    out = call(placed, "ps_motions_list", {})
+    assert out["catalog"] == [] and "error" not in out and len(ps_com.calls) == before  # no request at all
+    monkeypatch.setenv("PS_CATALOG_URL", "http://127.0.0.1:9")
+    push._keep("http://127.0.0.1:9", "tok-1", 3600, handle="ada")
+    out = call(placed, "ps_motions_list", {})
+    assert out["catalog"] == [] and "error" not in out
+
+
+def test_motion_open_reads_a_ps_com_record_into_a_and_keeps_what_was_opened(ps_com, placed, tmp_path):
+    out = call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    assert _seconds(out) == pytest.approx(0.7) and out["spec"] == "ps:ada/dance:2"
+    assert out["records"][0]["label"] == "dance:2"
+    assert "so101" in out["note"] and "mini" in out["note"]  # one device read onto the placed machine
+    opened = {"ref": "ada/dance", "version": "2", "latest": "2", "own": True}
+    assert out["aOpened"] == opened
+    kept = json.loads((tmp_path / "w" / "stage.json").read_text())
+    assert kept["a"] == "ps:ada/dance:2" and kept["aOpened"] == opened
+    first = json.loads(placed.first())
+    assert first["motionA"] == "ps:ada/dance:2" and first["aOpened"] == opened
+    assert (tmp_path / "cache" / "catalog" / "ada" / "dance" / "2" / "record.json").is_file()
+
+
+def test_an_older_version_says_the_latest_and_another_persons_record_is_not_own(ps_com, placed):
+    out = call(placed, "ps_motion_open", {"spec": "ps:ada/dance:1", "slot": "a"})
+    assert _seconds(out) == pytest.approx(0.5)
+    assert out["aOpened"] == {"ref": "ada/dance", "version": "1", "latest": "2", "own": True}
+    out = call(placed, "ps_motion_open", {"spec": "ps:bob/walk:1", "slot": "a"})
+    assert _seconds(out) == pytest.approx(0.6)
+    assert out["aOpened"] == {"ref": "bob/walk", "version": "1", "latest": "1", "own": False}
+
+
+def test_a_ps_com_spec_without_a_version_is_kept_with_the_latest(ps_com, placed, tmp_path):
+    out = call(placed, "ps_motion_open", {"spec": "ps:ada/dance", "slot": "a"})
+    assert _seconds(out) == pytest.approx(0.7) and out["spec"] == "ps:ada/dance:2" and out["aOpened"]["version"] == "2"
+    assert json.loads((tmp_path / "w" / "stage.json").read_text())["a"] == "ps:ada/dance:2"
+
+
+def test_signed_out_a_public_record_opens_but_is_not_own(ps_com, placed):
+    push._forget(ps_com.url)
+    out = call(placed, "ps_motion_open", {"spec": "ps:ada/wave:1", "slot": "a"})
+    assert out["aOpened"] == {"ref": "ada/wave", "version": "1", "latest": "1", "own": False}
+
+
+def test_opening_a_file_into_a_drops_what_was_opened_from_ps_com(ps_com, placed, tmp_path):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    spec = str(_record(tmp_path / "w" / "demo.record.json"))
+    out = call(placed, "ps_motion_open", {"spec": spec, "slot": "a"})
+    assert out["aOpened"] is None
+    assert "aOpened" not in json.loads((tmp_path / "w" / "stage.json").read_text())
+    assert json.loads(placed.first())["aOpened"] is None
+
+
+def test_b_never_writes_what_a_opened(ps_com, placed, tmp_path):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    spec = str(_record(tmp_path / "w" / "demo.record.json"))
+    call(placed, "ps_motion_open", {"spec": spec, "slot": "b"})
+    assert json.loads((tmp_path / "w" / "stage.json").read_text())["aOpened"]["ref"] == "ada/dance"
+
+
+def test_a_ps_com_record_in_a_compares_with_a_file_and_keeps_what_was_opened(ps_com, placed, tmp_path):
+    spec = str(_record(tmp_path / "w" / "demo.record.json", machine="so101"))
+    out = call(placed, "ps_compare", {"a": "ps:ada/dance:1", "b": spec})
+    assert "error" not in out and out["records"][0]["label"] == "dance:1"
+    kept = json.loads((tmp_path / "w" / "stage.json").read_text())
+    assert kept["a"] == "ps:ada/dance:1" and kept["aOpened"]["version"] == "1"
+    call(placed, "ps_compare", {"a": spec, "b": "ps:ada/dance:1"})
+    assert "aOpened" not in json.loads((tmp_path / "w" / "stage.json").read_text())
+
+
+def test_a_missing_or_bad_ps_com_record_is_an_error_in_the_pages_words(ps_com, placed, tmp_path):
+    out = call(placed, "ps_motion_open", {"spec": "ps:ada/nothing:1", "slot": "a"})
+    assert "PS.com に記録 ada/nothing:1 が見つかりません" in out["error"]
+    assert "見つかりません" in call(placed, "ps_motion_open", {"spec": "ps:ada/dance:9", "slot": "a"})["error"]
+    assert "handle/name" in call(placed, "ps_motion_open", {"spec": "ps:Not A Ref", "slot": "a"})["error"]
+    push._forget(ps_com.url)  # another person's private record is not found, with the hint to sign in
+    out = call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    assert "見つかりません" in out["error"] and "psbx login" in out["error"]
+    assert "a" not in json.loads((tmp_path / "w" / "stage.json").read_text())
+
+
+def test_a_ps_com_item_that_is_not_a_record_is_refused(ps_com, placed):
+    out = call(placed, "ps_motion_open", {"spec": "ps:t/mini:1", "slot": "a"})
+    assert "記録ではありません" in out["error"]
+
+
+def test_a_cached_ps_com_record_opens_offline_with_its_own_version_as_the_latest(ps_com, placed, monkeypatch):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:1", "slot": "a"})
+    monkeypatch.setenv("PS_CATALOG_URL", "http://127.0.0.1:9")
+    push._keep("http://127.0.0.1:9", "tok-1", 3600, handle="ada")
+    out = call(placed, "ps_motion_open", {"spec": "ps:ada/dance:1", "slot": "a"})
+    assert _seconds(out) == pytest.approx(0.5)
+    assert out["aOpened"] == {"ref": "ada/dance", "version": "1", "latest": "1", "own": True}
+
+
 def _export(server, spec):
     job = call(server, "ps_export", {"what": "replay", "spec": spec})["job"]
     st = {}
@@ -772,3 +905,4 @@ def test_the_stage_html_has_the_motion_controls(served):
         assert f'id="{ident}"' in html
     for name in ("ps_motions_list", "ps_motion_open", "ps_compare_part", "ps_export", "ps_export_status"):
         assert name in html
+    assert "PS.com の記録" in html and "'ps:'" in html  # the catalog group, and a typed handle/name is prefixed

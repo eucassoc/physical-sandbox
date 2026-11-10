@@ -52,7 +52,9 @@ class FakeCatalog:
     follow PS.com: a version is never written over (``PUT .../{v}/record`` on a stored one is 409 ``taken``);
     ``PUT .../{name}/record`` writes the next version, takes ``base`` (409 ``moved`` when the latest is another)
     and ``new=1`` (409 ``taken`` when the item exists), and answers ``unchanged`` without writing when the bytes
-    equal the latest version's. Every request is logged in ``calls`` as (method, path with query).
+    equal the latest version's. Search filters by ``kind`` and lists a private item only to its signed-in owner;
+    reading another person's private item answers 404, as PS.com does. Every request is logged in ``calls`` as
+    (method, path with query).
     """
 
     def __init__(self, bad=False):
@@ -88,14 +90,14 @@ class FakeCatalog:
         item = {"id": "i1", "handle": "t", "name": "mini", "kind": "machine", "category": "arm",
                 "visibility": "public", "display": {"ja": "ミニ", "en": "Mini arm"}, "tags": ["arm"],
                 "license": "Apache-2.0", "maker": None, "latest_version": self.latest, "updated_at": "2026-11-01"}
-        path = path.split("?")[0]
+        path, _, query = path.partition("?")
         parts = path.split("/")
         if path == "/api/handle":
             return self.need_auth() or self.reply(200, {"handle": self.handle})
         if len(parts) >= 5 and parts[:3] == ["", "api", "catalog"] and (parts[3], parts[4]) in self.items:
             return self.stored_get(parts[3], parts[4], parts[5:])
         if path == "/api/catalog/search":
-            return 200, "application/json", json.dumps({"items": [item]}).encode()
+            return self.search(item, query)
         if path == "/api/catalog/t/mini":
             body = {"item": {**item, "description": "", "source_url": None},
                     "versions": [{"version": "1", "bytes": 10, "finished_at": "2026-11-01"}]}
@@ -118,8 +120,31 @@ class FakeCatalog:
             return self.reply(401, {"error": "signin"})
         return None
 
+    def signed_in_as(self, handle):
+        return self.auth == f"Bearer {self.token}" and handle == self.handle
+
+    def search(self, mini, query):
+        """``t/mini`` (a machine) and the stored items with a finished version, filtered by ``kind`` as PS.com does:
+        public ones, and the signed-in person's private ones."""
+        from urllib.parse import parse_qs
+
+        kind = {k: v[-1] for k, v in parse_qs(query).items()}.get("kind")
+        found = [mini] if kind in (None, "machine") else []
+        for (handle, name), item in self.items.items():
+            finished = [v for v, x in item["versions"].items() if x["finished"]]
+            if not finished or (kind is not None and item["kind"] != kind):
+                continue
+            if item["visibility"] != "public" and not self.signed_in_as(handle):
+                continue
+            found.append({"handle": handle, "name": name, "kind": item["kind"], "visibility": item["visibility"],
+                          "display": item.get("display") or {},
+                          "latest_version": item.get("latest") or max(finished, key=_version_key)})
+        return self.reply(200, {"items": found})
+
     def stored_get(self, handle, name, rest):
         item = self.items[(handle, name)]
+        if item["visibility"] != "public" and not self.signed_in_as(handle):
+            return self.reply(404, {"error": "not-found"})  # PS.com hides another person's private item
         finished = {v: x for v, x in item["versions"].items() if x["finished"]}
         if not rest:
             latest = item.get("latest") or (max(finished, key=_version_key) if finished else None)

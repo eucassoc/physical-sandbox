@@ -1148,3 +1148,84 @@ def test_the_stage_html_has_the_save_controls(served):
         assert name in html
     for words in ("上書き保存", "新しい記録として保存", "エクスポート", "PS.com 未保存", "送り直す", "psbx login"):
         assert words in html
+    assert "aOpened?.own && state?.login?.signedIn" in html  # 上書き保存 is hidden while signed out
+
+
+def test_two_offline_saves_over_keep_one_copy_and_make_one_version(ps_com, placed, cache_mini, tmp_path):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    ps_com.stop()
+    _place(placed, cache_mini, x=0.5)
+    assert call(placed, "ps_record_save", {"mode": "over"})["unsent"] == "dance"
+    _place(placed, cache_mini, x=0.7)
+    assert call(placed, "ps_record_save", {"mode": "over"})["unsent"] == "dance"
+    assert placed.stage.first()["unsent"] == [{"name": "dance", "ref": "ada/dance", "mode": "over"}]
+    ps_com.start(ps_com.port)
+    out = call(placed, "ps_unsent_send", {})
+    assert out == {"sent": [{"name": "dance", "ref": "ada/dance", "version": "3", "mode": "over"}], "left": [],
+                   "notes": []}
+    assert list(ps_com.items[("ada", "dance")]["versions"]) == ["1", "2", "3"] and ("ada", "dance-2") not in ps_com.items
+    assert _stored(ps_com, "ada", "dance", "3")["equipment"]["devices"][0]["pose"]["xyz"] == [0.7, 0.2, 0.0]
+
+
+def test_a_kept_new_record_whose_name_was_taken_goes_under_a_free_name(ps_com, placed, mini_has_product, tmp_path):
+    call(placed, "ps_motion_open", {"spec": str(_record(tmp_path / "w" / "demo.record.json")), "slot": "a"})
+    push._forget(ps_com.url)
+    assert call(placed, "ps_record_save", {"mode": "new", "name": "wave"})["unsent"] == "wave"
+    push._keep(ps_com.url, "tok-1", 3600, handle="ada")
+    out = call(placed, "ps_unsent_send", {})
+    assert out["sent"] == [{"name": "wave", "ref": "ada/wave-2", "version": "1", "mode": "new"}] and out["left"] == []
+    assert out["notes"] == ["ada/wave はもうあったため、ada/wave-2 として保存しました"]
+    assert list(ps_com.items[("ada", "wave")]["versions"]) == ["1"]
+    assert "basedOn" not in _stored(ps_com, "ada", "wave-2", "1")
+
+
+def test_a_kept_copy_never_goes_up_with_another_placed_machine(ps_com, placed, mini_has_product, tmp_path):
+    call(placed, "ps_motion_open", {"spec": str(_record(tmp_path / "w" / "demo.record.json")), "slot": "a"})
+    push._forget(ps_com.url)
+    assert call(placed, "ps_record_save", {"mode": "new", "name": "demo"})["unsent"] == "demo"
+    arm = tmp_path / "arms" / "arm"  # another machine is placed before the copy goes
+    arm.mkdir(parents=True)
+    (arm / "arm.urdf").write_text(URDF)
+    (arm / "product.json").write_text(json.dumps({**json.loads(
+        (tmp_path / "cache" / "machines" / "mini" / "product.json").read_text()), "id": "arm"}))
+    out = call(placed, "ps_scene_place", {"id": "arm", "urdf": str(arm / "arm.urdf"), "x": 0, "y": 0, "yaw": 0,
+                                          "typed": True})
+    assert "scenePath" in out
+    push._keep(ps_com.url, "tok-1", 3600, handle="ada")
+    mini = tmp_path / "cache" / "machines" / "mini"
+    mini.rename(tmp_path / "mini-away")  # its own machine is nowhere: the copy stays, with a note
+    out = call(placed, "ps_unsent_send", {})
+    assert out["sent"] == [] and [p["name"] for p in out["left"]] == ["demo"] and "mini" in out["notes"][0]
+    assert ("ada", "arm") not in ps_com.items and ("ada", "mini") not in ps_com.items
+    (tmp_path / "mini-away").rename(mini)  # back in the cache: the copy goes with mini, not with arm
+    out = call(placed, "ps_unsent_send", {})
+    assert out["sent"] == [{"name": "demo", "ref": "ada/demo", "version": "1", "mode": "new"}]
+    files = ps_com.items[("ada", "mini")]["versions"]["1"]["files"]
+    assert "mini.urdf" in files and "arm.urdf" not in files and ("ada", "arm") not in ps_com.items
+    assert _stored(ps_com, "ada", "demo", "1")["equipment"]["devices"][0]["product"] == "ada/mini:1"
+
+
+def test_a_save_online_also_sends_the_waiting_copies(ps_com, placed, mini_has_product, tmp_path):
+    call(placed, "ps_motion_open", {"spec": str(_record(tmp_path / "w" / "demo.record.json")), "slot": "a"})
+    push._forget(ps_com.url)
+    assert call(placed, "ps_record_save", {"mode": "new", "name": "demo-run"})["unsent"] == "demo-run"
+    push._keep(ps_com.url, "tok-1", 3600, handle="ada")
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    out = call(placed, "ps_record_save", {"mode": "over"})
+    assert out["saved"] is True and out["version"] == "3"
+    assert out["unsentSend"] == {"sent": [{"name": "demo-run", "ref": "ada/demo-run", "version": "1",
+                                           "mode": "new"}], "left": [], "notes": []}
+    assert placed.stage.first()["unsent"] == []
+
+
+def test_a_save_over_online_replaces_a_waiting_save_over_of_the_same_record(ps_com, placed, cache_mini, tmp_path):
+    call(placed, "ps_motion_open", {"spec": "ps:ada/dance:2", "slot": "a"})
+    ps_com.stop()
+    _place(placed, cache_mini, x=0.5)
+    assert call(placed, "ps_record_save", {"mode": "over"})["unsent"] == "dance"
+    ps_com.start(ps_com.port)
+    _place(placed, cache_mini, x=0.7)
+    out = call(placed, "ps_record_save", {"mode": "over"})
+    assert out["saved"] is True and out["version"] == "3" and "note" not in out and "unsentSend" not in out
+    assert list(ps_com.items[("ada", "dance")]["versions"]) == ["1", "2", "3"] and ("ada", "dance-2") not in ps_com.items
+    assert placed.stage.first()["unsent"] == []

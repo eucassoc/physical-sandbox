@@ -60,6 +60,11 @@ class PushError(CatalogError):
                          + (f" ({note})" if note else ""))
 
 
+class RecordExists(InputError):
+    """A record saved as new under a name that is already there (``over`` was not given). The message is the same
+    one the CLI and the MCP tool show; callers that save in their own words check the type."""
+
+
 def _noted(e: CatalogError, note: str) -> CatalogError:
     """The same failure with a sentence added on what was left behind."""
     if isinstance(e, PushError):
@@ -515,7 +520,7 @@ def _record_url(base, handle, name, version, existing, *, private, over, over_ba
         if existing is None:
             query["new"] = "1"  # saving over nothing is a first save, and the server refuses it if one appeared
         elif not over:
-            raise InputError(_EXISTS.format(ref=f"{handle}/{name}"))
+            raise RecordExists(_EXISTS.format(ref=f"{handle}/{name}"))
         elif over_base is not None:
             query["base"] = over_base
     query["visibility"] = "private" if private else "public"

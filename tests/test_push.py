@@ -447,8 +447,9 @@ def test_a_record_that_is_there_is_not_saved_without_over(tmp_path, catalog_serv
     push("ada/run", rec, machine_dir=machines, base=catalog_server.url, log=quiet)
     before = list(catalog_server.calls)
     _change(rec, "second")
-    with pytest.raises(InputError) as e:
+    with pytest.raises(push_mod.RecordExists) as e:  # an InputError the stage can tell apart by its type
         push("ada/run", rec, machine_dir=machines, base=catalog_server.url, log=quiet)
+    assert isinstance(e.value, InputError)
     assert str(e.value) == ("ada/run はもうあります。上書き保存するときは --over を付けてください。"
                             "新しい記録にするときは別の名前にしてください")
     assert [c for c in catalog_server.calls[len(before):] if c[0] != "GET"] == []  # no machine went up either

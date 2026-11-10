@@ -6,7 +6,9 @@ exactly as it would have gone, and ``<name>.send.json``, ``{ref, mode, base}`` s
 and removes what went; this module never reaches the network itself.
 
 A save over a record that was saved over elsewhere meanwhile is neither lost nor written over: it goes as a new
-record under the first free ``<name>-2``, ``<name>-3``... and the note says so.
+record under the first free ``<name>-2``, ``<name>-3``... and the note says so. A kept new record whose name was
+taken meanwhile goes the same way. Saving over the same record again while a copy of it waits replaces that copy
+(its ``base`` stays): one save over makes one version.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ FOLDER = "unsent"
 SIGN_IN = "psbx login でログインすると送れます"
 OFFLINE = "PS.com に接続できませんでした。接続できるようになったら送り直してください"
 MOVED = "{ref} は別の場所で変わっていたため、{new} として新しく保存しました"
+TAKEN = "{ref} はもうあったため、{new} として保存しました"
 _NAME_MAX = 39  # a catalog name is at most 39 characters
 _TRIES = 50  # suffixes tried for a free name
 
@@ -41,11 +44,18 @@ def _suffixed(ref: str, k: int) -> str:
 
 def keep(work: Path, record: dict, *, ref: str, mode: str, base: str | None) -> str:
     """Keep ``record`` for ``ref`` in ``<work>/unsent/``; the name it is kept under (the ref's name, or the first
-    free ``<name>-2``, ``<name>-3``... beside an earlier copy)."""
+    free ``<name>-2``, ``<name>-3``... beside an earlier copy). A save over ``ref`` while a save over it waits
+    replaces that copy's record and keeps its ``base``."""
     if mode not in ("over", "new"):
         raise ValueError(f"mode must be 'over' or 'new', not {mode!r}")
     folder = Path(work) / FOLDER
     folder.mkdir(parents=True, exist_ok=True)
+    if mode == "over":  # the same record saved over again: the newer content, from the base the first one had
+        for p in pending(work):
+            if p["ref"] == ref and p["mode"] == "over":
+                write_text_atomic(folder / f"{p['name']}.record.json",
+                                  json.dumps(record, ensure_ascii=False, indent=1) + "\n")
+                return p["name"]
     stem = _name_of(ref)
     name, k = stem, 1
     while (folder / f"{name}.record.json").exists() or (folder / f"{name}.send.json").exists():
@@ -77,19 +87,9 @@ def pending(work: Path) -> list[dict]:
     return out
 
 
-def send_one(path: Path, ref: str, mode: str, base: str | None, sender) -> tuple[str, str, str | None]:
-    """Send the record at ``path`` with ``sender(path, ref, mode, base)``, which answers the ref written
-    (``handle/name:version``). A save over that answers PushError ``moved`` goes as a new record under the first
-    free suffix, carrying ``basedOn`` (the file at ``path`` stays as it was). Returns (the ref written, the mode
-    it went as, the note or None); other failures are raised as they come."""
-    try:
-        return sender(path, ref, mode, base), mode, None
-    except PushError as e:
-        if e.code != "moved":
-            raise
-    record = json.loads(Path(path).read_text())
-    if base:
-        record["basedOn"] = f"{ref}:{base}"
+def _under_free_name(record: dict, ref: str, sender, words: str) -> tuple[str, str, str]:
+    """Send ``record`` as new under the first free ``<ref>-2``, ``<ref>-3``... (a ``taken`` answer tries the
+    next); (the ref written, ``new``, the note in ``words``)."""
     with tempfile.TemporaryDirectory(prefix="psbx-unsent-") as tmp:
         copy = Path(tmp) / "record.json"
         copy.write_text(json.dumps(record, ensure_ascii=False))
@@ -101,13 +101,45 @@ def send_one(path: Path, ref: str, mode: str, base: str | None, sender) -> tuple
                 if e.code == "taken":
                     continue
                 raise
-            return written, "new", MOVED.format(ref=ref, new=new)
+            shown_new = written.partition(":")[0]
+            handle = shown_new.rpartition("/")[0]
+            shown_ref = f"{handle}/{ref}" if handle and "/" not in ref else ref  # kept signed out: no handle
+            return written, "new", words.format(ref=shown_ref, new=shown_new)
     raise PushError("taken", 409, note=f"{ref} の新しい名前が見つかりませんでした")
 
 
+def send_one(path: Path, ref: str, mode: str, base: str | None, sender, *,
+             taken_too: bool = False) -> tuple[str, str, str | None]:
+    """Send the record at ``path`` with ``sender(path, ref, mode, base)``, which answers the ref written
+    (``handle/name:version``; PushError ``taken`` for a new name that is there). A save over that answers PushError
+    ``moved`` goes as a new record under the first free suffix, carrying ``basedOn``; with ``taken_too`` a new
+    record whose name is taken goes the same way as it is. The file at ``path`` stays as it was. Returns (the ref
+    written, the mode it went as, the note or None); other failures are raised as they come."""
+    try:
+        return sender(path, ref, mode, base), mode, None
+    except PushError as e:
+        if e.code == "moved":
+            record = json.loads(Path(path).read_text())
+            if base:
+                record["basedOn"] = f"{ref}:{base}"
+            return _under_free_name(record, ref, sender, MOVED)
+        if e.code == "taken" and mode == "new" and taken_too:
+            return _under_free_name(json.loads(Path(path).read_text()), ref, sender, TAKEN)
+        raise
+
+
+def drop_over(work: Path, ref: str) -> None:
+    """Forget the kept saves over ``ref``: a newer save over it reached PS.com."""
+    folder = Path(work) / FOLDER
+    for p in pending(work):
+        if p["ref"] == ref and p["mode"] == "over":
+            (folder / f"{p['name']}.send.json").unlink(missing_ok=True)
+            (folder / f"{p['name']}.record.json").unlink(missing_ok=True)
+
+
 def send_all(work: Path, sender) -> tuple[list[dict], list[dict], list[str]]:
-    """Send every kept copy (see ``send_one``); ``(sent, left, notes)``. ``sent`` is ``[{name, ref, version,
-    mode}]`` as written; ``left`` is what stays kept (``pending``'s entries). Offline (CatalogError) or signed out
+    """Send every kept copy (see ``send_one``; a taken new name also goes under a free suffix); ``(sent, left,
+    notes)``. ``sent`` is ``[{name, ref, version, mode}]`` as written; ``left`` is what stays kept (``pending``'s entries). Offline (CatalogError) or signed out
     on the server, the rest is not tried: every copy stays. Another refusal keeps that copy with the reason."""
     folder = Path(work) / FOLDER
     sent, left, notes = [], [], []
@@ -115,7 +147,7 @@ def send_all(work: Path, sender) -> tuple[list[dict], list[dict], list[str]]:
     for i, p in enumerate(waiting):
         try:
             written, mode, note = send_one(folder / f"{p['name']}.record.json", p["ref"], p["mode"], p["base"],
-                                           sender)
+                                           sender, taken_too=True)
         except PushError as e:
             if e.code == "signin":
                 left += waiting[i:]

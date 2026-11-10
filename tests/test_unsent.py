@@ -36,7 +36,7 @@ def test_keep_writes_the_record_and_where_it_goes_and_pending_lists_it(tmp_path)
 
 
 def test_a_second_copy_of_the_same_name_is_kept_beside_the_first(tmp_path):
-    assert unsent.keep(tmp_path, RECORD, ref="ada/dance", mode="over", base="2") == "dance"
+    assert unsent.keep(tmp_path, RECORD, ref="ada/dance", mode="new", base=None) == "dance"
     assert unsent.keep(tmp_path, RECORD, ref="ada/dance", mode="over", base="2") == "dance-2"
     assert unsent.keep(tmp_path, RECORD, ref="walk", mode="new", base=None) == "walk"  # no handle while signed out
     assert [p["name"] for p in unsent.pending(tmp_path)] == ["dance", "dance-2", "walk"]
@@ -117,3 +117,47 @@ def test_the_suffixed_name_stays_a_catalog_name(tmp_path, name):
     sent, _, _ = unsent.send_all(tmp_path, Sender(**{f"ada/{name}": PushError("moved", 409, latest="2")}))
     written = sent[0]["ref"].split("/")[1]
     assert written.endswith("-2") and len(written) <= 39
+
+
+def test_saving_over_the_same_record_again_replaces_the_waiting_copy_and_keeps_its_base(tmp_path):
+    newer = {**RECORD, "name": "newer"}
+    assert unsent.keep(tmp_path, RECORD, ref="ada/dance", mode="over", base="2") == "dance"
+    assert unsent.keep(tmp_path, newer, ref="ada/dance", mode="over", base="3") == "dance"
+    assert unsent.pending(tmp_path) == [{"name": "dance", "ref": "ada/dance", "mode": "over", "base": "2"}]
+    assert json.loads((tmp_path / "unsent" / "dance.record.json").read_text()) == newer
+    sender = Sender(**{"ada/dance": "3"})
+    sent, left, notes = unsent.send_all(tmp_path, sender)
+    assert len(sender.calls) == 1 and sent[0]["version"] == "3" and notes == [] and left == []
+
+
+def test_a_kept_new_record_whose_name_is_taken_goes_under_the_first_free_suffix(tmp_path):
+    unsent.keep(tmp_path, RECORD, ref="ada/walk", mode="new", base=None)
+    unsent.keep(tmp_path, RECORD, ref="run", mode="new", base=None)  # kept signed out: the sender adds the handle
+
+    def sender(path, ref, mode, base):
+        calls.append((ref, mode, json.loads(path.read_text())))
+        full = ref if "/" in ref else f"ada/{ref}"
+        if full in ("ada/walk", "ada/run"):
+            raise PushError("taken", 409)
+        return f"{full}:1"
+    calls = []
+    sent, left, notes = unsent.send_all(tmp_path, sender)
+    assert [s["ref"] for s in sent] == ["ada/run-2", "ada/walk-2"] and left == []
+    assert notes == ["ada/run はもうあったため、ada/run-2 として保存しました",
+                     "ada/walk はもうあったため、ada/walk-2 として保存しました"]
+    assert all(c[2] == RECORD for c in calls)  # sent as it was kept: no basedOn
+
+
+def test_send_one_leaves_a_taken_name_to_the_caller_unless_asked(tmp_path):
+    path = tmp_path / "r.json"
+    path.write_text(json.dumps(RECORD))
+    with pytest.raises(PushError, match="taken"):
+        unsent.send_one(path, "ada/walk", "new", None, Sender(**{"ada/walk": PushError("taken", 409)}))
+
+
+def test_drop_over_forgets_only_the_saves_over_that_ref(tmp_path):
+    unsent.keep(tmp_path, RECORD, ref="ada/dance", mode="over", base="2")
+    unsent.keep(tmp_path, RECORD, ref="ada/dance", mode="new", base=None)
+    unsent.keep(tmp_path, RECORD, ref="ada/walk", mode="over", base="1")
+    unsent.drop_over(tmp_path, "ada/dance")
+    assert [(p["ref"], p["mode"]) for p in unsent.pending(tmp_path)] == [("ada/dance", "new"), ("ada/walk", "over")]

@@ -763,7 +763,7 @@ class Stage:
         raw = json.loads((folder / "record.json").read_text())
         device = record_edit.device_of(raw, placed["id"]) or _joint_device(raw, spec)
         if device is None:
-            raise ValueError("記録のどの機器に保存するか決められません")
+            raise ValueError("記録のどの機器に保存するかを特定できません")
         record = record_edit.merge_into(raw, device_id=device, motion=motion, placement=placement, site_id=site_id)
         return record, self._kept_opened() or opened, motion.label
 
@@ -790,19 +790,34 @@ class Stage:
                 raise PushError("signin", 401)
             ref = f"{handle}/{ref}"
         try:
-            made_here = mode == "new" and "basedOn" not in json.loads(Path(path).read_text())
-        except (OSError, ValueError, TypeError):
-            made_here = True
+            record = json.loads(Path(path).read_text())
+            devices = record["equipment"]["devices"]
+            local = {d["product"] for d in devices if isinstance(d, dict) and isinstance(d.get("product"), str)
+                     and "/" not in d["product"]}
+            made_here = mode == "new" and "basedOn" not in record
+        except (OSError, ValueError, TypeError, KeyError):
+            local, made_here = set(), True
+        # The placed machine's folder only for the machine it is: a copy kept before another machine was placed
+        # finds its own one in the cache (machines/<name>), or fails with a note and stays kept
         placed = self._placed_machine()
+        folder = Path(placed["urdf"]).parent if placed and placed["id"] in local else None
         try:
-            result = push.push(ref, path, private=True, machine_dir=Path(placed["urdf"]).parent if placed else None,
-                               log=lambda _: None, interactive=False, over=mode == "over",
-                               over_base=base if mode == "over" else None, companions=made_here)
-        except InputError as e:
-            if mode == "new" and str(e) == push._EXISTS.format(ref=ref):
-                raise PushError("taken", 409, note=f"{ref} はもうあります") from e
-            raise
+            result = push.push(ref, path, private=True, machine_dir=folder, log=lambda _: None, interactive=False,
+                               over=mode == "over", over_base=base if mode == "over" else None,
+                               companions=made_here)
+        except push.RecordExists as e:
+            raise PushError("taken", 409, note=f"{ref} はもうあります") from e
         return result.ref
+
+    def _send_pending(self) -> dict:
+        """Send the kept copies (the caller holds ``_save_lock`` and is signed in); ``{sent, left, notes}``. A copy
+        saved over A's record makes A that version."""
+        sent, left, notes = unsent.send_all(self.work, self._send)
+        opened, spec = self._kept_opened(), self._kept("a") or ""
+        for s in sent:
+            if opened is not None and s["mode"] == "over" and s["ref"] == opened["ref"]:
+                self._now_a(s["ref"], s["version"], spec.partition("#")[2] or None)
+        return {"sent": sent, "left": [_shown(p) for p in left], "notes": notes}
 
     def _now_a(self, ref: str, version: str, label: str | None) -> str:
         """A holds ``ref`` at ``version`` from now on (what was just saved there); the new spec."""
@@ -817,8 +832,11 @@ class Stage:
     def _record_save(self, args: dict) -> dict:
         """上書き保存 (``mode: over``: the person's own PS.com record in A, as its next version, made from the
         version they saw as the latest) or 新しい記録として保存 (``mode: new``: under ``name``, titled ``title``).
-        Signed out or offline the record is kept in ``unsent`` (``saved: false``). A record saved over elsewhere
-        meanwhile goes as a new one under ``<name>-2`` with a ``note``."""
+        Signed out or offline the record is kept in ``unsent`` (``saved: false``); a save over a record whose
+        earlier save over waits there replaces that copy. A record saved over elsewhere meanwhile goes as a new one
+        under ``<name>-2`` with a ``note``. Saved, the copies PS.com did not get are sent too (``unsentSend``: what
+        ``ps_unsent_send`` answers); a waiting save over the record just saved over is dropped, as the newer save
+        replaces it."""
         mode = args.get("mode")
         if mode not in ("over", "new"):
             raise ValueError("mode must be 'over' or 'new'")
@@ -851,7 +869,7 @@ class Stage:
                 path = Path(tmp) / "record.json"
                 path.write_text(json.dumps(record, ensure_ascii=False))
                 try:
-                    written, _, note = unsent.send_one(path, ref, mode, base, self._send)
+                    written, written_mode, note = unsent.send_one(path, ref, mode, base, self._send)
                 except PushError as e:
                     if e.code == "signin":
                         return self._keep_unsent(record, ref, mode, base, unsent.SIGN_IN)
@@ -865,6 +883,10 @@ class Stage:
             out = {"saved": True, "ref": ref, "version": version, "spec": self._now_a(ref, version, label_part)}
             if note:
                 out["note"] = note
+            if mode == "over" and written_mode == "over":
+                unsent.drop_over(self.work, ref)
+            if unsent.pending(self.work):  # PS.com answers now: the copies it did not get go too
+                out["unsentSend"] = self._send_pending()
             return out
 
     def _record_export(self) -> dict:
@@ -891,12 +913,7 @@ class Stage:
             login = push.login_status(catalog._base())
             if not login["signedIn"] or not login["handle"]:
                 return {"sent": [], "left": [_shown(p) for p in waiting], "notes": [unsent.SIGN_IN]}
-            sent, left, notes = unsent.send_all(self.work, self._send)
-            opened, spec = self._kept_opened(), self._kept("a") or ""
-            for s in sent:
-                if opened is not None and s["mode"] == "over" and s["ref"] == opened["ref"]:
-                    self._now_a(s["ref"], s["version"], spec.partition("#")[2] or None)
-            return {"sent": sent, "left": [_shown(p) for p in left], "notes": notes}
+            return self._send_pending()
 
     def _export(self, args: dict) -> dict:
         """Start writing a file set in the work folder (one export at a time); answers the job id. ``replay``: one

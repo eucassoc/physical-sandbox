@@ -899,7 +899,7 @@ function fillSaveFields(label) {
 // 上書き保存 only for the person's own record opened from PS.com; signing in stays in the terminal
 function updateSaveButtons() {
   const ready = Boolean(tdata && tready) && !saving;
-  saveOverBtn.hidden = !aOpened?.own;
+  saveOverBtn.hidden = !(aOpened?.own && state?.login?.signedIn);
   saveOverBtn.disabled = !ready;
   saveNewBtn.disabled = !ready;
   recordExportBtn.disabled = !ready;
@@ -941,8 +941,13 @@ async function saveRecord(mode) {
       say(`PS.com に保存できなかったため、手元に残しました（${out.unsent}）。${out.reason}`, true);
       return;
     }
-    const text = out.note ? `${out.note}（バージョン ${out.version}）`
+    let text = out.note ? `${out.note}（バージョン ${out.version}）`
       : `PS.com に保存しました: ${out.ref}（バージョン ${out.version}）`;
+    if (out.unsentSend) {   // the copies PS.com did not get went too
+      unsentList = out.unsentSend.left ?? [];
+      showUnsent();
+      text = [text, ...sentLines(out.unsentSend)].join('。');
+    }
     saving = false;
     await openMotion(out.spec, { keep: true, done: text });   // A is now the record just saved
   } catch (err) {
@@ -968,6 +973,13 @@ async function exportRecord() {
   }
 }
 
+// What a send of the kept copies says: what went, then its notes
+function sentLines(out) {
+  const lines = [...(out.notes ?? [])];
+  if (out.sent?.length) lines.unshift(`PS.com に送りました: ${out.sent.map((s) => `${s.ref}（バージョン ${s.version}）`).join('、')}`);
+  return lines;
+}
+
 // Sends the copies PS.com did not get; what stays is listed again in red
 async function sendUnsent() {
   if (saving) return;
@@ -977,8 +989,7 @@ async function sendUnsent() {
     const out = await call('ps_unsent_send', {});
     unsentList = out.left ?? [];
     showUnsent();
-    const lines = [...(out.notes ?? [])];
-    if (out.sent?.length) lines.unshift(`PS.com に送りました: ${out.sent.map((s) => `${s.ref}（バージョン ${s.version}）`).join('、')}`);
+    const lines = sentLines(out);
     if (lines.length) say(lines.join('。'), unsentList.length > 0);
   } catch (err) {
     fail('PS.com に送れませんでした', err);

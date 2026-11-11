@@ -432,6 +432,16 @@ def _cmd_machine_init(args) -> int:
     return 0
 
 
+def _cmd_machine_bundle(args) -> int:
+    from .machine_tools import bundle_machine
+
+    result, folder = bundle_machine(Path(args.path), Path(args.out) if args.out else None, args.name)
+    for w in result.warnings:
+        print(f"warning: {w}")
+    print(f"wrote the display bundle to {folder}")
+    return 0
+
+
 def _cmd_mcp(args) -> int:
     try:
         from .mcp.server import main as serve
@@ -543,6 +553,11 @@ def _parser() -> argparse.ArgumentParser:
     mi = msub.add_parser("init", help="write product.json and profile.json (or object.json) templates")
     mi.add_argument("path", help="the machine folder (or its URDF), or an object's mesh file")
     mi.set_defaults(run=_cmd_machine_init)
+    mb = msub.add_parser("bundle", help="write the machine's display bundle (bundle.json and assets/) to a folder")
+    mb.add_argument("path", help="the machine folder (or its URDF)")
+    mb.add_argument("--out", help="the folder to write (default: ./<name>-bundle); an earlier bundle there is replaced")
+    mb.add_argument("--name", help="the bundle's name, as a catalog name (default: the folder's name)")
+    mb.set_defaults(run=_cmd_machine_bundle)
 
     m = sub.add_parser("mcp", help="serve the MCP tools on stdio")
     m.set_defaults(run=_cmd_mcp)

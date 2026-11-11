@@ -189,6 +189,7 @@ at another catalog server.
 psbx machine init my-arm/     # product.json and profile.json templates beside the URDF
 psbx machine check my-arm/    # one line per check: the URDF reads, the meshes are there, the names and
                               # licence are filled in, wheels are continuous joints
+psbx machine bundle my-arm/   # the display bundle (bundle.json, assets/) written to ./my-arm-bundle
 psbx machine init statue.glb  # a mesh-only object: object.json (with its unit, m or mm)
 ```
 

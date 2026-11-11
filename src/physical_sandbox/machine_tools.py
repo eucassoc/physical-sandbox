@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -429,3 +430,67 @@ def wrap_object(mesh_path: Path, *, unit: str, out_dir: Path) -> Path:
     urdf = out_dir / f"{name}.urdf"
     urdf.write_text('<?xml version="1.0"?>\n' + ET.tostring(robot, encoding="unicode") + "\n", encoding="utf-8")
     return urdf
+
+
+def safe_bundle_name(raw: str) -> str:
+    """``raw`` made into a catalog name (2-39 of a-z 0-9 and -, not starting or ending with -)."""
+    name = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")[:39].strip("-")
+    return name if len(name) >= 2 else "machine"
+
+
+def _is_earlier_bundle(folder: Path) -> bool:
+    """An empty folder, or one holding bundle.json and nothing but bundle.json, assets/ and manifest.json."""
+    names = {p.name for p in folder.iterdir()}
+    if not names:
+        return True
+    return "bundle.json" in names and names <= {"bundle.json", "assets", "manifest.json"}
+
+
+def bundle_machine(path: Path, out: Path | None = None, name: str | None = None):
+    """Write the display bundle of a machine (folder or URDF) to a folder; returns (BundleResult, folder).
+
+    ``out`` defaults to ``./<name>-bundle``. A folder that is not empty and not an earlier bundle is refused;
+    an earlier bundle is replaced only once the new one is complete.
+    """
+    from .bundle import make_bundle
+    from .push import _read
+
+    path = Path(path).expanduser()
+    if path.is_file():
+        folder, model, stem = path.parent, path, path.stem
+    elif path.is_dir():
+        folder, model, stem = path, _find_model(path), path.resolve().name
+    else:
+        raise InputError(f"{path}: no such file or folder")
+    if model is None or model.suffix.lower() != ".urdf":
+        raise InputError(f"{path}: no URDF (*.urdf) to make a display bundle from")
+    if name is None:
+        name = safe_bundle_name(stem)
+    else:
+        from .catalog import _NAME
+
+        if not re.fullmatch(_NAME, name):
+            raise InputError(f"{name!r} is not a bundle name: 2-39 characters of a-z, 0-9 and -, "
+                             f"not starting or ending with -")
+    out = Path(out).expanduser() if out is not None else Path(f"{name}-bundle")
+    if out.exists() and (not out.is_dir() or not _is_earlier_bundle(out)):
+        raise InputError(f"{out}: is not empty and is not an earlier bundle; give --out an empty or new folder")
+    product = _read(folder / "product.json") if (folder / "product.json").is_file() else {}
+    profile = _read(folder / "profile.json") if (folder / "profile.json").is_file() else None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".{out.name}.", dir=out.parent))
+    try:
+        result = make_bundle(model, product=product, profile=profile, name=name, out_dir=tmp)
+        old = None
+        if out.exists():
+            old = Path(tempfile.mkdtemp(prefix=f".{out.name}.old.", dir=out.parent))
+            out.rename(old / "was")
+        tmp.rename(out)
+        if old is not None:
+            shutil.rmtree(old, ignore_errors=True)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    result.bundle_path = out / "bundle.json"
+    result.mesh_paths = [out / m.relative_to(tmp) for m in result.mesh_paths]
+    return result, out

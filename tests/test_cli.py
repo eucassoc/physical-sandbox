@@ -730,3 +730,59 @@ def test_a_two_device_record_for_another_machine_is_refused_with_the_names(mini_
         _load_motion(str(tmp_path / "two.record.json"), mini_scene)
     with pytest.raises(InputError, match="blocks"):
         _load_motion(str(tmp_path / "two.record.json") + "#p2", mini_scene)
+
+
+MINI = Path(__file__).parent / "fixtures" / "mini-robot"
+
+
+def _mini(tmp_path):
+    import shutil
+
+    shutil.copytree(MINI, tmp_path / "mini")
+    return tmp_path / "mini"
+
+
+def test_machine_bundle_writes_bundle_json_and_assets(tmp_path, capsys):
+    mini, out = _mini(tmp_path), tmp_path / "out"
+    assert main(["machine", "bundle", str(mini), "--out", str(out)]) == 0
+    assert json.loads((out / "bundle.json").read_text())
+    assert list((out / "assets").glob("*.bin"))
+    assert str(out) in capsys.readouterr().out.splitlines()[-1]
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+
+def test_machine_bundle_defaults_to_name_bundle_in_the_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert main(["machine", "bundle", str(_mini(tmp_path))]) == 0
+    assert (tmp_path / "mini-bundle" / "bundle.json").is_file()
+
+
+def test_machine_bundle_replaces_an_earlier_bundle_but_refuses_other_folders(tmp_path, capsys):
+    mini, out = _mini(tmp_path), tmp_path / "out"
+    assert main(["machine", "bundle", str(mini), "--out", str(out)]) == 0
+    (out / "assets" / "stale.bin").write_bytes(b"x")
+    assert main(["machine", "bundle", str(mini), "--out", str(out)]) == 0
+    assert not (out / "assets" / "stale.bin").exists()
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "notes.txt").write_text("keep")
+    assert main(["machine", "bundle", str(mini), "--out", str(other)]) == 2
+    assert (other / "notes.txt").read_text() == "keep" and not (other / "bundle.json").exists()
+    assert "earlier bundle" in capsys.readouterr().err
+
+
+def test_machine_bundle_refuses_a_mesh_outside_the_folder(tmp_path, capsys):
+    mini, out = _mini(tmp_path), tmp_path / "out"
+    (tmp_path / "secret.stl").write_bytes((mini / "meshes" / "box.stl").read_bytes())
+    urdf = mini / "mini.urdf"
+    urdf.write_text(urdf.read_text().replace("meshes/box.stl", "../secret.stl"))
+    assert main(["machine", "bundle", str(mini), "--out", str(out)]) == 2
+    assert not out.exists()
+    assert "outside" in capsys.readouterr().err
+
+
+def test_machine_bundle_name_follows_the_catalog_rule(tmp_path, capsys):
+    mini = _mini(tmp_path)
+    assert main(["machine", "bundle", str(mini), "--out", str(tmp_path / "o"), "--name", "Bad Name"]) == 2
+    assert main(["machine", "bundle", str(mini / "mini.urdf"), "--out", str(tmp_path / "o"), "--name", "my-arm"]) == 0
+    assert json.loads((tmp_path / "o" / "bundle.json").read_text())

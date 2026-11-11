@@ -439,18 +439,29 @@ def safe_bundle_name(raw: str) -> str:
 
 
 def _is_earlier_bundle(folder: Path) -> bool:
-    """An empty folder, or one holding bundle.json and nothing but bundle.json, assets/ and manifest.json."""
+    """An empty folder, or one holding bundle.json and nothing but bundle.json, assets/ and manifest.json.
+
+    assets/ may hold only .bin meshes and image files (no subfolders).
+    """
     names = {p.name for p in folder.iterdir()}
     if not names:
         return True
-    return "bundle.json" in names and names <= {"bundle.json", "assets", "manifest.json"}
+    if "bundle.json" not in names or not names <= {"bundle.json", "assets", "manifest.json"}:
+        return False
+    assets = folder / "assets"
+    if "assets" in names:
+        if not assets.is_dir():
+            return False
+        return all(p.is_file() and p.suffix.lower() in (".bin", ".png", ".jpg", ".jpeg", ".webp")
+                   for p in assets.iterdir())
+    return True
 
 
 def bundle_machine(path: Path, out: Path | None = None, name: str | None = None):
     """Write the display bundle of a machine (folder or URDF) to a folder; returns (BundleResult, folder).
 
     ``out`` defaults to ``./<name>-bundle``. A folder that is not empty and not an earlier bundle is refused;
-    an earlier bundle is replaced only once the new one is complete.
+    an earlier bundle is replaced (its files, not the folder itself) only once the new one is complete.
     """
     from .bundle import make_bundle
     from .push import _read
@@ -472,25 +483,45 @@ def bundle_machine(path: Path, out: Path | None = None, name: str | None = None)
         if not re.fullmatch(_NAME, name):
             raise InputError(f"{name!r} is not a bundle name: 2-39 characters of a-z, 0-9 and -, "
                              f"not starting or ending with -")
-    out = Path(out).expanduser() if out is not None else Path(f"{name}-bundle")
+    out = (Path(out).expanduser() if out is not None else Path(f"{name}-bundle")).resolve()
+    machine_dir = folder.resolve()
+    if out == machine_dir or out in machine_dir.parents:
+        raise InputError(f"{out}: is the machine's folder or one around it; give --out another folder")
     if out.exists() and (not out.is_dir() or not _is_earlier_bundle(out)):
         raise InputError(f"{out}: is not empty and is not an earlier bundle; give --out an empty or new folder")
     product = _read(folder / "product.json") if (folder / "product.json").is_file() else {}
     profile = _read(folder / "profile.json") if (folder / "profile.json").is_file() else None
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(prefix=f".{out.name}.", dir=out.parent))
+    existed = out.exists()
+    if not existed:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix=".psbx-bundle-", dir=out if existed else out.parent))
+    new, old = work / "new", work / "old"
+    moved_in: list[Path] = []
+    moved_out: list[Path] = []
     try:
-        result = make_bundle(model, product=product, profile=profile, name=name, out_dir=tmp)
-        old = None
-        if out.exists():
-            old = Path(tempfile.mkdtemp(prefix=f".{out.name}.old.", dir=out.parent))
-            out.rename(old / "was")
-        tmp.rename(out)
-        if old is not None:
-            shutil.rmtree(old, ignore_errors=True)
+        result = make_bundle(model, product=product, profile=profile, name=name, out_dir=new)
+        if not existed:
+            new.rename(out)
+        else:
+            old.mkdir()
+            for p in sorted(out.iterdir()):
+                if p != work:
+                    p.rename(old / p.name)
+                    moved_out.append(p)
+            for p in sorted(new.iterdir()):
+                p.rename(out / p.name)
+                moved_in.append(out / p.name)
     except BaseException:
-        shutil.rmtree(tmp, ignore_errors=True)
+        for p in moved_in:  # put the earlier bundle back before the error goes on
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
+        for p in moved_out:
+            (old / p.name).rename(p)
+        shutil.rmtree(work, ignore_errors=True)
         raise
+    shutil.rmtree(work, ignore_errors=True)
     result.bundle_path = out / "bundle.json"
-    result.mesh_paths = [out / m.relative_to(tmp) for m in result.mesh_paths]
+    result.mesh_paths = [out / m.relative_to(new) for m in result.mesh_paths]
     return result, out

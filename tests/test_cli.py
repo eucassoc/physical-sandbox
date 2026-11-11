@@ -786,3 +786,71 @@ def test_machine_bundle_name_follows_the_catalog_rule(tmp_path, capsys):
     assert main(["machine", "bundle", str(mini), "--out", str(tmp_path / "o"), "--name", "Bad Name"]) == 2
     assert main(["machine", "bundle", str(mini / "mini.urdf"), "--out", str(tmp_path / "o"), "--name", "my-arm"]) == 0
     assert json.loads((tmp_path / "o" / "bundle.json").read_text())
+
+
+def test_machine_bundle_out_dot_in_an_earlier_bundle_works(tmp_path, monkeypatch):
+    mini, out = _mini(tmp_path), tmp_path / "out"
+    assert main(["machine", "bundle", str(mini), "--out", str(out)]) == 0
+    (out / "assets" / "stale.bin").write_bytes(b"x")
+    monkeypatch.chdir(out)
+    assert main(["machine", "bundle", str(mini), "--out", "."]) == 0
+    assert (out / "bundle.json").is_file() and not (out / "assets" / "stale.bin").exists()
+    assert sorted(p.name for p in out.iterdir()) == ["assets", "bundle.json"]
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+
+def test_machine_bundle_out_dot_with_other_files_is_refused(tmp_path, monkeypatch, capsys):
+    mini, cwd = _mini(tmp_path), tmp_path / "cwd"
+    cwd.mkdir()
+    (cwd / "notes.txt").write_text("keep")
+    monkeypatch.chdir(cwd)
+    assert main(["machine", "bundle", str(mini), "--out", "."]) == 2
+    assert sorted(p.name for p in cwd.iterdir()) == ["notes.txt"]
+    assert "earlier bundle" in capsys.readouterr().err
+
+
+def test_machine_bundle_refuses_the_machine_folder_or_one_around_it(tmp_path, capsys):
+    mini = _mini(tmp_path)
+    assert main(["machine", "bundle", str(mini), "--out", str(tmp_path)]) == 2
+    assert main(["machine", "bundle", str(mini / "mini.urdf"), "--out", str(mini)]) == 2
+    assert "machine's folder" in capsys.readouterr().err
+    assert not (mini / "bundle.json").exists()
+
+
+def test_machine_bundle_through_a_symlink_replaces_the_target(tmp_path):
+    mini, real = _mini(tmp_path), tmp_path / "real"
+    assert main(["machine", "bundle", str(mini), "--out", str(real)]) == 0
+    (real / "assets" / "stale.bin").write_bytes(b"x")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    assert main(["machine", "bundle", str(mini), "--out", str(link)]) == 0
+    assert link.is_symlink() and not (real / "assets" / "stale.bin").exists()
+
+
+def test_machine_bundle_refuses_other_files_inside_assets(tmp_path):
+    mini, out = _mini(tmp_path), tmp_path / "out"
+    assert main(["machine", "bundle", str(mini), "--out", str(out)]) == 0
+    (out / "assets" / "mine.txt").write_text("keep")
+    assert main(["machine", "bundle", str(mini), "--out", str(out)]) == 2
+    assert (out / "assets" / "mine.txt").read_text() == "keep"
+    (out / "assets" / "mine.txt").unlink()
+    (out / "assets" / "sub").mkdir()
+    assert main(["machine", "bundle", str(mini), "--out", str(out)]) == 2
+
+
+def test_machine_bundle_puts_the_old_bundle_back_when_the_swap_fails(tmp_path, monkeypatch):
+    mini, out = _mini(tmp_path), tmp_path / "out"
+    assert main(["machine", "bundle", str(mini), "--out", str(out)]) == 0
+    before = (out / "bundle.json").read_bytes()
+    real_rename = Path.rename
+
+    def flaky(self, target):
+        if Path(self).parent.name == "new":  # moving the new bundle's files into out
+            raise OSError("disk says no")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky)
+    assert main(["machine", "bundle", str(mini), "--out", str(out)]) == 1
+    monkeypatch.undo()
+    assert (out / "bundle.json").read_bytes() == before and list((out / "assets").glob("*.bin"))
+    assert sorted(p.name for p in out.iterdir()) == ["assets", "bundle.json"]

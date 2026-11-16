@@ -3,7 +3,7 @@
 In a notebook, ``compare(folder, a, b)`` gives the gaps between two motions on a work folder the stage screen
 left (see ``physical_sandbox.notebook``). It is loaded on first use, so importing the package stays light."""
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = ["__version__", "compare", "Gaps"]
 

@@ -450,3 +450,47 @@ def test_a_machine_between_the_old_and_the_new_near_clip_is_drawn(world, tmp_pat
     frame = read(render_overlay(scene, "camera", open_source(still), [motion(0.1, n=2)], tmp / "n.mp4",
                                 fps=10.0, show={"trail": False, "link": False}))[0]
     assert bluish(frame[H // 2, W // 2])
+
+
+def test_a_big_picture_gives_a_video_no_longer_than_1920_on_its_long_side(world):
+    # a phone photo is 4032x3024; a video that size takes minutes to write and plays nowhere
+    make, _, tmp = world
+    scene, _ = make(cam=look_at((-2.5, 0.8, 1.2), size=(2560, 1920), f=2400.0))
+    big = tmp / "big.png"
+    cv2.imwrite(str(big), np.full((1920, 2560, 3), GREY, np.uint8))
+    out = render_overlay(scene, "camera", open_source(big), [motion(1.0)], tmp / "big.mp4", fps=10.0, duration=0.1)
+    assert read(out)[0].shape == (1440, 1920, 3)
+
+
+def test_the_shell_of_a_shrunk_video_sits_on_the_shrunk_projection(world):
+    make, still, tmp = world
+    scene, cam = make()
+    out = render_overlay(scene, "camera", open_source(still), [motion(1.0)], tmp / "s.mp4", max_side=160)
+    frame = read(out)[0]
+    assert frame.shape == (120, 160, 3)
+    x, y = inside_point(cam)
+    assert bluish(frame[y // 2, x // 2]) > 25
+    assert np.abs(frame[3, 3].astype(int) - GREY).max() < CODEC
+
+
+def test_max_side_none_keeps_the_pictures_own_size(world):
+    make, _, tmp = world
+    scene, _ = make(cam=look_at((-2.5, 0.8, 1.2), size=(2560, 1920), f=2400.0))
+    big = tmp / "big.png"
+    cv2.imwrite(str(big), np.full((1920, 2560, 3), GREY, np.uint8))
+    out = render_overlay(scene, "camera", open_source(big), [motion(1.0)], tmp / "full.mp4", fps=10.0, duration=0.1,
+                         max_side=None)
+    assert read(out)[0].shape == (1920, 2560, 3)
+
+
+def test_a_shrunk_video_has_even_sides_whatever_the_aspect(world):
+    # H.264 wants even sides, and 321x240 has no smaller size of exactly its own aspect
+    make, _, tmp = world
+    scene, cam = make(cam=look_at((-2.5, 0.8, 1.2), size=(321, 240)))
+    odd = tmp / "odd.png"
+    cv2.imwrite(str(odd), np.full((240, 321, 3), GREY, np.uint8))
+    out = render_overlay(scene, "camera", open_source(odd), [motion(1.0)], tmp / "odd.mp4", max_side=100)
+    frame = read(out)[0]
+    assert frame.shape == (74, 100, 3)
+    x, y = inside_point(cam)
+    assert bluish(frame[round(y * 74 / 240), round(x * 100 / 321)]) > 25

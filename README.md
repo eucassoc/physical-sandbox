@@ -251,7 +251,8 @@ writes, into `out/`:
   cannot tell yet is listed with the reason.
 - `gaps.png`: the tool gap over time.
 - `replay.mp4`: both machines over the picture as see-through shells, A blue and B orange, with the tool tips'
-  paths.
+  paths. A picture wider or taller than 1920 pixels (a phone photo) is shrunk to 1920 for the video; the numbers
+  are not affected.
 
 A motion (`--a`, `--b`) is either a recording file, `file.record.json` or `file.record.json#label` to pick one
 motion in it, or one episode of a LeRobot v3 dataset, `lerobot:<dataset folder>#<episode>`. With a LeRobot A

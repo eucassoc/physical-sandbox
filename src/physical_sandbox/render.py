@@ -37,6 +37,9 @@ NEAR_M = 0.05
 _EXTENT = 50.0  # MuJoCo's clipping planes are fractions of the model's extent
 CODECS = ("avc1", "mp4v")  # H.264 plays in browsers and chat apps; MPEG-4 Part 2 when this OpenCV has no H.264
 SHOW = {"machine": True, "trail": True, "link": True}
+# The longest side of the video in pixels. A phone photo is 4032x3024: a video that size takes minutes to draw
+# and many players refuse it. A bigger picture is shrunk to this before anything is drawn on it.
+MAX_SIDE = 1920
 _SHELL_ALPHA = 0.5
 _VISUAL_GROUP = 1  # with discardvisual="false" MuJoCo's URDF loader puts visuals in group 1 and collisions in group 0
 _PRIMITIVES = {  # geom type -> (MJCF name, how many size numbers MJCF wants)
@@ -201,9 +204,22 @@ def _open_writer(path: Path, fps: float, size: tuple[int, int]):
     return None
 
 
+def _shrunk(cam: Camera, max_side: int | None) -> Camera:
+    """``cam`` for a picture whose longer side is ``max_side`` (both sides even, as H.264 wants); ``cam`` itself
+    when it already fits. The two sides round separately, so fx and fy are scaled each by its own side."""
+    if max_side is None or max(cam.width, cam.height) <= max_side:
+        return cam
+    f = max_side / max(cam.width, cam.height)
+    w, h = (max(2, int(round(side * f / 2)) * 2) for side in (cam.width, cam.height))
+    K = cam.K.copy()
+    K[0] *= w / cam.width
+    K[1] *= h / cam.height
+    return Camera(w, h, K, cam.dist, cam.R, cam.t)
+
+
 def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list[Motion], out: Path, *,
                    colors=COLORS, show=None, fps: float | None = None, start_s: float = 0.0,
-                   duration: float | None = None, progress=None) -> Path:
+                   duration: float | None = None, progress=None, max_side: int | None = MAX_SIDE) -> Path:
     """Draw ``motions`` (one or two) over ``source`` through the site camera ``camera_name``; write an mp4.
 
     Time runs from ``start_s`` for the longest motion's duration at ``fps`` (default: the source's, else 30);
@@ -213,18 +229,22 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
     (a white line between the two tool tips, when two motions drive the same machine); missing keys stay on.
     ``duration`` (seconds) cuts the video short of the longest motion; a motion that is longer is just not shown
     to its end. ``progress(k, n)``, when given, is called after each written frame (k of n frames done).
+    A picture whose longer side is over ``max_side`` pixels is shrunk to it first; None keeps the picture's size.
     """
     if not motions:
         raise ValueError("no motions to draw")
     if len(motions) > len(colors):
         raise ValueError(f"{len(motions)} motions but only {len(colors)} colours")
+    if max_side is not None and not max_side >= 2:
+        raise ValueError(f"max_side must be at least 2, got {max_side}")
     if camera_name not in scene.site.cameras:
         raise ValueError(f"the site has no camera {camera_name!r} (it has {sorted(scene.site.cameras)})")
     unknown = sorted(set(show or {}) - set(SHOW))
     if unknown:
         raise ValueError(f"unknown show keys {unknown} (use {sorted(SHOW)})")
     show = {**SHOW, **(show or {})}
-    cam = camera_for(source, scene.site.cameras[camera_name])
+    full = camera_for(source, scene.site.cameras[camera_name])
+    cam = _shrunk(full, max_side)
     bgr = [_bgr(c) for c in colors]
     paths = [scene.tool_path(m) for m in motions]  # also checks each motion against its placed machine
     fps = float(fps or source.fps or 30.0)
@@ -249,8 +269,10 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
         for k in range(n_frames):
             t = k / fps
             img = np.ascontiguousarray(source.at(start_s + t))
-            if img.shape[:2] != (cam.height, cam.width):
-                raise ValueError(f"the picture changed size: {img.shape[1]}x{img.shape[0]}, expected {cam.width}x{cam.height}")
+            if img.shape[:2] != (full.height, full.width):
+                raise ValueError(f"the picture changed size: {img.shape[1]}x{img.shape[0]}, expected {full.width}x{full.height}")
+            if cam is not full:
+                img = cv2.resize(img, (cam.width, cam.height), interpolation=cv2.INTER_AREA)
             tips = []
             for mi, motion in enumerate(motions):
                 placed = scene.machines[motion.machine]

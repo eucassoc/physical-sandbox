@@ -1193,7 +1193,9 @@ def test_the_stage_html_has_the_save_controls(served):
     for words in ("上書き保存", "新しい記録として保存", "エクスポート", "PS.com 未保存", "再送信する", "psbx login"):
         assert words in html
     assert "aOpened?.own && state?.login?.signedIn" in html  # 上書き保存 is hidden while signed out
-    assert "直す" not in html and "直し" not in html  # 再送信する, never 送り直す
+    # 再送信する, never 送り直す. 置き直す is the one exception: PS.com's own word for putting a robot somewhere else
+    rest = html.replace("置き直す", "").replace("置き直し", "")
+    assert "直す" not in rest and "直し" not in rest
 
 
 def test_two_offline_saves_over_keep_one_copy_and_make_one_version(ps_com, placed, cache_mini, tmp_path):
@@ -1282,3 +1284,16 @@ def test_the_stage_has_one_word_for_signing_in():
     src = Path(stage_module.__file__)
     for path in (src, src.parent / "mcp" / "widgets" / "stage.html", src.parent / "unsent.py"):
         assert "サインイン" not in path.read_text(), path.name
+
+
+# 2026-11-17: the same hands as PS.com's screen. A click on the machine picks it and puts a button beside it;
+# the next click on the floor puts it there; the arrow keys turn it; Esc lets go
+def test_the_stage_html_has_the_picked_machines_menu(served):
+    html = get(served().url)[2]
+    assert 'id="pickMenu"' in html and 'id="pickReplace"' in html
+    assert ">置き直す<" in html
+    # what the page says while the machine waits for its place, and the keys it takes
+    assert "置く場所をクリックしてください（Esc でやめる）" in html
+    assert "ArrowLeft" in html and "ArrowRight" in html and "Escape" in html
+    # 15 degrees a press, as PS.com turns
+    assert "TURN_STEP_DEG = 15" in html

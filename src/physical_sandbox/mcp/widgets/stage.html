@@ -24,6 +24,14 @@
   .stack canvas { display: block; width: 100%; height: auto; border-radius: 0; }
   .stack canvas + canvas { position: absolute; inset: 0; height: 100%; background: transparent; }
   .stack canvas#mview { cursor: grab; }
+  .stack.placing canvas#mview { cursor: crosshair; }
+  /* The picked machine's menu, beside it on the picture: the same hands as PS.com's screen */
+  .pickmenu { position: absolute; z-index: 3; display: flex; gap: 6px; padding: 6px; border-radius: 10px;
+    background: rgba(28, 32, 41, 0.94); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45); }
+  .pickmenu[hidden] { display: none; }
+  .pickmenu button { padding: 7px 12px; border-radius: 8px; border: 1px solid #4a5160; background: #2b303b;
+    color: #fff; font: inherit; font-size: 14px; line-height: 1; white-space: nowrap; cursor: pointer; }
+  .pickmenu button:hover { background: #3a4150; }
   .machinebar input[type=text], .machinebar input[type=search] { font: inherit; padding: 3px 6px; border: 1px solid var(--muted); border-radius: 4px; background: transparent; color: var(--fg); min-width: 0; flex: 1 1 12em; }
   .machinebar select, .placebar input[type=number] { font: inherit; padding: 3px 4px; border: 1px solid var(--muted); border-radius: 4px; background: transparent; color: var(--fg); }
   .placebar input[type=number] { width: 5.5em; }
@@ -92,6 +100,7 @@
         <canvas id="mphoto" width="1280" height="720"></canvas>
         <canvas id="mgl" width="1280" height="720"></canvas>
         <canvas id="mview" width="1280" height="720"></canvas>
+        <div class="pickmenu" id="pickMenu" hidden><button id="pickReplace" type="button">置き直す</button></div>
       </div>
       <div class="bar placebar">
         <label>x <input type="number" id="px" step="0.01" /> m</label>
@@ -506,24 +515,91 @@ function toMachinePhoto(e) {
   const r = mView.getBoundingClientRect();
   return { u: (e.clientX - r.left) / r.width * state.width, v: (e.clientY - r.top) / r.height * state.height };
 }
+
+// The picked machine, as PS.com's screen has it: a click on the machine picks it and puts 「置き直す」 beside it;
+// the next click on the floor puts it there; ← → turn it 15° a press; Esc lets go. A drag still moves it.
+const TURN_STEP_DEG = 15;
+const pickMenu = document.getElementById('pickMenu');
+const pickReplace = document.getElementById('pickReplace');
+const mStack = mView.parentElement;
+let picked = false;      // the machine is picked: the menu is up, the arrow keys turn it
+let placing = false;     // 「置き直す」 was pressed: the next click on the floor puts it there
+let mPress = null;       // where the pointer went down, to tell a click from a drag
+function unpick(words = '') {
+  picked = false;
+  placing = false;
+  pickMenu.hidden = true;
+  mStack.classList.remove('placing');
+  if (words !== null) say(words);
+}
+function pick(e) {
+  picked = true;
+  placing = false;
+  mStack.classList.remove('placing');
+  pickMenu.hidden = false;
+  // Beside the click, kept inside the picture
+  const box = mStack.getBoundingClientRect();
+  const left = e.clientX - box.left + 14;
+  const top = e.clientY - box.top + 14;
+  pickMenu.style.left = `${Math.max(8, Math.min(left, box.width - pickMenu.offsetWidth - 8))}px`;
+  pickMenu.style.top = `${Math.max(8, Math.min(top, box.height - pickMenu.offsetHeight - 8))}px`;
+  say('「置き直す」で置き場所を変えます。← → で向きを変えます（Esc でやめる）');
+}
+pickReplace.addEventListener('click', () => {
+  if (!mdata) return;
+  placing = true;
+  pickMenu.hidden = true;
+  mStack.classList.add('placing');
+  say('置く場所をクリックしてください（Esc でやめる）');
+});
+window.addEventListener('keydown', (e) => {
+  if (!picked || !mdata) return;
+  if (e.target?.closest?.('input, select, textarea')) return;
+  if (e.key === 'Escape') { unpick(); return; }
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  e.preventDefault();
+  setPlace({ yaw: place.yaw + (e.key === 'ArrowLeft' ? TURN_STEP_DEG : -TURN_STEP_DEG) });
+});
+
 mView.addEventListener('pointerdown', (e) => {
   if (!state || !mdata) return;
   const q = toMachinePhoto(e);
+  mPress = { x: e.clientX, y: e.clientY, onMachine: false };
   const p = pixelOfFloor(mdata.camera, place.x, place.y);
   const reach = 60 / (mView.getBoundingClientRect().width / state.width);   // 60 screen pixels
-  if (!p || Math.hypot(q.u - p.u, q.v - p.v) > reach) return;
+  if (placing || !p || Math.hypot(q.u - p.u, q.v - p.v) > reach) return;
   const f = floorPointJs(mdata.camera, q.u, q.v);
   if (!f) return;
+  mPress.onMachine = true;
   mDrag = { dx: place.x - f.x, dy: place.y - f.y };
   mView.setPointerCapture(e.pointerId);
 });
 mView.addEventListener('pointermove', (e) => {
   if (!mDrag) return;
+  // A press that has not moved yet is a click (it picks): the base stays put until the pointer travels
+  if (mPress && Math.hypot(e.clientX - mPress.x, e.clientY - mPress.y) <= 4) return;
+  if (picked) unpick(null);
   const q = toMachinePhoto(e);
   const f = floorPointJs(mdata.camera, q.u, q.v);
   if (f) setPlace({ x: f.x + mDrag.dx, y: f.y + mDrag.dy });
 });
 const endMachineDrag = () => { mDrag = null; };
+mView.addEventListener('pointerup', (e) => {
+  const press = mPress;
+  mPress = null;
+  if (!press || !mdata || Math.hypot(e.clientX - press.x, e.clientY - press.y) > 4) return;
+  if (placing) {
+    // 「置き直す」: the machine goes to the floor point clicked
+    const q = toMachinePhoto(e);
+    const f = floorPointJs(mdata.camera, q.u, q.v);
+    if (!f) { say('そこは床ではありません'); return; }
+    setPlace({ x: f.x, y: f.y });
+    unpick('置き直しました。「決定」で保存します');
+    return;
+  }
+  if (press.onMachine) pick(e);
+  else if (picked) unpick();
+});
 mView.addEventListener('pointerup', endMachineDrag);
 mView.addEventListener('pointercancel', endMachineDrag);
 mView.addEventListener('lostpointercapture', endMachineDrag);

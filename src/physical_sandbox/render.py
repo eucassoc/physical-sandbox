@@ -1,8 +1,9 @@
 """The replay video: one or two motions of a machine drawn over the site's picture, through the site camera.
 
-Each record's machine is drawn as a see-through shell in that record's colour only (never the machine's own
-colours): it is rendered opaque with MuJoCo through the photo camera's numbers, then blended half and half
-into the picture where it covers it. Machines of different records are blended one after the other, so they
+One motion alone is drawn as the machine itself: solid and white, hiding the picture behind it. Two motions
+are told apart instead: each record's machine is a see-through shell in that record's colour only (never the
+machine's own colours), rendered opaque with MuJoCo through the photo camera's numbers, then blended half and
+half into the picture where it covers it. Machines of different records are blended one after the other, so they
 never hide each other. On top of that: the tool tip's path so far (a trail, the second record's dashed) and
 a white link between the two tool tips.
 
@@ -41,6 +42,7 @@ SHOW = {"machine": True, "trail": True, "link": True}
 # and many players refuse it. A bigger picture is shrunk to this before anything is drawn on it.
 MAX_SIDE = 1920
 _SHELL_ALPHA = 0.5
+SOLID = "#ececec"  # a machine drawn alone: white, a little under full so that its shading still shows
 _VISUAL_GROUP = 1  # with discardvisual="false" MuJoCo's URDF loader puts visuals in group 1 and collisions in group 0
 _PRIMITIVES = {  # geom type -> (MJCF name, how many size numbers MJCF wants)
     int(mujoco.mjtGeom.mjGEOM_SPHERE): ("sphere", 1),
@@ -222,7 +224,7 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
                    duration: float | None = None, progress=None, max_side: int | None = MAX_SIDE) -> Path:
     """Draw ``motions`` (one or two) over ``source`` through the site camera ``camera_name``; write an mp4.
 
-    Time runs from ``start_s`` for the longest motion's duration at ``fps`` (default: the source's, else 30);
+    One motion is drawn solid and white; two are see-through shells in ``colors``. Time runs from ``start_s`` for the longest motion's duration at ``fps`` (default: the source's, else 30);
     each output frame takes the source frame at that time (a still repeats) and shows every motion at the time
     since the start. The number of frames is ``round(duration * fps)``, at least 1: frame k is time k / fps.
     ``show`` toggles ``machine`` (the shells), ``trail`` (tool tip path so far, record B dashed) and ``link``
@@ -246,6 +248,7 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
     full = camera_for(source, scene.site.cameras[camera_name])
     cam = _shrunk(full, max_side)
     bgr = [_bgr(c) for c in colors]
+    solid = len(motions) == 1  # alone: the machine itself, white and opaque; two: see-through, one colour each
     paths = [scene.tool_path(m) for m in motions]  # also checks each motion against its placed machine
     fps = float(fps or source.fps or 30.0)
     if not fps > 0:
@@ -281,8 +284,11 @@ def render_overlay(scene: Scene, camera_name: str, source: Source, motions: list
                 poses = {name: T @ P for name, P in local.items()}
                 tips.append(poses[placed.machine.tool_link][:3, 3])
                 if shells is not None:
-                    shell, mask = shells.draw(mi, poses, bgr[mi])
-                    img[mask] = (_SHELL_ALPHA * img[mask] + (1 - _SHELL_ALPHA) * shell[mask]).astype(np.uint8)
+                    shell, mask = shells.draw(mi, poses, _bgr(SOLID) if solid else bgr[mi])
+                    if solid:
+                        img[mask] = shell[mask]
+                    else:
+                        img[mask] = (_SHELL_ALPHA * img[mask] + (1 - _SHELL_ALPHA) * shell[mask]).astype(np.uint8)
             if show["trail"]:
                 for mi, motion in enumerate(motions):
                     upto = int(np.searchsorted(motion.t, t, side="right"))

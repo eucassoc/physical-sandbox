@@ -104,9 +104,8 @@ def projected_bbox(cam, *boxes):
 
 
 def shell_bbox(frame, threshold=28):
-    """(x0, y0, x1, y1) of the pixels that moved toward blue."""
-    b, g, r = (frame[..., i].astype(int) for i in range(3))
-    ys, xs = np.nonzero(b - r > threshold)
+    """(x0, y0, x1, y1) of the pixels that moved toward white (a machine drawn alone, over the grey picture)."""
+    ys, xs = np.nonzero(frame.astype(int).min(axis=2) - GREY > threshold)
     return xs.min(), ys.min(), xs.max(), ys.max()
 
 
@@ -120,12 +119,17 @@ def inside_point(cam):
     return tuple(int(v) for v in cam.project(np.array([c]))[0])
 
 
+def whiter(pixel):
+    """How far the pixel is above the grey picture in every channel: a machine drawn alone is white."""
+    return int(min(int(v) for v in pixel)) - GREY
+
+
 def bluish(pixel):
     b, g, r = (int(v) for v in pixel)
     return b - r
 
 
-def test_shell_is_blue_inside_the_box_and_grey_outside(world):
+def test_the_machine_is_white_inside_the_box_and_the_picture_is_grey_outside(world):
     make, still, tmp = world
     scene, cam = make()
     out = render_overlay(scene, "camera", open_source(still), [motion(1.0)], tmp / "a.mp4")
@@ -133,7 +137,7 @@ def test_shell_is_blue_inside_the_box_and_grey_outside(world):
     assert frames and frames[0].shape == (H, W, 3)
     x, y = inside_point(cam)
     for f in (frames[0], frames[-1]):
-        assert bluish(f[y, x]) > 25            # moved toward the record's blue
+        assert whiter(f[y, x]) > 25            # the machine, white
         assert np.abs(f[5, 5].astype(int) - GREY).max() < CODEC  # outside: the picture as it was
         assert np.abs(f[H - 6, W - 6].astype(int) - GREY).max() < CODEC
 
@@ -167,7 +171,7 @@ def test_second_call_in_one_process_is_not_black(world):
     for name in ("one.mp4", "two.mp4", "three.mp4"):
         out = render_overlay(scene, "camera", open_source(still), [motion(0.5)], tmp / name)
         f = read(out)[0]
-        assert bluish(f[y, x]) > 25, name
+        assert whiter(f[y, x]) > 25, name
 
 
 def test_two_records_each_in_its_own_colour(world):
@@ -198,7 +202,7 @@ def test_toggles_machine_trail_link(world):
                                 show={"machine": False, "trail": True, "link": True})
     last = read(no_machine)[-1]
     assert np.abs(last.astype(int) - GREY).max() > 40   # trail and link lines are there
-    assert abs(bluish(last[y, x])) < CODEC                  # but no shell over the base box
+    assert abs(whiter(last[y, x])) < CODEC                  # but no shell over the base box
 
 
 def test_a_machine_not_in_the_scene_is_refused(world):
@@ -275,7 +279,7 @@ def test_collision_shapes_are_not_drawn(world):
     # a point inside the big collision sphere but well outside the visual box stays the picture
     u, v = (int(c) for c in cam.project(np.array([[0.0, 0.5, 0.15]]))[0])
     assert want[0] - 8 > u or u > want[2] + 8 or v > want[3] + 8 or v < want[1] - 8
-    assert abs(bluish(f[v, u])) < CODEC
+    assert abs(whiter(f[v, u])) < CODEC
 
 
 def test_a_machine_with_only_collision_shapes_is_drawn_from_them(world):
@@ -285,7 +289,7 @@ def test_a_machine_with_only_collision_shapes_is_drawn_from_them(world):
     scene = scene_for(tmp, text, "bare", cam)
     out = render_overlay(scene, "camera", open_source(still), [motion(0.0)], tmp / "bare.mp4", show=NO_OVERLAY)
     x, y = inside_point(cam)
-    assert bluish(first_frame(out)[y, x]) > 25
+    assert whiter(first_frame(out)[y, x]) > 25
 
 
 def cube_obj(sx, sy, sz):
@@ -449,7 +453,7 @@ def test_a_machine_between_the_old_and_the_new_near_clip_is_drawn(world, tmp_pat
     scene, _ = make(cam=cam)
     frame = read(render_overlay(scene, "camera", open_source(still), [motion(0.1, n=2)], tmp / "n.mp4",
                                 fps=10.0, show={"trail": False, "link": False}))[0]
-    assert bluish(frame[H // 2, W // 2])
+    assert whiter(frame[H // 2, W // 2])
 
 
 def test_a_big_picture_gives_a_video_no_longer_than_1920_on_its_long_side(world):
@@ -469,7 +473,7 @@ def test_the_shell_of_a_shrunk_video_sits_on_the_shrunk_projection(world):
     frame = read(out)[0]
     assert frame.shape == (120, 160, 3)
     x, y = inside_point(cam)
-    assert bluish(frame[y // 2, x // 2]) > 25
+    assert whiter(frame[y // 2, x // 2]) > 25
     assert np.abs(frame[3, 3].astype(int) - GREY).max() < CODEC
 
 
@@ -493,4 +497,16 @@ def test_a_shrunk_video_has_even_sides_whatever_the_aspect(world):
     frame = read(out)[0]
     assert frame.shape == (74, 100, 3)
     x, y = inside_point(cam)
-    assert bluish(frame[round(y * 74 / 240), round(x * 100 / 321)]) > 25
+    assert whiter(frame[round(y * 74 / 240), round(x * 100 / 321)]) > 25
+
+
+def test_one_motion_alone_is_drawn_solid_and_white(world):
+    # a machine by itself looks like a machine: opaque and white, none of the picture showing through
+    make, still, tmp = world
+    scene, cam = make()
+    frame = read(render_overlay(scene, "camera", open_source(still), [motion(1.0)], tmp / "w.mp4"))[0]
+    x, y = inside_point(cam)
+    b, g, r = (int(v) for v in frame[y, x])
+    assert min(b, g, r) > 190                  # white; a half-and-half blend with the grey picture would be about 160
+    assert max(b, g, r) - min(b, g, r) < 12    # and not tinted with a record's colour
+    assert np.abs(frame[5, 5].astype(int) - GREY).max() < CODEC  # outside: the picture as it was

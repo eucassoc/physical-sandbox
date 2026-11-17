@@ -1,4 +1,4 @@
-// The machines drawn as see-through shells through the site's camera (three.js), and the lines drawn over them.
+// The machines drawn through the site's camera (three.js): one alone solid and white, two as see-through shells, and the lines drawn over them.
 // Plain script text, inlined inside the page's module script after the three bundle; it holds no page state.
 
 /** The site frame (x forward, y left, z up) as three's world (y up): (x, y, z) -> (x, z, -y) */
@@ -46,8 +46,12 @@ function bytesOf(b64) {
   return u.buffer;
 }
 
+/** A machine drawn alone (one colour given): white, a little under full so that its shading shows. */
+const SOLID_COLOR = '#ececec';
+
 /** The scene for a machine's shells: `model.links` read from `buffer` (positions, then triangle indices, each link
- *  in its own frame), one group of meshes per colour. Returns { renderer, scene, camera: null, site, records:
+ *  in its own frame), one group of meshes per colour: one colour draws the machine solid and white, more draw
+ *  see-through shells in those colours. Returns { renderer, scene, camera: null, site, records:
  *  [{ group, meshes }], geometries, materials }; the caller makes the camera, calls placeCamera and stores it in
  *  three.camera. */
 function buildShells(glCanvas, model, buffer, colors) {
@@ -72,11 +76,15 @@ function buildShells(glCanvas, model, buffer, colors) {
   site.matrixAutoUpdate = false;
   site.matrix.makeBasis(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 1, 0));
   scene.add(site);
-  // Each record in its own colour only (none of the machine's own), see-through. A machine first writes its
-  // depth without colour, then its colour over only its front faces: it reads as one tinted shell rather
-  // than a tangle of its own insides
+  // One machine alone is drawn as the machine itself: solid and white, hiding the picture behind it (the replay
+  // video does the same). Two are told apart instead: each record in its own colour only (none of the machine's
+  // own), see-through. A machine first writes its depth without colour, then its colour over only its front
+  // faces: it reads as one tinted shell rather than a tangle of its own insides
+  const solid = colors.length === 1;
   const depthOnly = new THREE.MeshBasicMaterial({ colorWrite: false });
-  const materials = colors.map((c) => new THREE.MeshLambertMaterial({ color: c, transparent: true, opacity: 0.5, depthWrite: false, depthFunc: THREE.LessEqualDepth }));
+  const materials = colors.map((c) => (solid
+    ? new THREE.MeshLambertMaterial({ color: SOLID_COLOR, depthFunc: THREE.LessEqualDepth })
+    : new THREE.MeshLambertMaterial({ color: c, transparent: true, opacity: 0.5, depthWrite: false, depthFunc: THREE.LessEqualDepth })));
   const records = colors.map((_, r) => {
     const group = new THREE.Group();
     const meshes = [];

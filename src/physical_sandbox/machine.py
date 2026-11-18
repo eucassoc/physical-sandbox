@@ -19,6 +19,7 @@ import mujoco
 import numpy as np
 
 _MOVABLE = ("revolute", "prismatic", "continuous")
+_PREPARED = "2"  # raise when _prepare writes a different URDF for the same files
 
 
 def _cache_root() -> Path:
@@ -40,7 +41,9 @@ def inside(root: Path, path: Path, what: str) -> Path:
 
 
 def _find_mesh(urdf_dir: Path, name: str) -> Path:
-    """Resolve a URDF mesh reference: as written, with .obj for .stl, then under ``meshes/``.
+    """Resolve a URDF mesh reference: as written, with .obj for another format, then under ``meshes/``.
+
+    A catalog folder holds each mesh as .obj under ``meshes/``, whatever the URDF names (.stl, .dae).
 
     The file found must lie inside ``urdf_dir`` (OutsideFolder otherwise, even when it exists)."""
     ref = name
@@ -49,7 +52,7 @@ def _find_mesh(urdf_dir: Path, name: str) -> Path:
         ref = ref.split("/", 1)[1] if "/" in ref else ref
     rel = Path(ref)
     variants = [rel]
-    if rel.suffix.lower() == ".stl":
+    if rel.suffix.lower() != ".obj":
         variants.append(rel.with_suffix(".obj"))
         variants.append(rel.with_suffix(".OBJ"))
     candidates = []
@@ -62,6 +65,13 @@ def _find_mesh(urdf_dir: Path, name: str) -> Path:
         if c.is_file():
             return inside(urdf_dir, c, f"mesh {name!r}")
     raise FileNotFoundError(f"mesh {name!r} not found next to {urdf_dir} (tried {[str(c) for c in candidates]})")
+
+
+def _a_body_can_have(inertia: ET.Element) -> bool:
+    """Whether a URDF <inertia> is positive definite (MuJoCo refuses one that is not)."""
+    v = {k: float(inertia.get(k, "0")) for k in ("ixx", "ixy", "ixz", "iyy", "iyz", "izz")}
+    full = np.array([[v["ixx"], v["ixy"], v["ixz"]], [v["ixy"], v["iyy"], v["iyz"]], [v["ixz"], v["iyz"], v["izz"]]])
+    return bool(np.linalg.eigvalsh(full).min() > 0)
 
 
 def _strip_mtl(data: bytes) -> bytes:
@@ -101,7 +111,31 @@ def _prepare(urdf_path: Path) -> Path:
     root = tree.getroot()
     st = urdf_path.stat()
     key = hashlib.sha1()
-    key.update(f"{urdf_path}|{st.st_mtime_ns}|{st.st_size}".encode())
+    # _PREPARED: a folder written by an earlier way of preparing is not taken for this one's
+    key.update(f"{_PREPARED}|{urdf_path}|{st.st_mtime_ns}|{st.st_size}".encode())
+    for link in root.iter("link"):
+        # Nothing here collides: a collision mesh that is not in the folder (a catalog folder keeps the
+        # drawn meshes only) is left out. One that leads outside the folder is still refused
+        for collision in link.findall("collision"):
+            for mesh in collision.iter("mesh"):
+                try:
+                    _find_mesh(urdf_path.parent, mesh.get("filename") or "")
+                except FileNotFoundError:
+                    link.remove(collision)
+                    break
+        # MuJoCo refuses a moving body with no mass, and a URDF written only to be drawn has none.
+        # Only the kinematics are used, so any small mass does
+        for visual in link.findall("visual"):
+            for extra in visual.findall("material")[1:]:  # MuJoCo takes one material for a visual
+                visual.remove(extra)
+        inertia = link.find("inertial/inertia")
+        if inertia is not None and not _a_body_can_have(inertia):
+            for term in ("ixy", "ixz", "iyz"):  # the diagonal alone is an inertia some body has
+                inertia.set(term, "0")
+        if link.find("inertial") is None:
+            inertial = ET.SubElement(link, "inertial")
+            ET.SubElement(inertial, "mass", value="0.001")
+            ET.SubElement(inertial, "inertia", ixx="1e-6", ixy="0", ixz="0", iyy="1e-6", iyz="0", izz="1e-6")
     srcs: dict[str, Path] = {}  # mesh reference as written -> resolved file
     for mesh in root.iter("mesh"):
         name = mesh.get("filename")

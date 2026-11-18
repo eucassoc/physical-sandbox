@@ -313,3 +313,63 @@ def test_two_processes_loading_at_once_both_get_a_whole_folder(tmp_path, cache):
 def _load_in_child(urdf, cache_dir):
     os.environ["PS_CACHE_DIR"] = cache_dir
     return float(load_machine(urdf).fk(np.array([0.0]))[0])
+
+
+# 2026-11-18: the public catalog's Panda, UR5, Go2 and Scout name .dae meshes; the catalog folder holds
+# the same mesh as .obj under meshes/. Only .stl fell back to .obj, so these did not load
+def test_dae_reference_falls_back_to_obj_under_meshes(tmp_path, cache):
+    (tmp_path / "meshes" / "robots" / "visual").mkdir(parents=True)
+    (tmp_path / "meshes" / "robots" / "visual" / "part.obj").write_text(OBJ_WITH_MTL)
+    urdf = tmp_path / "tiny.urdf"
+    urdf.write_text(URDF.format(mesh="package://some-robot-data/robots/visual/part.dae"))
+    assert load_machine(urdf).model.nmesh == 1
+
+
+# 2026-11-18: the catalog keeps the meshes that are drawn, not the collision ones (TIAGo++). Nothing here
+# collides, so a collision mesh that is not in the folder is left out; a drawn one is still refused
+def test_a_collision_mesh_that_is_not_in_the_folder_is_left_out(tmp_path, cache):
+    (tmp_path / "part.obj").write_text(OBJ_WITH_MTL)
+    urdf = tmp_path / "tiny.urdf"
+    urdf.write_text(URDF.format(mesh="part.obj").replace(
+        '<link name="tip"/>',
+        '<link name="tip"><collision><geometry><mesh filename="package://x/collision/tip.stl"/></geometry></collision></link>'))
+    m = load_machine(urdf)
+    assert m.model.nmesh == 1 and m.joint_names == ["j1"]
+
+
+# 2026-11-18: a URDF written only to be drawn has no <inertial> (the catalog's drone and gate). MuJoCo
+# refuses a moving body with no mass; only the kinematics are used here, so a small mass is filled in
+def test_a_moving_link_without_inertial_loads(tmp_path, cache):
+    (tmp_path / "part.obj").write_text(OBJ_WITH_MTL)
+    urdf = tmp_path / "tiny.urdf"
+    text = URDF.format(mesh="part.obj")
+    start = text.index("<inertial>", text.index('<link name="arm">'))
+    end = text.index("</inertial>", start) + len("</inertial>")
+    urdf.write_text(text[:start] + text[end:].replace("<visual><geometry><mesh", "<visual><geometry><mesh", 1))
+    m = load_machine(urdf)
+    assert m.joint_names == ["j1"]
+    np.testing.assert_allclose(m.fk(np.array([0.0])), [0.3, 0.0, 0.0], atol=1e-9)
+
+
+# 2026-11-18: the catalog's Go2 lists every material of a mesh in one <visual>; MuJoCo takes one
+def test_a_visual_with_several_materials_loads(tmp_path, cache):
+    (tmp_path / "part.obj").write_text(OBJ_WITH_MTL)
+    urdf = tmp_path / "tiny.urdf"
+    urdf.write_text(URDF.format(mesh="part.obj").replace(
+        '<mesh filename="part.obj"/></geometry>',
+        '<mesh filename="part.obj"/></geometry><material name="a"><color rgba="1 0 0 1"/></material>'
+        '<material name="b"><color rgba="0 0 1 1"/></material>'))
+    assert load_machine(urdf).model.nmesh == 1
+
+
+# 2026-11-18: the catalog's TIAGo++ has a link whose inertia no rigid body can have (its off-diagonal
+# terms outweigh the diagonal). MuJoCo refuses it; only the kinematics are used, so the terms are dropped
+def test_an_inertia_no_body_can_have_loads(tmp_path, cache):
+    (tmp_path / "part.obj").write_text(OBJ_WITH_MTL)
+    urdf = tmp_path / "tiny.urdf"
+    urdf.write_text(URDF.format(mesh="part.obj").replace(
+        '<inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>',
+        '<inertia ixx="0.00000002371" ixy="0.00000006119" ixz="0.00000001179" iyy="0.00000002833" '
+        'iyz="0.00000000774" izz="0.00000003849"/>'))
+    m = load_machine(urdf)
+    np.testing.assert_allclose(m.fk(np.array([0.0])), [0.3, 0.0, 0.0], atol=1e-9)

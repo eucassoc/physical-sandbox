@@ -82,9 +82,23 @@ def _device_ids(motions) -> list:
     return ids
 
 
-def _record_dict(entries, site_id: str) -> dict:
+def record_floor(corners_m) -> dict | None:
+    """A site's floor (four corners; x forward, y left, z up) as a recording's ``floor``: the corners in the
+    recording's own frame (+Y up, so (x, y, z) here is (x, z, -y) there), which a headset lines the recording
+    up on. None for no floor. The site file stays the place the floor is decided; this is the copy that travels."""
+    if corners_m is None:
+        return None
+    corners = [[float(v) for v in c] for c in corners_m]
+    if len(corners) != 4 or any(len(c) != 3 for c in corners):
+        raise ValueError("a floor has four corners of three numbers each")
+    # `0.0 - y` and `+ 0.0`: a zero stays a zero, so no -0.0 reaches the file
+    return {"source": "corners", "corners": [{"x": x + 0.0, "y": z + 0.0, "z": 0.0 - y} for x, y, z in corners]}
+
+
+def _record_dict(entries, site_id: str, floor=None) -> dict:
     """The recording dict for ``entries``, a list of (motion, product, pose-or-None); the one place that
-    knows the shape, shared by ``save_record`` and ``record_edit.new_record``."""
+    knows the shape, shared by ``save_record`` and ``record_edit.new_record``. ``floor``: the site's floor
+    corners (``record_floor``), or None."""
     ids, seen = [], {}
     for m, product, _pose in entries:
         base = product.split("/")[-1].split(":")[0] if ("/" in product or ":" in product) else product
@@ -108,6 +122,7 @@ def _record_dict(entries, site_id: str) -> dict:
         "device": "physical-sandbox",
         "frame": {"frameId": "site", "up": "+Y", "unit": "m"},
         "markers": [{"id": "1", "x": 0.0, "y": 0.0, "z": 0.0}, {"id": "2", "x": 1.0, "y": 0.0, "z": 0.0}],
+        **({"floor": record_floor(floor)} if floor is not None else {}),
         "equipment": {"site": {"id": site_id}, "devices": devices},
         "names": {d: d for d in ids},
         "traces": traces,
@@ -120,11 +135,12 @@ def joint_samples(m: Motion) -> list:
             for ti, row in zip(m.t, m.q)]
 
 
-def save_record(motions, site_id: str, path) -> None:
+def save_record(motions, site_id: str, path, *, floor=None) -> None:
     """Write the motions as a 0.4 recording (JSON) on the site frame ``site_id``.
 
-    The site frame's geometry lives in ``sites/<site_id>.json``, not here; the two markers are written
-    as the frame's own origin and unit point along +x.
+    The site frame's geometry lives in ``sites/<site_id>.json``; the two markers are written as the frame's
+    own origin and unit point along +x. ``floor``: that site's floor corners, written as the copy a headset
+    lines the recording up on (``record_floor``).
     """
     motions = list(motions)
     if not motions:
@@ -134,7 +150,7 @@ def save_record(motions, site_id: str, path) -> None:
     for m in motions:
         if not _PRODUCT.match(m.machine):
             raise ValueError(f"machine {m.machine!r} must be lowercase letters, digits, - or _ (it names the product)")
-    record = _record_dict([(m, m.machine, None) for m in motions], site_id)
+    record = _record_dict([(m, m.machine, None) for m in motions], site_id, floor)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text_atomic(path, json.dumps(record, indent=1) + "\n")  # a failed write leaves the old file whole

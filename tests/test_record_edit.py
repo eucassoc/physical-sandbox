@@ -110,3 +110,40 @@ def test_merge_gives_a_device_without_a_usable_pose_one_on_the_floor():
             raw["equipment"]["devices"][0]["pose"] = pose
         out = merge_into(raw, device_id="arm-1", motion=None, placement=(3, 4, 1.0), site_id=None)
         assert out["equipment"]["devices"][0]["pose"] == {"xyz": [3.0, 4.0, 0.0], "rpy": [0.0, 0.0, 1.0]}, pose
+
+
+# 2026-11-21: a recording carries the floor it was made on (PS.com's `floor`: four corners in its site
+# frame, +Y up), so a headset lines it up on those corners. The floor here is x forward, y left, z up
+A4 = np.array([[0, 0, 0], [0.297, 0, 0], [0.297, 0.21, 0], [0, 0.21, 0]], float)
+A4_SITE = {"source": "corners", "corners": [{"x": 0.0, "y": 0.0, "z": 0.0}, {"x": 0.297, "y": 0.0, "z": 0.0},
+                                            {"x": 0.297, "y": 0.0, "z": -0.21}, {"x": 0.0, "y": 0.0, "z": -0.21}]}
+
+
+def test_new_record_carries_the_floor_in_the_records_frame():
+    rec = new_record(_motion(), machine_ref="arm", placement=(0.1, 0.05, 0), site_id="s", floor=A4)
+    assert rec["floor"] == A4_SITE
+    assert "-0.0" not in json.dumps(rec["floor"])
+    assert "floor" not in new_record(_motion(), machine_ref="arm", placement=(0, 0, 0), site_id="s")
+
+
+def test_merge_onto_another_site_takes_that_sites_floor():
+    raw = _pscom()
+    raw["floor"] = {"source": "planes", "corners": [{"x": 0, "y": 0, "z": 0}, {"x": 4, "y": 0, "z": 0},
+                                                    {"x": 4, "y": 0, "z": 3}, {"x": 0, "y": 0, "z": 3}]}
+    dev = raw["equipment"]["devices"][0]["id"]
+    out = merge_into(raw, device_id=dev, motion=None, placement=(0.1, 0.05, 0), site_id="here", floor=A4)
+    assert out["floor"] == A4_SITE
+    # No floor given: the recording's own stays, as every part not given does
+    assert merge_into(raw, device_id=dev, motion=None, placement=None, site_id="here")["floor"] == raw["floor"]
+
+
+# 2026-11-21: a recording made on another floor (a sheet of another size, another room) is placed from
+# that floor's corner 1; opened on this site, the page says so. The same floor says nothing
+def test_floor_note_only_when_the_records_floor_is_not_this_sites():
+    from physical_sandbox.record_edit import floor_note
+    assert floor_note({"floor": A4_SITE}, (0.297, 0.21)) is None
+    assert floor_note({"floor": A4_SITE}, (0.2972, 0.2096)) is None  # within a few millimetres
+    assert floor_note({}, (0.297, 0.21)) is None and floor_note({"floor": A4_SITE}, None) is None
+    assert floor_note({"floor": {"corners": "junk"}}, (0.297, 0.21)) is None  # a floor not read is not judged
+    note = floor_note({"floor": A4_SITE}, (0.42, 0.297))
+    assert "0.297 × 0.21 m" in note and "0.42 × 0.297 m" in note

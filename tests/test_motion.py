@@ -185,3 +185,16 @@ def test_load_skips_devices_without_joints_and_keeps_the_others(tmp_path):
     motions = load_record(path)
     assert [m.machine for m in motions] == ["so101"]
     assert motions[0].q[:, 0].tolist() == [0.1, 0.2]
+
+
+# 2026-11-21: the recording carries the floor of the site it stands on (see test_record_edit.py)
+def test_save_record_writes_the_floor_when_given(tmp_path):
+    import json
+    floor = np.array([[0, 0, 0], [1.1, 0, 0], [1.1, 1.1, 0], [0, 1.1, 0]], float)
+    save_record(_two_motions(), "site-1", tmp_path / "with.record.json", floor=floor)
+    saved = json.loads((tmp_path / "with.record.json").read_text())
+    assert saved["floor"]["source"] == "corners"
+    assert saved["floor"]["corners"][2] == {"x": 1.1, "y": 0.0, "z": -1.1}
+    assert len(load_record(tmp_path / "with.record.json")) == 2
+    save_record(_two_motions(), "site-1", tmp_path / "without.record.json")
+    assert "floor" not in json.loads((tmp_path / "without.record.json").read_text())

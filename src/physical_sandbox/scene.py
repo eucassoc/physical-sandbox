@@ -112,7 +112,8 @@ def save_scene(scene: Scene, path) -> None:
     tmp_rec = path.with_name(f".{rec.name}.tmp")
     try:
         if scene.motions:
-            save_record(scene.motions, scene.site.id, tmp_rec)
+            save_record(scene.motions, scene.site.id, tmp_rec,
+                        floor=None if scene.site.floor is None else scene.site.floor.corners_m)
         tmp_scene.write_text(json.dumps(data, indent=1) + "\n")
         if scene.motions:
             os.replace(tmp_rec, rec)

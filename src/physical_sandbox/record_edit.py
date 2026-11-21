@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 
-from .motion import Motion, _PRODUCT, _record_dict, joint_samples
+from .motion import Motion, _PRODUCT, _record_dict, joint_samples, record_floor
 
 _REF = re.compile(r"^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9.-]*$")
 
@@ -15,19 +16,40 @@ def _pose(placement) -> dict:
 
 
 def new_record(motion: Motion, *, machine_ref: str, placement, site_id: str,
-               title: str | None = None, based_on: str | None = None) -> dict:
+               title: str | None = None, based_on: str | None = None, floor=None) -> dict:
     """A recording of one motion placed at ``placement`` (x, y, yaw) in the site frame (x forward, y left,
-    z up: the frame PS.com records use for ``pose``). ``machine_ref`` is a catalog ref or a bare name."""
+    z up: the frame PS.com records use for ``pose``). ``machine_ref`` is a catalog ref or a bare name.
+    ``floor``: the site's floor corners in that frame, carried as the recording's ``floor`` (``record_floor``)."""
     if not site_id:
         raise ValueError("site_id is empty")
     if not (_REF.match(machine_ref) or _PRODUCT.match(machine_ref)):
         raise ValueError(f"machine {machine_ref!r} is neither a catalog ref (handle/name:version) nor a bare name")
-    rec = _record_dict([(motion, machine_ref, _pose(placement))], site_id)
+    rec = _record_dict([(motion, machine_ref, _pose(placement))], site_id, floor)
     if title:
         rec["name"] = title
     if based_on:
         rec["basedOn"] = based_on
     return rec
+
+
+_SAME_FLOOR_M = 0.005  # edges closer than this are one floor measured twice
+
+
+def floor_note(raw: dict, site_edges_m) -> str | None:
+    """What to tell the person when a recording's own floor (``raw["floor"]``, edges 1→2 and 2→3) is not the
+    size of this site's (``site_edges_m``): the recording was made on another floor, and its machines stand
+    from that floor's corner 1. None when they agree, or when either floor is missing or cannot be read."""
+    try:
+        c = [(float(p["x"]), float(p.get("y", 0.0)), float(p["z"])) for p in raw["floor"]["corners"]]
+        own = tuple(math.dist(c[i], c[i + 1]) for i in (0, 1))
+        here = (float(site_edges_m[0]), float(site_edges_m[1]))
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    if all(abs(a - b) <= _SAME_FLOOR_M for a, b in zip(own, here)):
+        return None
+    own_size, here_size = (f"{round(e[0], 3):g} × {round(e[1], 3):g} m" for e in (own, here))
+    return (f"この記録は {own_size} の床で作られています（この場所の床は {here_size}）。"
+            "ロボットの位置は、記録の床の角 1 からの位置です")
 
 
 def _name_part(s: str) -> str:
@@ -58,9 +80,11 @@ def _moved_pose(pose, placement) -> dict:
     return {**pose, "xyz": [x, y, pose["xyz"][2]], "rpy": [pose["rpy"][0], pose["rpy"][1], yaw]}
 
 
-def merge_into(raw: dict, *, device_id: str, motion: Motion | None, placement, site_id: str | None) -> dict:
+def merge_into(raw: dict, *, device_id: str, motion: Motion | None, placement, site_id: str | None,
+               floor=None) -> dict:
     """A deep copy of ``raw`` where only the device's place (x, y and yaw of its pose), its trace and the site
-    frame's name change; ``None`` leaves that part as it was."""
+    frame change; ``None`` leaves that part as it was. ``floor``: the corners of the floor of the site the
+    recording now stands on (``record_floor``), which replace the recording's own."""
     out = copy.deepcopy(raw)
     devices = (out.get("equipment") or {}).get("devices") or []
     dev = next((d for d in devices if d.get("id") == device_id), None)
@@ -78,4 +102,6 @@ def merge_into(raw: dict, *, device_id: str, motion: Motion | None, placement, s
     if site_id is not None:
         out["siteFrameId"] = site_id
         out.setdefault("equipment", {}).setdefault("site", {})["id"] = site_id
+    if floor is not None:
+        out["floor"] = record_floor(floor)
     return out

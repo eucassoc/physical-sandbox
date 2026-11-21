@@ -648,6 +648,14 @@ class Stage:
             # A PS.com record is named by its name and version (its file is always record.json).
             path = Path(_split_label(spec)[0]).expanduser()
             several = len(load_record(path)) > 1
+            # A record made on another floor stands from that floor's corner 1: the page says so
+            try:
+                other = record_edit.floor_note(json.loads(path.read_text()),
+                                               None if site.floor is None else site.floor.edges_m)
+            except (OSError, ValueError):
+                other = None
+            if other:
+                notes.append(other)
             own = motion.label or motion.machine
             stem = stem or _record_stem(path)
             motion = dataclasses.replace(motion, label=f"{stem}-{own}" if several else stem)
@@ -750,11 +758,15 @@ class Stage:
         _, motion, _, opened = self._load_motion(spec)
         placed = self._placed_machine()  # the load needs exactly one
         placement = (placed["placed"]["x"], placed["placed"]["y"], placed["placed"]["yaw"])
-        site_id = self._decided_site().id
+        site = self._decided_site()
+        site_id = site.id
+        # The floor goes into the record: a headset lines the record up on its corners
+        floor = None if site.floor is None else site.floor.corners_m
         if opened is None:
             machine = self._machine_ref(placed)
             try:
-                record = record_edit.new_record(motion, machine_ref=machine, placement=placement, site_id=site_id)
+                record = record_edit.new_record(motion, machine_ref=machine, placement=placement, site_id=site_id,
+                                                floor=floor)
             except ValueError as e:
                 raise ValueError(f"ロボット {machine!r} の名前は記録に使えません（{e}）") from None
             return record, None, motion.label
@@ -765,7 +777,8 @@ class Stage:
         device = record_edit.device_of(raw, placed["id"]) or _joint_device(raw, spec)
         if device is None:
             raise ValueError("記録のどの機器に保存するかを特定できません")
-        record = record_edit.merge_into(raw, device_id=device, motion=None, placement=placement, site_id=site_id)
+        record = record_edit.merge_into(raw, device_id=device, motion=None, placement=placement, site_id=site_id,
+                                        floor=floor)
         return record, self._kept_opened() or opened, motion.label
 
     @staticmethod
